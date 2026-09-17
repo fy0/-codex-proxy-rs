@@ -15,10 +15,20 @@ permissions:
 
 jobs:
   container:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
     env:
-      CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}
+      CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}-${{ matrix.arch }}
       # fork 仓库名可能不是合法镜像名（如前导 `-`），GHCR 名称固定用仓库 owner + 项目名。
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/codex-proxy-rs
       TRIVY_QUIET: 'true'
@@ -69,30 +79,28 @@ jobs:
           context: .
           file: deploy/Dockerfile
           target: runtime
+          platforms: ${{ matrix.platform }}
           load: true
           tags: |
             ${{ env.CPR_IMAGE }}
-            ${{ env.GHCR_IMAGE }}:sha-${{ inputs.ref }}
-            ${{ env.GHCR_IMAGE }}:edge
+            ${{ env.GHCR_IMAGE }}:sha-${{ inputs.ref }}-${{ matrix.arch }}
           no-cache-filters: |
             runtime-base
             runtime
-          cache-from: type=gha,scope=runtime-ci
-          cache-to: type=gha,mode=max,scope=runtime-ci
+          cache-from: type=gha,scope=runtime-ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=runtime-ci-${{ matrix.arch }}
 
       - name: Verify runtime image
         uses: ./.github/actions/verify-container
         with:
           image: ${{ env.CPR_IMAGE }}
-          platform: linux/amd64
-          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+          platform: ${{ matrix.platform }}
+          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
 
       - name: Push image to GHCR
         if: github.event_name == 'push'
         shell: bash
-        run: |
-          docker push "${GHCR_IMAGE}:sha-${{ inputs.ref }}"
-          docker push "${GHCR_IMAGE}:edge"
+        run: docker push "${GHCR_IMAGE}:sha-${{ inputs.ref }}-${{ matrix.arch }}"
 
       # 镜像 tar 无条件归档为制品，GHCR 推送失败时也有可用镜像。
       - name: Export image archive
@@ -101,7 +109,7 @@ jobs:
         shell: bash
         run: |
           if docker image inspect "${CPR_IMAGE}" >/dev/null 2>&1; then
-            docker save "${CPR_IMAGE}" | gzip > "${RUNNER_TEMP}/codex-proxy-rs-image.tar.gz"
+            docker save "${CPR_IMAGE}" | gzip > "${RUNNER_TEMP}/codex-proxy-rs-image-${{ matrix.arch }}.tar.gz"
             echo "saved=true" >> "$GITHUB_OUTPUT"
           else
             echo "saved=false" >> "$GITHUB_OUTPUT"
@@ -111,7 +119,28 @@ jobs:
         if: always() && steps.archive.outputs.saved == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: container-image-${{ inputs.ref }}
-          path: ${{ runner.temp }}/codex-proxy-rs-image.tar.gz
+          name: container-image-${{ inputs.ref }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/codex-proxy-rs-image-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+  # 把分架构 digest 合成一个多架构 tag，docker pull 时按客户端架构自动选层。
+  manifest:
+    needs: container
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/codex-proxy-rs
+    steps:
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Create multi-arch manifest
+        shell: bash
+        run: |
+          docker buildx imagetools create \
+            -t "${GHCR_IMAGE}:sha-${{ inputs.ref }}" \
+            -t "${GHCR_IMAGE}:edge" \
+            "${GHCR_IMAGE}:sha-${{ inputs.ref }}-amd64" \
+            "${GHCR_IMAGE}:sha-${{ inputs.ref }}-arm64"
