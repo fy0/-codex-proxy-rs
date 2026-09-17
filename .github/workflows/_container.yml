@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  packages: write
 
 jobs:
   container:
@@ -18,6 +19,8 @@ jobs:
     timeout-minutes: 45
     env:
       CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}
+      # fork 仓库名可能不是合法镜像名（如前导 `-`），GHCR 名称固定用仓库 owner + 项目名。
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/codex-proxy-rs
       TRIVY_QUIET: 'true'
       TRIVY_SKIP_VERSION_CHECK: 'true'
     steps:
@@ -55,6 +58,11 @@ jobs:
             }
           skip-extraction: ${{ steps.cargo-cache.outputs.cache-hit }}
 
+      # PR 上 GITHUB_TOKEN 没有 packages:write，只在 push 到默认分支时推 GHCR。
+      - name: Login to GHCR
+        if: github.event_name == 'push'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -62,7 +70,11 @@ jobs:
           file: deploy/Dockerfile
           target: runtime
           load: true
-          tags: ${{ env.CPR_IMAGE }}
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ env.CPR_IMAGE }}
+            ${{ env.GHCR_IMAGE }}:sha-${{ inputs.ref }}
+            ${{ env.GHCR_IMAGE }}:edge
           no-cache-filters: |
             runtime-base
             runtime
