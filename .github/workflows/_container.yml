@@ -70,7 +70,6 @@ jobs:
           file: deploy/Dockerfile
           target: runtime
           load: true
-          push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.CPR_IMAGE }}
             ${{ env.GHCR_IMAGE }}:sha-${{ inputs.ref }}
@@ -87,3 +86,32 @@ jobs:
           image: ${{ env.CPR_IMAGE }}
           platform: linux/amd64
           artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          docker push "${GHCR_IMAGE}:sha-${{ inputs.ref }}"
+          docker push "${GHCR_IMAGE}:edge"
+
+      # 镜像 tar 无条件归档为制品，GHCR 推送失败时也有可用镜像。
+      - name: Export image archive
+        id: archive
+        if: always()
+        shell: bash
+        run: |
+          if docker image inspect "${CPR_IMAGE}" >/dev/null 2>&1; then
+            docker save "${CPR_IMAGE}" | gzip > "${RUNNER_TEMP}/codex-proxy-rs-image.tar.gz"
+            echo "saved=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "saved=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload image artifact
+        if: always() && steps.archive.outputs.saved == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-image-${{ inputs.ref }}
+          path: ${{ runner.temp }}/codex-proxy-rs-image.tar.gz
+          if-no-files-found: error
+          retention-days: 14
