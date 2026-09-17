@@ -81,7 +81,7 @@ use crate::transport::protocol::responses::{
 use crate::transport::protocol::websocket::WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE;
 use crate::transport::request::{
     CodexRequestEncodeError, RequestAccountScope, align_structured_location_fields,
-    encode_generate_request, scope_request_to_account,
+    encode_generate_request, force_turn_state_override, scope_request_to_account,
 };
 use crate::transport::session::CodexSessionIdentity;
 use crate::transport::usage::normalize_service_tier;
@@ -513,6 +513,10 @@ impl Provider for CodexProvider {
             lease.installation_id(),
             account_scope,
         );
+        // 管理员配置的 turn state 覆盖值无视客户端输入与账号归属判定，无条件生效。
+        if let Some(turn_state) = lease.account().turn_state_override() {
+            force_turn_state_override(&mut upstream_request, turn_state);
+        }
         // 每次执行从原始请求编码，选定出口后再覆盖，避免换号时携带上次位置。
         if let Some(location) = lease
             .account()

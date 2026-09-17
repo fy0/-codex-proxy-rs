@@ -18,7 +18,7 @@ use crate::{
         accounts::{
             AccountConnectionTestEvent, AccountConnectionTestEventStream, AccountListQuery,
             AccountPageItem, AccountUpdateResult, AccountUsage, AccountUsageWindowQuery,
-            AccountsUpdateResult, BatchUpdateAccounts, UpdateAccount,
+            AccountsUpdateResult, BatchUpdateAccounts, SetAccountTurnStateOverride, UpdateAccount,
         },
         observability::TimeRange,
         provider_credentials::{
@@ -71,6 +71,13 @@ pub trait AccountsService: Send + Sync {
         &self,
         context: &MutationContext,
         command: UpdateAccount,
+    ) -> Result<AccountUpdateResult, AdminError>;
+
+    /// 仅修改账号级 turn state 强制覆盖；`None` 清除覆盖，不影响调度等其他设置。
+    async fn set_turn_state_override(
+        &self,
+        context: &MutationContext,
+        command: SetAccountTurnStateOverride,
     ) -> Result<AccountUpdateResult, AdminError>;
 
     async fn lower_concurrency_limit(
@@ -587,6 +594,42 @@ impl AccountsService for DefaultAccountsService {
             .await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(result)
+    }
+
+    async fn set_turn_state_override(
+        &self,
+        context: &MutationContext,
+        command: SetAccountTurnStateOverride,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        let account_id = ProviderAccountId::new(command.account_id.clone())
+            .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
+        let (_, provider) = self.provider_for_account(&account_id).await?;
+        let result = self
+            .accounts
+            .batch_update_accounts(
+                BatchUpdateAccounts {
+                    account_ids: vec![command.account_id],
+                    enabled: None,
+                    concurrency_limit: None,
+                    weight: None,
+                    model_access: None,
+                    group_ids: None,
+                    outbound_proxy: None,
+                    // 空值与显式清除统一经 nullif 落为 NULL。
+                    turn_state_override: Some(command.turn_state.unwrap_or_default()),
+                },
+                context,
+            )
+            .await
+            .map_err(|error| map_store_error(error, "provider account"))?;
+        provider
+            .account_facts_changed(std::slice::from_ref(&account_id))
+            .await;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(AccountUpdateResult {
+            config_revision: result.config_revision,
+            account_id,
+        })
     }
 
     async fn lower_concurrency_limit(

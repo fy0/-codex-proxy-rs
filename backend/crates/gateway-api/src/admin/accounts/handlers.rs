@@ -19,6 +19,10 @@ where
         .route("/api/admin/accounts/recover", post(recover_account::<S>))
         .route("/api/admin/accounts/rotate", post(rotate_account::<S>))
         .route("/api/admin/accounts/update", post(update_account::<S>))
+        .route(
+            "/api/admin/accounts/turn-state-override",
+            post(set_account_turn_state_override::<S>),
+        )
         .route("/api/admin/accounts/delete", post(delete_accounts::<S>))
         .route(
             "/api/admin/accounts/batch-update",
@@ -289,6 +293,27 @@ where
         .admin_services()
         .accounts()
         .update(&auth.context().mutation_context(), command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(UpdatedAccountData::from(result)),
+    ))
+}
+
+async fn set_account_turn_state_override<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountTurnStateOverrideRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let command = request.into_command().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .set_turn_state_override(&auth.context().mutation_context(), command)
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(

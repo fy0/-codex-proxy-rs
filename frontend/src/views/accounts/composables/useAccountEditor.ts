@@ -20,6 +20,7 @@ export function useAccountEditor(options: {
   const showEditModal = shallowRef(false)
   const editingAccountId = shallowRef<string | null>(null)
   const notes = shallowRef('')
+  const turnStateOverride = shallowRef('')
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
@@ -66,6 +67,7 @@ export function useAccountEditor(options: {
     configurationRequest.invalidate()
     editingAccountId.value = account.id
     notes.value = account.notes ?? ''
+    turnStateOverride.value = account.turnStateOverride ?? ''
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
@@ -114,6 +116,7 @@ export function useAccountEditor(options: {
       const settings = {
         accountId,
         notes: notes.value,
+        turnStateOverride: turnStateOverride.value.trim(),
         outboundProxyId: proxyMode.value === 'preserve' ? undefined : proxyMode.value === 'direct' ? '' : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
@@ -147,6 +150,7 @@ export function useAccountEditor(options: {
     configurationReady.value = false
     editingAccountId.value = null
     notes.value = ''
+    turnStateOverride.value = ''
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = true
@@ -163,6 +167,7 @@ export function useAccountEditor(options: {
     showEditModal,
     editingAccount,
     notes,
+    turnStateOverride,
     schedulingEnabled,
     concurrencyLimit,
     weight,

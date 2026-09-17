@@ -174,7 +174,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     account.quota_evidence, account.quota_access_observed_at,
                     account.quota_reset_at, account.last_error_reason,
                     account.last_error_message, account.credential_observed_at,
-                    account.created_at, account.updated_at,
+                    account.created_at, account.updated_at, account.turn_state_override,
                     settings.max_concurrent_per_account
                from account_group_accounts membership
                join provider_accounts account on account.id = membership.provider_account_id

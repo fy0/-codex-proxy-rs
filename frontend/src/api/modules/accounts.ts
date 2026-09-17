@@ -123,6 +123,7 @@ export interface Account {
   id: string
   name: string
   notes: string | null
+  turnStateOverride: string | null
   provider: string
   resourceRef: string
   email: string | null
@@ -377,6 +378,7 @@ interface AccountUpdateParam {
   outboundProxyId?: string
   accountId: string
   notes?: string
+  turnStateOverride?: string
   enabled: boolean
   concurrencyLimit: number | null
   weight: number
@@ -601,6 +603,14 @@ export function stopAccountImportTask(data: AccountImportTaskIdParam) {
 export function updateAccount(data: AccountUpdateParam) {
   return request<AccountUpdateResponse>({
     url: '/api/admin/accounts/update',
+    method: 'POST',
+    data,
+  })
+}
+
+export function setAccountTurnStateOverride(data: { accountId: string, turnStateOverride: string | null }) {
+  return request<AccountUpdateResponse>({
+    url: '/api/admin/accounts/turn-state-override',
     method: 'POST',
     data,
   })

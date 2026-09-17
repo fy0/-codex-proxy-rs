@@ -36,6 +36,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const turnStateOverride = defineModel<string>('turnStateOverride', { required: true })
 </script>
 
 <template>
@@ -84,6 +85,8 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         v-model:selected-group-ids="selectedGroupIds"
         v-model:proxy-mode="proxyMode"
         v-model:proxy-id="proxyId"
+        v-model:turn-state-override="turnStateOverride"
+        show-turn-state
         :groups="groups"
         :groups-loading="groupsLoading"
         :disabled="saving"

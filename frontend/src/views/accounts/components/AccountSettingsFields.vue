@@ -16,6 +16,7 @@ withDefaults(defineProps<{
   preserveProxy?: boolean
   preserveModelAccess?: boolean
   proxyError?: string
+  showTurnState?: boolean
 }>(), { preserveProxy: true })
 
 const modelAccess = defineModel<AccountModelAccess | undefined>('modelAccess', { required: true })
@@ -25,6 +26,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const turnStateOverride = defineModel<string>('turnStateOverride', { default: '' })
 </script>
 
 <template>
@@ -73,5 +75,13 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
       />
     </BaseFormItem>
     <AccountProxyField v-model:mode="proxyMode" v-model:proxy-id="proxyId" :preserve="preserveProxy" :error="proxyError" :endpoint="endpoint" :account-id="accountId" :disabled="disabled" />
+    <BaseFormItem v-if="showTurnState" label="自定义 x-codex-turn-state">
+      <BaseInput
+        v-model="turnStateOverride"
+        aria-label="自定义 x-codex-turn-state"
+        placeholder="留空不覆盖，填写后无条件强制覆盖该请求头"
+        :disabled="disabled"
+      />
+    </BaseFormItem>
   </div>
 </template>

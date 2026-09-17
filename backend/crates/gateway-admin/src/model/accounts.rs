@@ -98,6 +98,8 @@ pub struct AccountRecord {
     pub groups: Vec<AccountGroupRef>,
     pub name: String,
     pub notes: Option<String>,
+    /// 管理员配置的 x-codex-turn-state 强制覆盖；`None` 表示不覆盖。
+    pub turn_state_override: Option<String>,
     pub email: Option<String>,
     pub upstream_user_id: Option<String>,
     pub upstream_account_id: Option<String>,
@@ -238,6 +240,8 @@ pub struct UpdateAccount {
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+    /// `None` 保留原值；`Some("")` 清除覆盖。
+    pub turn_state_override: Option<String>,
 }
 
 /// 账号更新结果。
@@ -257,6 +261,15 @@ pub struct BatchUpdateAccounts {
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<gateway_core::routing::AccountGroupId>>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+    /// `None` 不修改；`Some("")` 清除覆盖。
+    pub turn_state_override: Option<String>,
+}
+
+/// 单账号 turn state 强制覆盖命令；`None` 清除覆盖。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetAccountTurnStateOverride {
+    pub account_id: String,
+    pub turn_state: Option<String>,
 }
 
 /// 批量账号更新结果。

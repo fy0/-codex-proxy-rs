@@ -114,7 +114,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                     access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
-                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
+                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at, turn_state_override
              from provider_accounts
              left join (select id as location_proxy_id, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
                on outbound_proxy_id = location_proxy_id
@@ -591,6 +591,14 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     update_provider_account_notes_in_transaction(&mut transaction, ids, notes)
                         .await?;
                 }
+                if let Some(turn_state) = settings.turn_state_override.as_deref() {
+                    update_provider_account_turn_state_in_transaction(
+                        &mut transaction,
+                        ids,
+                        turn_state,
+                    )
+                    .await?;
+                }
             }
             append_admin_audit_event_in_transaction(
                 &mut transaction,
@@ -645,6 +653,14 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     &mut transaction,
                     &command.account_ids,
                     notes,
+                )
+                .await?;
+            }
+            if let Some(turn_state) = command.turn_state_override.as_deref() {
+                update_provider_account_turn_state_in_transaction(
+                    &mut transaction,
+                    &command.account_ids,
+                    turn_state,
                 )
                 .await?;
             }
@@ -746,6 +762,23 @@ async fn update_provider_account_notes_in_transaction(
         .execute(&mut **transaction)
         .await
         .map_err(|_| postgres_unavailable("update provider account notes"))?;
+    Ok(())
+}
+
+/// 空串经 `nullif` 落为 NULL 表示清除覆盖；非空值由调用方完成合法性与长度校验。
+async fn update_provider_account_turn_state_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_ids: &[String],
+    turn_state: &str,
+) -> StoreResult<()> {
+    sqlx::query(
+        "update provider_accounts set turn_state_override = nullif($2, '') where id = any($1::text[])",
+    )
+    .bind(account_ids)
+    .bind(turn_state.trim())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| postgres_unavailable("update provider account turn state override"))?;
     Ok(())
 }
 

@@ -123,7 +123,7 @@ pub(crate) async fn load_admin_account_page(
                 a.credential_state, a.quota_access_state, a.quota_evidence,
                 a.quota_access_observed_at, a.quota_reset_at, a.last_error_reason,
                 a.last_error_message, a.credential_observed_at, a.created_at, a.updated_at,
-                filtered_total.filtered_total,
+                a.turn_state_override, filtered_total.filtered_total,
                 global_summary.summary_total, global_summary.summary_normal,
                 global_summary.summary_quota_exhausted, global_summary.summary_rate_limited,
                 global_summary.summary_disabled, global_summary.summary_error,

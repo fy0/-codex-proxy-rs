@@ -1176,6 +1176,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
         .update_account(
             UpdateAccount {
                 notes: None,
+                turn_state_override: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_terminal_mutation".to_owned(),
@@ -1257,6 +1258,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
     };
     let command = UpdateAccount {
         notes: None,
+        turn_state_override: None,
         model_access: Default::default(),
         account_id: "acct_proxy".to_owned(),
         enabled: true,
@@ -1330,6 +1332,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     let command = UpdateAccount {
         account_id: "acct_notes".to_owned(),
         notes: Some("  团队备用\n下月续费  ".to_owned()),
+        turn_state_override: None,
         enabled: true,
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
@@ -1369,6 +1372,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                turn_state_override: None,
                 account_ids: vec!["acct_notes".to_owned()],
                 enabled: Some(false),
                 concurrency_limit: Some(None),
@@ -1479,6 +1483,7 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
             UpdateAccount {
                 account_id: "acct_notes".to_owned(),
                 notes: Some("备".repeat(501)),
+                turn_state_override: None,
                 enabled: false,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
@@ -1678,6 +1683,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
         .batch_update_accounts(
             BatchUpdateAccounts {
                 model_access: Default::default(),
+                turn_state_override: None,
                 outbound_proxy: None,
                 account_ids: account_ids.clone(),
                 enabled: Some(false),
@@ -1715,6 +1721,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
         .batch_update_accounts(
             BatchUpdateAccounts {
                 model_access: Default::default(),
+                turn_state_override: None,
                 outbound_proxy: None,
                 account_ids: account_ids.clone(),
                 enabled: Some(true),
@@ -2435,6 +2442,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
     let revision = repository
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
             notes: None,
+            turn_state_override: None,
             model_access: Default::default(),
             outbound_proxy: None,
             account_ids: vec!["acct_admin_a".to_owned()],
@@ -2504,6 +2512,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
     let settings = UpdateAccount {
         account_id: ACCOUNT_ID.to_owned(),
         notes: Some("统一保存".to_owned()),
+        turn_state_override: None,
         enabled: false,
         concurrency_limit: Some(AccountConcurrencyLimit::new(3).unwrap()),
         weight: AccountWeight::new(7).unwrap(),
@@ -3140,6 +3149,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
         .update_account(
             UpdateAccount {
                 notes: None,
+                turn_state_override: None,
                 model_access: Default::default(),
                 account_id: id.as_str().to_owned(),
                 enabled: true,
@@ -3328,6 +3338,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     .expect("policy");
     let store = admin_account_store(&database.pool);
     let command = BatchUpdateAccounts {
+        turn_state_override: None,
         account_ids: vec![input.id.clone()],
         enabled: None,
         concurrency_limit: None,

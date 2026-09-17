@@ -147,6 +147,7 @@ impl BatchUpdateAccountsRequest {
                 .as_deref()
                 .map(validate_wire_group_ids)
                 .transpose()?,
+            turn_state_override: None,
         })
     }
 }
@@ -270,6 +271,8 @@ pub struct AccountView {
     pub id: String,
     pub name: String,
     pub notes: Option<String>,
+    /// 管理员配置的 x-codex-turn-state 强制覆盖；`null` 表示不覆盖。
+    pub turn_state_override: Option<String>,
     pub provider: String,
     pub groups: Vec<AccountGroupRefView>,
     pub resource_ref: String,

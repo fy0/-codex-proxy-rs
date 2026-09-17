@@ -364,7 +364,8 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 更新指定 OpenAI 账号的 OAuth token 或 API Key 上游设置 |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, turnStateOverride?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
+| `POST` | `/api/admin/accounts/turn-state-override` | `{ accountId, turnStateOverride }` | 单独设置账号级 `x-codex-turn-state` 强制覆盖；`null` 或空白串清除，非空值须为合法 HTTP header 值（≤1024 字节） |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |

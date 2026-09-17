@@ -561,6 +561,31 @@ pub(crate) fn scope_request_to_account(
     request.turn_metadata = turn_metadata;
 }
 
+/// 管理员配置的账号级 turn state 强制覆盖：无视客户端值与账号归属判定，
+/// 无条件重写 header 事实、passthrough 头、正文顶层别名与 client_metadata，
+/// 保证 HTTP 与 WebSocket 上游看到同一值。
+pub(crate) fn force_turn_state_override(request: &mut CodexResponsesRequest, value: &str) {
+    request.turn_state = Some(value.to_owned());
+    // passthrough 头在发送期最后追加，必须移除客户端原值才不会盖回覆盖值。
+    request.passthrough_headers.remove("x-codex-turn-state");
+    for key in ["turnState", "turn_state", "x-codex-turn-state"] {
+        if request.body().contains_key(key) {
+            request
+                .body_mut()
+                .insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    let mut metadata = match request.client_metadata() {
+        Some(Value::Object(metadata)) => metadata.clone(),
+        _ => Map::new(),
+    };
+    metadata.insert(
+        "x-codex-turn-state".to_owned(),
+        Value::String(value.to_owned()),
+    );
+    request.set_client_metadata(Some(Value::Object(metadata)));
+}
+
 fn metadata_string(request: &CodexResponsesRequest, key: &str) -> Option<String> {
     request
         .client_metadata()?

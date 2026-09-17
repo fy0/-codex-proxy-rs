@@ -14,6 +14,19 @@ fn validate_account_notes(notes: Option<&str>) -> Result<(), WireValidationError
     Ok(())
 }
 
+/// 覆盖值会写入上游 header；必须是合法 HeaderValue 且长度受限，空白串视为清除。
+fn validate_turn_state_override(value: Option<&str>) -> Result<(), WireValidationError> {
+    if let Some(value) = value {
+        let trimmed = value.trim();
+        if trimmed.len() > 1024
+            || (!trimmed.is_empty() && HeaderValue::from_str(trimmed).is_err())
+        {
+            return Err(WireValidationError::new("turnStateOverride"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AccountProvider {
     OpenAi,
@@ -218,6 +231,8 @@ pub struct UpdateAccountRequest {
     pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
     pub account_id: String,
     pub notes: Option<String>,
+    /// `None` 保留原值；`Some("")` 或空白串清除覆盖。
+    pub turn_state_override: Option<String>,
     pub enabled: bool,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub concurrency_limit: Option<u64>,
@@ -230,6 +245,7 @@ impl UpdateAccountRequest {
     pub fn validate(&self) -> Result<(), WireValidationError> {
         require_account_id(&self.account_id, "accountId")?;
         validate_account_notes(self.notes.as_deref())?;
+        validate_turn_state_override(self.turn_state_override.as_deref())?;
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
@@ -245,11 +261,41 @@ impl UpdateAccountRequest {
             )?,
             account_id: self.account_id,
             notes: self.notes,
+            turn_state_override: self.turn_state_override,
             enabled: self.enabled,
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,
             model_access: self.model_access,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
+        })
+    }
+}
+
+/// 单账号 turn state 强制覆盖请求；`turnStateOverride` 必填，`null` 或空白串清除覆盖。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountTurnStateOverrideRequest {
+    pub account_id: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    pub turn_state_override: Option<String>,
+}
+
+fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+impl AccountTurnStateOverrideRequest {
+    pub(super) fn into_command(
+        self,
+    ) -> Result<SetAccountTurnStateOverride, WireValidationError> {
+        require_account_id(&self.account_id, "accountId")?;
+        validate_turn_state_override(self.turn_state_override.as_deref())?;
+        Ok(SetAccountTurnStateOverride {
+            account_id: self.account_id,
+            turn_state: self.turn_state_override,
         })
     }
 }

@@ -745,6 +745,7 @@ pub struct ProviderAccount {
     has_refresh_token: bool,
     outbound_proxy: Option<super::OutboundProxy>,
     request_location: Option<super::RequestLocation>,
+    turn_state_override: Option<String>,
 }
 
 impl ProviderAccount {
@@ -782,6 +783,7 @@ impl ProviderAccount {
             has_refresh_token: false,
             outbound_proxy: None,
             request_location: None,
+            turn_state_override: None,
         }
     }
 
@@ -831,6 +833,18 @@ impl ProviderAccount {
     #[must_use]
     pub const fn request_location(&self) -> Option<&super::RequestLocation> {
         self.request_location.as_ref()
+    }
+
+    /// 管理员配置的 x-codex-turn-state 强制覆盖；Provider 自行决定是否应用。
+    #[must_use]
+    pub fn with_turn_state_override(mut self, value: Option<String>) -> Self {
+        self.turn_state_override = value;
+        self
+    }
+
+    #[must_use]
+    pub fn turn_state_override(&self) -> Option<&str> {
+        self.turn_state_override.as_deref()
     }
 
     #[must_use]
