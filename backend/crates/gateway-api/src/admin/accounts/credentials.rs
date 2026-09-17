@@ -18,8 +18,7 @@ fn validate_account_notes(notes: Option<&str>) -> Result<(), WireValidationError
 fn validate_turn_state_override(value: Option<&str>) -> Result<(), WireValidationError> {
     if let Some(value) = value {
         let trimmed = value.trim();
-        if trimmed.len() > 1024
-            || (!trimmed.is_empty() && HeaderValue::from_str(trimmed).is_err())
+        if trimmed.len() > 1024 || (!trimmed.is_empty() && HeaderValue::from_str(trimmed).is_err())
         {
             return Err(WireValidationError::new("turnStateOverride"));
         }
@@ -288,9 +287,7 @@ where
 }
 
 impl AccountTurnStateOverrideRequest {
-    pub(super) fn into_command(
-        self,
-    ) -> Result<SetAccountTurnStateOverride, WireValidationError> {
+    pub(super) fn into_command(self) -> Result<SetAccountTurnStateOverride, WireValidationError> {
         require_account_id(&self.account_id, "accountId")?;
         validate_turn_state_override(self.turn_state_override.as_deref())?;
         Ok(SetAccountTurnStateOverride {
