@@ -39,6 +39,7 @@ fn source_tree_should_match_frozen_machine_manifest() {
         "src/admin/accounts/import_tasks.rs",
         "src/admin/accounts/mod.rs",
         "src/admin/accounts/presenter.rs",
+        "src/admin/accounts/turn_state.rs",
         "src/admin/accounts/wire.rs",
         "src/admin/auth.rs",
         "src/admin/backups.rs",
