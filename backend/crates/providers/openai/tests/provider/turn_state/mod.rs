@@ -390,6 +390,7 @@ async fn missing_header_invalid_token_and_transport_error_remain_distinct() {
 #[tokio::test]
 async fn probes_default_to_account_proxy_and_respect_selected_pool() {
     use gateway_core::account::OutboundProxy;
+    let upstream = MockServer::start().await;
     let own = MockServer::start().await;
     let extra_a = MockServer::start().await;
     let extra_b = MockServer::start().await;
@@ -403,7 +404,7 @@ async fn probes_default_to_account_proxy_and_respect_selected_pool() {
     seed(&store, false).await;
     let own_proxy = OutboundProxy::parse(&own.uri()).unwrap();
     store.set_egress("acct_turn_probe", Some(own_proxy.clone()), None);
-    cycle(Arc::clone(&store), "http://probe.invalid".to_owned()).await;
+    cycle(Arc::clone(&store), upstream.uri()).await;
     assert_eq!(own.received_requests().await.unwrap().len(), 1);
     assert_eq!(store.turn_observations()[0].egress, own_proxy.endpoint());
     let proxy_a = OutboundProxy::parse(&extra_a.uri()).unwrap();
@@ -420,7 +421,7 @@ async fn probes_default_to_account_proxy_and_respect_selected_pool() {
             ..TurnStateConfig::default()
         },
     );
-    cycle(Arc::clone(&store), "http://probe.invalid".to_owned()).await;
+    cycle(Arc::clone(&store), upstream.uri()).await;
     assert_eq!(own.received_requests().await.unwrap().len(), 1);
     assert_eq!(
         extra_a.received_requests().await.unwrap().len()
@@ -430,4 +431,5 @@ async fn probes_default_to_account_proxy_and_respect_selected_pool() {
     assert!(
         [proxy_a.endpoint(), proxy_b.endpoint()].contains(&store.turn_observations()[1].egress)
     );
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 }
