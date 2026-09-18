@@ -623,7 +623,9 @@ async fn read_model_catalog_body(response: ReqwestResponse) -> CodexClientResult
 }
 
 fn websocket_connection_profile(headers: &HeaderMap) -> String {
-    ["originator", "user-agent", X_OPENAI_MEMGEN_REQUEST_HEADER]
+    // turn-state 在握手头中发送且连接级绑定；纳入画像防止账号覆盖值变更后
+    // 复用到携带旧握手状态的池化连接。逐轮值仍由帧 metadata 覆盖。
+    ["originator", "user-agent", X_OPENAI_MEMGEN_REQUEST_HEADER, "x-codex-turn-state"]
         .map(|name| {
             headers
                 .get(name)
