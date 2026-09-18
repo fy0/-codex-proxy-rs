@@ -1,5 +1,7 @@
 //! 从真实初始化、worker 到业务转发的离线协议回归。
 
+mod service;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use chrono::Utc;
 use futures::StreamExt;
@@ -27,16 +29,24 @@ use crate::{
 };
 
 fn token(size: usize) -> String {
+    token_at(size, Utc::now().timestamp())
+}
+
+fn token_at(size: usize, issued_at: i64) -> String {
     let mut bytes = vec![0; size];
     bytes[0] = 0x80;
-    bytes[1..9].copy_from_slice(&(Utc::now().timestamp() as u64).to_be_bytes());
+    bytes[1..9].copy_from_slice(&(issued_at as u64).to_be_bytes());
     URL_SAFE.encode(bytes)
 }
 
 async fn seed(store: &MemoryAccountStore, expired: bool) {
+    seed_named(store, expired, "acct_turn_probe").await;
+}
+
+async fn seed_named(store: &MemoryAccountStore, expired: bool, id: &str) {
     store
         .seed_oauth_credential(ImportCodexOAuthCredential {
-            account_id: "acct_turn_probe".to_owned(),
+            account_id: id.to_owned(),
             name: "probe".to_owned(),
             secret: CodexOAuthSecret {
                 access_token: SecretString::from("test-only-access"),
@@ -59,7 +69,7 @@ async fn seed(store: &MemoryAccountStore, expired: bool) {
         })
         .await;
     store.seed_turn_state(
-        "acct_turn_probe",
+        id,
         "gpt-5.4",
         TurnStateConfig {
             enabled: true,

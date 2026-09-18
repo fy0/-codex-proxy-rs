@@ -445,8 +445,15 @@ struct ProviderErrorUpstreamValues {
     request_id: Option<OpaqueUpstreamValue>,
 }
 
+/// 本地无可用账号错误的可公开原因，不改变错误分类与重试边界。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoEligibleAccountReason {
+    MissingTurnState,
+}
+
 #[derive(Clone, Default)]
 struct ProviderErrorFailureObservation {
+    no_eligible_account_reason: Option<NoEligibleAccountReason>,
     continuation_unavailable_reason: Option<&'static str>,
     connection: Option<ProviderConnectionObservation>,
 }
@@ -455,6 +462,20 @@ struct ProviderErrorFailureObservation {
 struct AtomicClientEvents(Vec<ProviderEvent>);
 
 impl ProviderError {
+    /// 保留选号时的结构化原因，客户端消息不依赖诊断字符串反推。
+    #[must_use]
+    pub fn with_no_eligible_account_reason(mut self, reason: NoEligibleAccountReason) -> Self {
+        self.failure_observation_mut().no_eligible_account_reason = Some(reason);
+        self
+    }
+
+    #[must_use]
+    pub fn no_eligible_account_reason(&self) -> Option<NoEligibleAccountReason> {
+        self.failure_observation
+            .as_ref()
+            .and_then(|observation| observation.no_eligible_account_reason)
+    }
+
     /// 创建 Provider 错误。
     #[must_use]
     pub const fn new(kind: ProviderErrorKind, send_state: UpstreamSendState) -> Self {
@@ -1097,7 +1118,13 @@ impl GatewayError {
             ),
             ProviderErrorKind::NoEligibleAccount => Self::new(
                 GatewayErrorKind::NoAvailableProvider,
-                "no upstream provider is currently available for this request",
+                if error.no_eligible_account_reason()
+                    == Some(NoEligibleAccountReason::MissingTurnState)
+                {
+                    "no upstream account is currently available: waiting for a valid installed turn state for the requested model"
+                } else {
+                    "no upstream provider is currently available for this request"
+                },
             ),
             ProviderErrorKind::ProviderInfrastructureUnavailable => Self::new(
                 GatewayErrorKind::ProviderInfrastructureUnavailable,

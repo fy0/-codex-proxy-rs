@@ -9,7 +9,7 @@ use gateway_core::account::{
     AccountCandidate, AccountCapacitySnapshot, AccountEligibilityPolicy, AccountErrorReason,
     AccountFeedbackStats, AccountRuntimeSignals, AccountSchedulingBlocker, AccountSelectionContext,
     AccountSelector, AccountStatus, CredentialState, PreferredAccountSelection, ProviderAccount,
-    ProviderAccountId, QuotaEvidence,
+    ProviderAccountId, QuotaEvidence, TurnStateBucket,
 };
 use gateway_core::concurrency::{CapacityWait, ConcurrencyWaitQueue, QueueRejection};
 use gateway_core::engine::{AttemptContext, ContinuationAttempt};
@@ -141,6 +141,7 @@ enum AffinityEscapeReason {
     HigherPriority,
     PinnedAccount,
     SelectionInvariant,
+    MissingTurnState,
 }
 
 impl AffinityEscapeReason {
@@ -153,6 +154,7 @@ impl AffinityEscapeReason {
             Self::HigherPriority => "higher_priority",
             Self::PinnedAccount => "pinned_account",
             Self::SelectionInvariant => "selection_invariant",
+            Self::MissingTurnState => "missing_turn_state",
         }
     }
 }
@@ -213,6 +215,9 @@ impl AffinitySelection {
             }
             PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LowerWeight) => {
                 self.escape(AffinityEscapeReason::HigherPriority);
+            }
+            PreferredAccountSelection::Blocked(AccountSchedulingBlocker::MissingTurnState) => {
+                self.escape(AffinityEscapeReason::MissingTurnState);
             }
             PreferredAccountSelection::Blocked(
                 AccountSchedulingBlocker::LocalAvailability
@@ -426,6 +431,19 @@ impl CodexCredentialSelector {
                 .iter()
                 .map(|account| account.id().clone())
                 .collect::<Vec<_>>();
+            // 批量读取同桶事实；读取失败不能按默认允许绕过严格策略。
+            let mut turn_states: HashMap<_, _> = if let Some(model) = upstream_model {
+                self.repository
+                    .store()
+                    .turn_state_buckets_for_model(&account_ids, model)
+                    .await
+                    .map_err(|_| CredentialSelectionError::Store)?
+                    .into_iter()
+                    .map(|bucket| (bucket.account_id.clone(), bucket))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
             let scheduling = self
                 .leases
                 .load_state(
@@ -441,11 +459,12 @@ impl CodexCredentialSelector {
                     let health = self
                         .account_feedback
                         .scheduling_signals(&self.provider_kind, account.id());
-                    let signals = scheduling
+                    let mut signals = scheduling
                         .signals()
                         .get(account.id())
                         .cloned()
                         .unwrap_or(AccountRuntimeSignals {
+                            turn_state: Default::default(),
                             in_flight: 0,
                             last_started_at: None,
                             quota_reset_at: None,
@@ -457,6 +476,16 @@ impl CodexCredentialSelector {
                         .with_provider_quota(self.quota.scheduling_signals(&account))
                         .with_rate_limit(rate_limits.get(account.id()).copied().flatten())
                         .with_runtime_health(health.0, health.1);
+                    signals.turn_state = turn_states.get(account.id().as_str()).map_or_else(
+                        Default::default,
+                        |bucket| {
+                            bucket.scheduling_availability(
+                                &account,
+                                upstream_model.unwrap_or_default(),
+                                chrono::Utc::now().timestamp(),
+                            )
+                        },
+                    );
                     AccountCandidate { account, signals }
                 })
                 .collect::<Vec<_>>();
@@ -584,6 +613,19 @@ impl CodexCredentialSelector {
                         Some(retry_after) => Err(CredentialSelectionError::CapacityUnavailable {
                             retry_after: Some(retry_after),
                         }),
+                        None if !diagnostic
+                            && candidates.iter().any(|candidate| {
+                                !base_excluded.contains(candidate.account.id())
+                                    && candidate
+                                        .account
+                                        .status_projection(context.now, candidate.signals.cooldown)
+                                        .status
+                                        == AccountStatus::Normal
+                                    && !candidate.signals.turn_state.allows(context.now)
+                            }) =>
+                        {
+                            Err(CredentialSelectionError::MissingTurnState)
+                        }
                         None => Err(CredentialSelectionError::NoEligibleCredential),
                     };
                 };
@@ -709,6 +751,7 @@ impl CodexCredentialSelector {
                         }
                         return Ok(CodexCredentialLease {
                             installation_id: runtime.installation_id,
+                            turn_state: turn_states.remove(account.id().as_str()),
                             account,
                             authentication: runtime.authentication,
                             cookies,
@@ -1291,6 +1334,9 @@ fn affinity_selection_for_bound_account(
     else {
         return AffinitySelection::escaped(account_id, AffinityEscapeReason::HardUnavailable);
     };
+    if !candidate.signals.turn_state.allows(now) {
+        return AffinitySelection::escaped(account_id, AffinityEscapeReason::MissingTurnState);
+    }
     match candidate
         .account
         .status_projection(now, candidate.signals.cooldown)
@@ -1354,6 +1400,7 @@ impl fmt::Debug for CodexCredentialSelector {
 
 pub struct CodexCredentialLease {
     account: ProviderAccount,
+    turn_state: Option<TurnStateBucket>,
     authentication: CodexRuntimeAuthentication,
     cookies: Vec<RuntimeCodexCookie>,
     installation_id: String,
@@ -1366,6 +1413,10 @@ pub struct CodexCredentialLease {
 }
 
 impl CodexCredentialLease {
+    pub(crate) fn turn_state(&self) -> Option<&TurnStateBucket> {
+        self.turn_state.as_ref()
+    }
+
     #[must_use]
     pub const fn account(&self) -> &ProviderAccount {
         &self.account
@@ -1450,6 +1501,8 @@ pub enum CredentialSelectionError {
     QueueRejected(#[from] QueueRejection),
     #[error("no eligible Codex account")]
     NoEligibleCredential,
+    #[error("no eligible Codex account: waiting for a valid installed turn state")]
+    MissingTurnState,
     #[error("Codex account capacity is unavailable")]
     CapacityUnavailable { retry_after: Option<Duration> },
     #[error("Codex account data is invalid")]

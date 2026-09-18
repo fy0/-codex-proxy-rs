@@ -469,10 +469,36 @@ impl AccountsService for DefaultAccountsService {
         if let Some(id) = account_id {
             ProviderAccountId::new(id).map_err(|_| AdminError::invalid("账号 ID 不合法"))?;
         }
-        self.accounts
+        let mut statuses = self
+            .accounts
             .turn_state_status(account_id)
             .await
-            .map_err(|error| map_store_error(error, "turn state status"))
+            .map_err(|error| map_store_error(error, "turn state status"))?;
+        let mut accounts = BTreeMap::new();
+        for status in &mut statuses {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                accounts.entry(status.account_id.clone())
+            {
+                let id = ProviderAccountId::new(status.account_id.clone())
+                    .map_err(|_| AdminError::invalid("账号 ID 不合法"))?;
+                entry.insert(self.load_account(&id).await?);
+            }
+            let account = &accounts[&status.account_id];
+            status.account_enabled = account.account.enabled;
+            status.active &= status.account_enabled;
+            use gateway_core::account::{AccountStatus, TurnStateBusinessStatus};
+            status.business_status = match account.projection.status {
+                AccountStatus::Disabled => TurnStateBusinessStatus::ManualDisabled,
+                AccountStatus::Error => TurnStateBusinessStatus::AccountError,
+                AccountStatus::QuotaExhausted => TurnStateBusinessStatus::QuotaExhausted,
+                AccountStatus::RateLimited => TurnStateBusinessStatus::RateLimited,
+                AccountStatus::Normal if !account.account.model_access.allows(&status.model) => {
+                    TurnStateBusinessStatus::ModelDenied
+                }
+                AccountStatus::Normal => status.business_status,
+            };
+        }
+        Ok(statuses)
     }
 
     async fn configure_turn_state(

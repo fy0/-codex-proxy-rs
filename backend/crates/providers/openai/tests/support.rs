@@ -52,6 +52,20 @@ pub(crate) struct MemoryAccountStore {
 }
 
 impl MemoryAccountStore {
+    pub(crate) fn set_enabled(&self, id: &str, enabled: bool) {
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .unwrap();
+        stored.account = stored.account.clone().with_account_facts(
+            enabled,
+            stored.account.credential_state(),
+            stored.account.quota(),
+            stored.account.last_error_reason(),
+            stored.account.last_error_message().map(str::to_owned),
+        );
+    }
+
     pub(crate) fn seed_turn_proxy(&self, id: &str, proxy: gateway_core::account::OutboundProxy) {
         self.turn_proxies
             .lock()
@@ -337,6 +351,12 @@ impl ProviderAccountStore for MemoryAccountStore {
         account: &ProviderAccountId,
         model: &str,
     ) -> Result<bool, StoreError> {
+        if self
+            .account(account.as_str())
+            .is_none_or(|account| !account.enabled())
+        {
+            return Ok(false);
+        }
         let mut states = self.turn_states.lock().unwrap();
         let Some(state) = states.get_mut(&(account.as_str().to_owned(), model.to_owned())) else {
             return Ok(false);
@@ -805,6 +825,7 @@ impl ProviderLeasePort for TestLeaseCoordinator {
                     (
                         account,
                         AccountRuntimeSignals {
+                            turn_state: Default::default(),
                             in_flight: 0,
                             last_started_at: None,
                             quota_reset_at: None,

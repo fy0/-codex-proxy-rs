@@ -16,7 +16,8 @@ mod selection;
 mod store;
 mod turn_state;
 pub use turn_state::{
-    TurnStateBucket, TurnStateConfig, TurnStateInstallation, TurnStateObservation, TurnStateStatus,
+    MissingTurnStatePolicy, TurnStateAvailability, TurnStateBucket, TurnStateBusinessStatus,
+    TurnStateConfig, TurnStateInstallation, TurnStateObservation, TurnStateStatus,
     TurnStateStopStrategy, TurnStateToken,
 };
 

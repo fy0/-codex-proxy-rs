@@ -1,5 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
-use gateway_core::account::{TurnStateConfig, TurnStateObservation, TurnStateToken};
+use gateway_core::account::{
+    MissingTurnStatePolicy, TurnStateBusinessStatus, TurnStateConfig, TurnStateObservation,
+    TurnStateToken,
+};
 
 use super::*;
 
@@ -73,6 +76,13 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
         }
     }
     let id = ProviderAccountId::new("acct_turn_a").unwrap();
+    let selected = repository
+        .turn_state_buckets_for_model(std::slice::from_ref(&id), "model-a")
+        .await
+        .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].account_id, id.as_str());
+    assert_eq!(selected[0].model, "model-a");
     admin
         .request_turn_state_probe(&id, "manual-model", &context)
         .await
@@ -265,6 +275,14 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         actor: MutationActor::System,
         request_id: "manual-apply-test".to_owned(),
     };
+    let strict = TurnStateConfig {
+        missing_state_policy: MissingTurnStatePolicy::Pause,
+        ..TurnStateConfig::default()
+    };
+    admin
+        .configure_turn_state(&id, "model-a", strict.clone(), &context)
+        .await
+        .unwrap();
     let issued = Utc::now().timestamp() - 60;
     repository
         .observe_turn_state(
@@ -283,6 +301,10 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
     assert_eq!(status.candidate_length, Some(292));
     assert!(!status.config.enabled);
     assert!(!status.active);
+    assert_eq!(
+        status.business_status,
+        TurnStateBusinessStatus::WaitingForState
+    );
     assert!(
         admin
             .apply_turn_state(&id, "model-b", issued, &context)
@@ -307,11 +329,73 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         .pop()
         .unwrap();
     assert!(status.active);
+    assert_eq!(status.business_status, TurnStateBusinessStatus::Ready);
     assert!(status.manual_override);
     assert!(!status.config.enabled);
     assert!(status.next_probe_at.is_none());
     assert!(status.candidate_issued_at.is_none());
     assert_eq!(status.installations.len(), 1);
+    admin
+        .configure_turn_state(&id, "model-a", strict, &context)
+        .await
+        .unwrap();
+    let configured = repository
+        .turn_state_bucket(&id, "model-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(configured.installed_token(Utc::now().timestamp()).is_some());
+    assert!(configured.manual_override);
+    assert!(!configured.config.enabled);
+    for outcome in ["length_miss", "missing_header", "transport_error"] {
+        let mut miss = observation(id.as_str(), "model-a", 312, issued + 1);
+        miss.outcome = outcome.to_owned();
+        repository.observe_turn_state(miss, None).await.unwrap();
+        assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
+        let retained = repository
+            .turn_state_bucket(&id, "model-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained
+                .installed_token(Utc::now().timestamp())
+                .unwrap()
+                .issued_at,
+            issued
+        );
+    }
+    sqlx::query("update provider_accounts set enabled = false where id = $1")
+        .bind(id.as_str())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let disabled = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(!disabled.account_enabled);
+    assert_eq!(
+        disabled.business_status,
+        TurnStateBusinessStatus::ManualDisabled
+    );
+    repository.turn_state_buckets().await.unwrap();
+    assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
+    assert!(
+        !repository
+            .get_account(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled()
+    );
+    sqlx::query("update provider_accounts set enabled = true where id = $1")
+        .bind(id.as_str())
+        .execute(&database.pool)
+        .await
+        .unwrap();
     assert!(
         admin
             .apply_turn_state(&id, "model-a", issued, &context)
@@ -319,6 +403,19 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
             .is_err()
     );
     let expired = Utc::now().timestamp() - 3600;
+    sqlx::query("update account_turn_states set turn_state_override = $2, current_issued_at = $3 where account_id = $1")
+        .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(!status.active);
+    assert_eq!(
+        status.business_status,
+        TurnStateBusinessStatus::WaitingForState
+    );
     sqlx::query("update account_turn_states set candidate = $2, candidate_issued_at = $3, current_issued_at = null, turn_state_override = null where account_id = $1")
         .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
     assert!(

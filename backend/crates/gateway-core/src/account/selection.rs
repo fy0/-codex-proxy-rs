@@ -101,6 +101,7 @@ impl AccountSelectionPolicy {
 /// Store 提供并发事实，Provider 叠加自己解释的额度事实；全部信号均可重建。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRuntimeSignals {
+    pub turn_state: super::TurnStateAvailability,
     pub in_flight: u32,
     pub last_started_at: Option<SystemTime>,
     pub quota_reset_at: Option<SystemTime>,
@@ -437,6 +438,7 @@ pub enum AccountSchedulingBlocker {
     OutsideClientScope,
     LocalAvailability,
     Excluded,
+    MissingTurnState,
     ConcurrencyLimit,
     RequestInterval,
     LowerWeight,
@@ -491,6 +493,7 @@ impl AccountSelector {
                         AccountSchedulingBlocker::OutsideClientScope
                             | AccountSchedulingBlocker::LocalAvailability
                             | AccountSchedulingBlocker::Excluded
+                            | AccountSchedulingBlocker::MissingTurnState
                     )
                 )
             })
@@ -662,6 +665,11 @@ impl AccountSelector {
         }
         if context.excluded_accounts.contains(candidate.account.id()) {
             return Some(AccountSchedulingBlocker::Excluded);
+        }
+        if !context.eligibility.bypasses_local_eligibility()
+            && !candidate.signals.turn_state.allows(context.now)
+        {
+            return Some(AccountSchedulingBlocker::MissingTurnState);
         }
         if candidate.signals.in_flight
             >= candidate

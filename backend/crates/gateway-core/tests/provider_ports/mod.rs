@@ -88,6 +88,7 @@ fn scheduling_state_preserves_provider_neutral_signals() {
     let signals = BTreeMap::from([(
         account.clone(),
         AccountRuntimeSignals {
+            turn_state: Default::default(),
             in_flight: 2,
             last_started_at: None,
             quota_reset_at: None,

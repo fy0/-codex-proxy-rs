@@ -83,7 +83,13 @@ async function save() {
           <BaseInput v-model="model" :disabled="saving || existing" maxlength="256" aria-label="模型" />
         </BaseFormItem>
       </div>
-      <BaseSwitch v-model="config.enabled" label="启用自动轮换" show-label :disabled="saving" />
+      <BaseSwitch v-model="config.enabled" label="启用自动探测" show-label :disabled="saving" />
+      <BaseFormItem label="无票调度策略">
+        <BaseSelect v-model="config.missingStatePolicy" :options="[{ label: '继续调度', value: 'allow' }, { label: '暂停业务调度', value: 'pause' }]" aria-label="无票调度策略" :disabled="saving" />
+      </BaseFormItem>
+      <p v-if="config.missingStatePolicy === 'pause' && !config.enabled" role="status" class="m-0 text-cp-sm text-cp-warning-text">
+        自动探测已关闭，缺票时需要手动探测并应用 state 才能恢复业务调度。
+      </p>
       <BaseFormItem label="探测中断策略">
         <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }]" aria-label="探测中断策略" :disabled="saving" />
       </BaseFormItem>

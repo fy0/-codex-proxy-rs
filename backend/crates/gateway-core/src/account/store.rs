@@ -50,6 +50,21 @@ pub trait ProviderAccountStore: Send + Sync {
         Err(StoreError::new(crate::error::StoreErrorKind::Unavailable))
     }
 
+    /// 业务选号按已授权账号与实际上游模型批量读取，避免逐账号数据库往返。
+    async fn turn_state_buckets_for_model(
+        &self,
+        accounts: &[ProviderAccountId],
+        model: &str,
+    ) -> Result<Vec<super::TurnStateBucket>, StoreError> {
+        let mut buckets = Vec::new();
+        for account in accounts {
+            if let Some(bucket) = self.turn_state_bucket(account, model).await? {
+                buckets.push(bucket);
+            }
+        }
+        Ok(buckets)
+    }
+
     /// 在同一事务内检查候选寿命、配置与严格签发时间门，并写入安装历史。
     async fn install_turn_state(
         &self,

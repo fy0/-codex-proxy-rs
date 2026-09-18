@@ -13,6 +13,15 @@ fn loaded_credential_from_record(
 
 #[async_trait]
 impl ProviderAccountStore for PgProviderAccountRepository {
+    async fn turn_state_buckets_for_model(
+        &self,
+        accounts: &[CoreProviderAccountId],
+        model: &str,
+    ) -> Result<Vec<gateway_core::account::TurnStateBucket>, CoreStoreError> {
+        self.load_turn_state_buckets_for_model(accounts, model)
+            .await
+    }
+
     async fn claim_turn_state_probe(
         &self,
         account: &CoreProviderAccountId,

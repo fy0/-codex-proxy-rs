@@ -47,6 +47,7 @@ fn candidate(id: &str, in_flight: u32, remaining: Option<u64>) -> AccountCandida
     AccountCandidate {
         account: account(id),
         signals: AccountRuntimeSignals {
+            turn_state: Default::default(),
             in_flight,
             last_started_at: None,
             quota_reset_at: None,
@@ -220,6 +221,7 @@ fn diagnostic_selection_bypasses_all_local_account_eligibility() {
             None,
         ),
         signals: AccountRuntimeSignals {
+            turn_state: Default::default(),
             in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
@@ -238,6 +240,7 @@ fn diagnostic_selection_bypasses_all_local_account_eligibility() {
             None,
         ),
         signals: AccountRuntimeSignals {
+            turn_state: Default::default(),
             in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
@@ -641,6 +644,7 @@ fn provider_quota_overlay_should_preserve_store_concurrency_facts() {
     let reset_at = SystemTime::now() + Duration::from_secs(60);
     let last_started_at = SystemTime::now();
     let signals = AccountRuntimeSignals {
+        turn_state: Default::default(),
         in_flight: 2,
         last_started_at: Some(last_started_at),
         quota_reset_at: None,

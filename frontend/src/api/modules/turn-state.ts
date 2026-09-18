@@ -3,6 +3,7 @@ import request from '../request'
 
 export interface TurnStateConfig {
   enabled: boolean
+  missingStatePolicy: 'allow' | 'pause'
   targetLength: number
   ttlSeconds: number
   refreshAfterSeconds: number
@@ -20,7 +21,7 @@ export interface TurnStateConfig {
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers' }
+  return { enabled, missingStatePolicy: 'allow', targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers' }
 }
 
 export interface TurnStateObservation {
@@ -64,6 +65,7 @@ export interface TurnStateStatus {
   issuedAt: number | null
   ageSeconds: number | null
   active: boolean
+  businessStatus: 'ready' | 'manual_disabled' | 'waiting_for_state' | 'model_denied' | 'quota_exhausted' | 'rate_limited' | 'account_error'
   accountEnabled: boolean
   huntAttempts: number
   nextProbeAt: number | null

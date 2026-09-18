@@ -62,9 +62,12 @@ impl ScheduledTask for TurnStateTask {
                     }
                     return;
                 }
-                if bucket.current.as_ref().is_some_and(|token| {
-                    token.is_fresh(Utc::now().timestamp(), bucket.config.refresh_after_seconds)
-                }) {
+                if bucket
+                    .installed_token(Utc::now().timestamp())
+                    .is_some_and(|token| {
+                        token.is_fresh(Utc::now().timestamp(), bucket.config.refresh_after_seconds)
+                    })
+                {
                     return;
                 }
                 // 被动候选可以随时结束 hunt，不必等到下一次主动探测。

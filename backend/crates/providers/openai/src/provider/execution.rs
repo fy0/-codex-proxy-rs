@@ -166,6 +166,7 @@ struct RawJsonEndpointRequest {
 
 pub(super) struct ColdResponse {
     pub(super) client: CodexBackendClient,
+    pub(super) turn_state: Option<Arc<TurnStateService>>,
     pub(super) response_origin: Url,
     pub(super) request: CodexResponsesRequest,
     pub(super) upstream_model: UpstreamModelId,
@@ -555,8 +556,9 @@ fn image_response_metering(
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
         client,
+        turn_state,
         response_origin,
-        request,
+        mut request,
         upstream_model,
         transport_policy,
         context,
@@ -573,6 +575,21 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         mut session_capture,
     } = response;
     Box::pin(async_stream::try_stream! {
+        // 冷流可能延迟驱动；复核到期后才发送，不对已经发送的流设置票据定时器。
+        let request_state_source = prepare_turn_state(
+            &mut request, &lease, upstream_model.as_str(), context.is_diagnostic_required_account(),
+        )?;
+        let observer = turn_state.as_ref().filter(|_| lease.authentication().oauth().is_some())
+            .map(|service| service.observer(
+                lease.account(), upstream_model.as_str(),
+                request.body().get("reasoning").and_then(|value| value.get("effort"))
+                    .and_then(Value::as_str).map(str::to_owned),
+                request_state_source, request.turn_state.clone(),
+            ));
+        let client = client.with_turn_state_observer(observer);
+        if let Some(capture) = session_capture.as_mut() {
+            capture.turn_state = request.turn_state.clone();
+        }
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
@@ -1128,6 +1145,52 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             yield event;
         }
     })
+}
+
+fn prepare_turn_state(
+    request: &mut CodexResponsesRequest,
+    lease: &CodexCredentialLease,
+    model: &str,
+    diagnostic: bool,
+) -> Result<&'static str, ProviderError> {
+    let mut source = if request.turn_state.is_some() {
+        "client"
+    } else {
+        "none"
+    };
+    if let Some(value) = lease.account().turn_state_override() {
+        force_turn_state_override(request, value);
+        source = "manual_override";
+    }
+    if let Some(bucket) = lease
+        .turn_state()
+        .filter(|bucket| bucket.manages_injection())
+    {
+        let now = chrono::Utc::now().timestamp();
+        if !diagnostic
+            && !bucket
+                .scheduling_availability(lease.account(), model, now)
+                .allows(SystemTime::now())
+        {
+            return Err(map_selection_error(
+                CredentialSelectionError::MissingTurnState,
+            ));
+        }
+        // 管理桶没有有效票时也清除客户端与账号级覆盖，防止过期或跨模型回退。
+        crate::transport::request::clear_turn_state_override(request);
+        source = "none";
+        if bucket.matches_account(lease.account(), model)
+            && let Some(token) = bucket.installed_token(now)
+        {
+            force_turn_state_override(request, &token.value);
+            source = if bucket.manual_override {
+                "manual_override"
+            } else {
+                "automatic_override"
+            };
+        }
+    }
+    Ok(source)
 }
 
 async fn merge_response_metadata_updates(

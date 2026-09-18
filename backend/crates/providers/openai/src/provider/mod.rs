@@ -522,43 +522,6 @@ impl Provider for CodexProvider {
             lease.installation_id(),
             account_scope,
         );
-        // 管理员配置的 turn state 覆盖值无视客户端输入与账号归属判定，无条件生效。
-        let mut request_state_source = if upstream_request.turn_state.is_some() {
-            "client"
-        } else {
-            "none"
-        };
-        if let Some(turn_state) = lease.account().turn_state_override() {
-            force_turn_state_override(&mut upstream_request, turn_state);
-            request_state_source = "manual_override";
-        }
-        let oauth = lease.authentication().oauth().is_some();
-        if oauth
-            && let Some(service) = &self.turn_state
-            && let Some(bucket) = service
-                .current(lease.account_id(), upstream_model.as_str())
-                .await
-            && (bucket.config.enabled || bucket.manual_override)
-        {
-            // 管理桶没有有效令牌时也清除旧覆盖，禁止降级到账号级旧值。
-            crate::transport::request::clear_turn_state_override(&mut upstream_request);
-            request_state_source = "none";
-            if let Some(token) = bucket.current.filter(|token| {
-                bucket.upstream_account_id.as_deref() == lease.account().upstream_account_id()
-                    && bucket.upstream_user_id.as_deref() == lease.account().upstream_user_id()
-                    && token.value.len() == bucket.config.target_length
-                    && token.is_fresh(chrono::Utc::now().timestamp(), bucket.config.ttl_seconds)
-                    && gateway_core::account::TurnStateToken::parse(&token.value)
-                        .is_some_and(|parsed| parsed.issued_at == token.issued_at)
-            }) {
-                force_turn_state_override(&mut upstream_request, &token.value);
-                request_state_source = if bucket.manual_override {
-                    "manual_override"
-                } else {
-                    "automatic_override"
-                };
-            }
-        }
         // 每次执行从原始请求编码，选定出口后再覆盖，避免换号时携带上次位置。
         if let Some(location) = lease
             .account()
@@ -633,24 +596,6 @@ impl Provider for CodexProvider {
             AttemptTransport::Retry(retry_index) => retry_index.get(),
             AttemptTransport::Default | AttemptTransport::Fallback => 0,
         };
-        let turn_state_observer = if oauth {
-            self.turn_state.as_ref().map(|service| {
-                service.observer(
-                    lease.account(),
-                    upstream_model.as_str(),
-                    upstream_request
-                        .body()
-                        .get("reasoning")
-                        .and_then(|value| value.get("effort"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    request_state_source,
-                    upstream_request.turn_state.clone(),
-                )
-            })
-        } else {
-            None
-        };
         let events = cold_response_stream(ColdResponse {
             client: self
                 .client
@@ -658,8 +603,8 @@ impl Provider for CodexProvider {
                 .map_err(|_| {
                     provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
                 })?
-                .with_authentication(lease.authentication())
-                .with_turn_state_observer(turn_state_observer),
+                .with_authentication(lease.authentication()),
+            turn_state: self.turn_state.clone(),
             response_origin: self.responses_url.clone(),
             request: upstream_request,
             upstream_model: upstream_model.clone(),

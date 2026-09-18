@@ -67,6 +67,119 @@ use crate::support::{
 use crate::transport::accept_codex_test_websocket;
 
 #[tokio::test]
+async fn expired_turn_state_blocks_reused_websocket_and_transport_retry_before_sending() {
+    use gateway_core::account::{MissingTurnStatePolicy, TurnStateConfig, TurnStateToken};
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    store.seed_turn_state(
+        "acct_provider_contract",
+        "gpt-5.4",
+        TurnStateConfig {
+            enabled: true,
+            missing_state_policy: MissingTurnStatePolicy::Pause,
+            ..TurnStateConfig::default()
+        },
+    );
+    let ticket = |issued_at: i64| {
+        let mut bytes = vec![0; 217];
+        bytes[0] = 0x80;
+        bytes[1..9].copy_from_slice(&(issued_at as u64).to_be_bytes());
+        TurnStateToken::parse(&base64::engine::general_purpose::URL_SAFE.encode(bytes)).unwrap()
+    };
+    store.set_current_turn_state(
+        "acct_provider_contract",
+        "gpt-5.4",
+        ticket(Utc::now().timestamp()),
+        false,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (finished, done) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = accept_codex_test_websocket(socket).await;
+        // 两次有效请求必须复用同一个真实测试连接。
+        for index in 0..2 {
+            ws.next().await.unwrap().unwrap();
+            for event in [
+                json!({"type":"response.created","response":{"id":format!("resp_ticket_{index}"),"model":"gpt-5.4"}}),
+                json!({"type":"response.completed","response":{"id":format!("resp_ticket_{index}"),"model":"gpt-5.4","status":"completed","output":[]}}),
+            ] {
+                ws.send(Message::Text(event.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+        done.await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), ws.next())
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let provider = provider_with_base_url(&store, base_url);
+    let operation = || {
+        Operation::Generate(generate_with_persisted_session_context(
+            "acct_provider_contract",
+            "conversation-ticket",
+            "session-ticket",
+            "thread-ticket",
+        ))
+    };
+    for _ in 0..2 {
+        let mut stream = provider
+            .execute(
+                planned_request("openai", operation()),
+                context("req_ticket_ws", CancellationToken::new()),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+    store.set_current_turn_state(
+        "acct_provider_contract",
+        "gpt-5.4",
+        ticket(Utc::now().timestamp() - 3600),
+        false,
+    );
+    for transport in [
+        AttemptTransport::Default,
+        AttemptTransport::Retry(NonZeroU32::new(1).unwrap()),
+    ] {
+        let error = provider
+            .execute(
+                planned_request("openai", operation()),
+                context("req_ticket_expired", CancellationToken::new()).with_transport(transport),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
+        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+        assert_eq!(
+            error.diagnostic().unwrap().code(),
+            Some("missing_turn_state")
+        );
+    }
+    assert!(store.account("acct_provider_contract").unwrap().enabled());
+    finished.send(()).unwrap();
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriting_it() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;

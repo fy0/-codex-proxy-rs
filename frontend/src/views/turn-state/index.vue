@@ -30,6 +30,7 @@ const showConfig = ref(false)
 const editing = ref<TurnStateStatus | null>(null)
 const probing = ref(new Set<string>())
 const applying = ref(false)
+const now = ref(Date.now() / 1000)
 const { loading, run } = useAsyncAction()
 const tableBuckets = computed<TurnStateStatus[]>(() => {
   const configured = new Set(buckets.value.map(bucket => bucket.accountId))
@@ -43,6 +44,7 @@ const tableBuckets = computed<TurnStateStatus[]>(() => {
     issuedAt: null,
     ageSeconds: null,
     active: false,
+    businessStatus: !account.enabled ? 'manual_disabled' as const : account.status === 'normal' ? 'ready' as const : account.status === 'error' || account.status === 'disabled' ? 'account_error' as const : account.status,
     accountEnabled: account.enabled,
     huntAttempts: 0,
     nextProbeAt: null,
@@ -71,12 +73,11 @@ const distribution = computed(() => {
 })
 const columns = defineTableColumns<TurnStateStatus>([
   { key: 'accountName', label: '账号 / 模型', kind: 'identity', size: '3xl' },
-  { key: 'enabled', label: '探测改写', kind: 'status', size: 'md' },
+  { key: 'enabled', label: '账号 / 自动探测', kind: 'status', size: 'lg' },
+  { key: 'businessStatus', label: '业务调度', kind: 'status', size: 'xl' },
   { key: 'state', label: '当前 state', kind: 'custom', size: 'lg' },
-  { key: 'acquiredAt', label: '获取时间', kind: 'datetime', format: (_, row) => date(row.installations[0]?.acquiredAt ?? null) },
-  { key: 'retries', label: '本次重试', kind: 'numeric', size: 'sm', format: (_, row) => row.installations[0] ? Math.max(0, row.installations[0].attempts - 1) : '-' },
-  { key: 'average', label: '近期平均重试', kind: 'numeric', size: 'md', format: (_, row) => averageRetries(row) },
-  { key: 'nextProbeAt', label: '预计开始时间', kind: 'datetime', format: (value, row) => row.manualProbeRequestedAt != null ? '手动探测待执行' : value !== null && Number(value) <= Date.now() / 1000 ? '即将开始' : date(value as number | null) },
+  { key: 'recentProbe', label: '最近探测', kind: 'custom', size: 'lg' },
+  { key: 'nextProbeAt', label: '预计下次探测', kind: 'datetime', format: (value, row) => row.manualProbeRequestedAt != null ? '手动探测待执行' : value !== null && Number(value) <= now.value ? '即将开始' : date(value as number | null) },
   { key: 'actions', label: '操作', kind: 'actions', size: 'xl' },
 ])
 const logColumns = defineTableColumns<TurnStateObservation>([
@@ -120,7 +121,21 @@ function expiresAt(bucket: TurnStateStatus) {
 }
 function expired(bucket: TurnStateStatus) {
   const expiry = expiresAt(bucket)
-  return expiry !== null && expiry <= Date.now() / 1000
+  return expiry !== null && expiry <= now.value
+}
+function businessStatus(bucket: TurnStateStatus) {
+  if (!bucket.accountEnabled)
+    return 'manual_disabled'
+  if (bucket.businessStatus === 'ready' && bucket.config.missingStatePolicy === 'pause' && (!bucket.active || expired(bucket)))
+    return 'waiting_for_state'
+  return bucket.businessStatus
+}
+function businessLabel(bucket: TurnStateStatus) {
+  const labels: Record<TurnStateStatus['businessStatus'], string> = { ready: '正常调度', manual_disabled: '手动停用', waiting_for_state: '等待 state', model_denied: '模型权限禁止', quota_exhausted: '额度耗尽', rate_limited: '限流 / 冷却中', account_error: '账号不可用' }
+  return labels[businessStatus(bucket)]
+}
+function recentProbe(bucket: TurnStateStatus) {
+  return bucket.observations.find(item => item.source === 'probe')
 }
 function requestStateSource(value: string | null) {
   const labels: Record<string, string> = { none: '未携带', client: '客户端 / 会话', automatic_override: '自动改写', manual_override: '手动改写' }
@@ -186,7 +201,7 @@ function canApply(observation: TurnStateObservation) {
   const bucket = selection.value
   return !!bucket?.accountEnabled && observation.outcome === 'candidate'
     && observation.issuedAt != null && observation.issuedAt === bucket.candidateIssuedAt
-    && observation.issuedAt + bucket.config.ttlSeconds > Date.now() / 1000
+    && observation.issuedAt + bucket.config.ttlSeconds > now.value
     && (bucket.issuedAt === null || observation.issuedAt > bucket.issuedAt)
 }
 
@@ -213,6 +228,9 @@ watch(accountFilter, load)
 watch([selectedKey, tab], () => {
   page.value = 1
 })
+useIntervalFn(() => {
+  now.value = Date.now() / 1000
+}, 1000)
 useIntervalFn(() => {
   if (autoRefresh.value && !showConfig.value && !document.hidden)
     void load()
@@ -263,15 +281,31 @@ onMounted(async () => {
         </div>
       </template>
       <template #enabled="{ row }">
-        <span :class="row.config.enabled ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.config.enabled ? '已启用' : '未启用' }}</span>
-        <span v-if="row.manualOverride && row.active && !expired(row)" class="block text-cp-xs text-cp-success-text">手动改写中</span>
-        <span v-if="!row.accountEnabled" class="block text-cp-xs text-cp-warning-text">账号已停用</span>
+        <div class="grid gap-1">
+          <span :class="row.accountEnabled ? 'text-cp-text' : 'text-cp-warning-text'">账号：{{ row.accountEnabled ? '手动启用' : '手动停用' }}</span>
+          <span class="text-cp-xs text-cp-text-secondary">自动探测：{{ row.config.enabled ? '已开启' : '已关闭' }}</span>
+        </div>
+      </template>
+      <template #businessStatus="{ row }">
+        <div class="grid gap-1">
+          <span :class="businessStatus(row) === 'ready' ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ businessLabel(row) }}</span>
+          <span class="text-cp-xs text-cp-text-secondary">无票：{{ row.config.missingStatePolicy === 'pause' ? '暂停业务调度' : '继续调度' }}</span>
+          <span v-if="row.config.missingStatePolicy === 'pause' && !row.config.enabled" class="text-cp-xs text-cp-warning-text">缺票需手动探测并应用</span>
+        </div>
+      </template>
+      <template #recentProbe="{ row }">
+        <div v-if="recentProbe(row)" class="grid gap-1">
+          <span>{{ outcome(recentProbe(row)!.outcome) }}</span>
+          <span class="text-cp-xs text-cp-text-secondary">{{ date(recentProbe(row)!.observedAt) }}</span>
+        </div>
+        <span v-else class="text-cp-text-secondary">暂无探测</span>
       </template>
       <template #state="{ row }">
         <div class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}\n到期时间：${date(expiresAt(row))}`">
           <span :class="row.active && !expired(row) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ expired(row) ? `${row.tokenLength} · 已过期` : row.active ? `${row.tokenLength} · 使用中` : row.tokenLength ? `${row.tokenLength} · 未使用` : '尚未获取' }}</span>
           <span class="text-cp-xs text-cp-text-secondary">{{ expired(row) ? '改写已解除' : row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
           <span v-if="row.candidateIssuedAt != null" class="text-cp-xs text-cp-success-text">{{ row.candidateLength }} · 候选可应用</span>
+          <span v-if="row.manualOverride && row.active && !expired(row)" class="text-cp-xs text-cp-success-text">手动应用</span>
         </div>
       </template>
       <template #actions="{ row }">
@@ -294,6 +328,20 @@ onMounted(async () => {
         <BaseSelect v-model="selectedKey" :options="bucketOptions" class="w-full sm:w-80" aria-label="查看账号与模型" />
       </div>
       <dl class="m-0 flex flex-wrap gap-x-8 gap-y-3 text-cp-sm">
+        <div>
+          <dt class="text-cp-text-secondary">
+            最近获取时间
+          </dt><dd class="m-0 mt-1 font-mono">
+            {{ date(selection.installations[0]?.acquiredAt ?? null) }}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-cp-text-secondary">
+            本次重试 / 近期平均重试
+          </dt><dd class="m-0 mt-1">
+            {{ selection.installations[0] ? Math.max(0, selection.installations[0].attempts - 1) : '-' }} / {{ averageRetries(selection) }}
+          </dd>
+        </div>
         <div>
           <dt class="text-cp-text-secondary">
             目标长度

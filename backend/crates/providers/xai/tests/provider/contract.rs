@@ -1061,6 +1061,7 @@ impl ProviderLeasePort for DiagnosticLeasePort {
                         (
                             account_id,
                             AccountRuntimeSignals {
+                                turn_state: Default::default(),
                                 in_flight: 0,
                                 last_started_at: None,
                                 quota_reset_at: None,

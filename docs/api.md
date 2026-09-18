@@ -423,7 +423,8 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 | 配置字段 | 默认值 | 范围或语义 |
 | --- | --- | --- |
-| `enabled` | `false` | 启用该桶的后台探测与自动注入；被动观测不依赖此开关 |
+| `enabled` | `false` | 启用该桶的后台探测与自动安装；关闭不撤销仍有效的已安装 state，被动观测不依赖此开关 |
+| `missingStatePolicy` | `allow` | `allow` 无有效 state 时继续调度；`pause` 暂停该账号、该上游模型的业务调度，不改变账号与自动探测开关 |
 | `targetLength` | `292` | 76–4096 字节；只有长度命中且信封有效的令牌才进入候选池 |
 | `ttlSeconds` | `3600` | 60–3600 秒，从令牌内嵌签发时间计算的本地有效期；重复观察不续期 |
 | `refreshAfterSeconds` | `2100` | 至少 30 秒且小于寿命；达到此龄开始寻找更新令牌 |
@@ -441,17 +442,19 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 手动探测复用上述配置、身份更新与凭据有效性检查，跳过轮换龄和等待时间，一次最多发出一个上游请求；不会启用自动轮换。未配置的桶使用默认配置创建；未启用自动轮换时保留候选，可通过 `apply` 单独应用，或启用自动轮换后安装。重复排队合并成一个待执行任务；worker 原子领取后不因进程中断而自动重放。`manualProbeRequestedAt` 为待执行请求时间，领取后清空；结果通过 `observations` 查询，`probeTrigger` 区分 `manual` 和 `scheduled`。
 
-`candidateIssuedAt` / `candidateLength` 仅返回仍有效候选的签发时间与长度。手动应用严格匹配当前候选及账号、模型、上游身份，签发时间必须比已安装值新；不会返回或接受令牌正文。`manualOverride=true` 标记手动安装，自动轮换关闭时仍在有效期内注入，但不会启动后台探测；到期停止注入。重新保存轮换配置会解除该手动标识，关闭轮换保存时同时清除覆盖。候选池每桶只保留最新候选，历史日志中的旧值不能重装。
+`candidateIssuedAt` / `candidateLength` 仅返回仍有效候选的签发时间与长度。手动应用严格匹配当前候选及账号、模型、上游身份，签发时间必须比已安装值新；不会返回或接受令牌正文。`manualOverride=true` 标记手动安装，自动轮换关闭时仍在有效期内注入，但不会启动后台探测；到期停止注入。保存配置保留仍符合目标长度与有效期的已安装票及来源标识。候选池每桶只保留最新候选，历史日志中的旧值不能重装。
+
+`pause` 的有票条件只认可同账号、同上游模型、上游身份匹配、目标长度正确、内嵌签发时间有效且已安装的 state；候选、客户端 state 和账号级通用覆盖均不能解除限制。安装提交后后续业务选号即可恢复，到期后后续选号立即跳过，无须等待清理 worker；已经发出的请求继续完成。312、其他非目标长度、无响应头及传输错误不会撤销仍有效的旧票。账号权限、模型权限、凭据、额度、限流与并发限制仍按原条件执行；所有候选不可用时保持 `503 / no_available_provider` 合同，因缺票拒绝时安全消息包含等待已安装 state 的原因，诊断码为 `missing_turn_state`，不进入并发等待队列。自动探测关闭时可手动探测取得候选，再调用 `apply` 恢复业务；任何过程都不自动修改账号 `enabled`。
 
 状态中的 `accountEmail` 提供邮箱身份；管理页同时显示账号 ID，避免通用名称或重复邮箱无法区分。被动观测的 `requestStateSource` 区分 `none`（未携带）、`client`（客户端或会话）、`automatic_override` 和 `manual_override`；旧记录为 null。`responseSource` 区分 `http_headers`、`websocket_start` 和 `websocket_metadata`，一次 WS 请求可能产生起始及元数据两条观测，不应当作两次探测。返回令牌与请求相同时标为 `reused_state`，签发时间不更新时标为 `not_newer`，两者均不新增候选或延长有效期。携带 state 后返回的新令牌仍标明请求来源，不能当作未携带 state 的自然采样。
 
-有效期到达后自动令牌不再注入，清除请求头、正文及客户端 metadata 中的旧覆盖；WebSocket 按包含 state 的握手画像隔离，后续请求不会复用带旧 state 的连接。签发水位和安装历史保留供诊断，标准无自动覆盖请求继续采集新 state。
+有效期到达后已安装令牌不再注入，清除请求头、正文及客户端 metadata 中的旧覆盖；WebSocket 按包含 state 的握手画像隔离，新请求、粘性路由、重试及连接复用均重新执行缺票资格判断。签发水位和安装历史保留供诊断，`allow` 下的无自动覆盖请求继续采集新 state，`pause` 下仅探测继续按配置运行。
 
-状态项包含 `accountId`、`accountName`、`model`、`config`、`tokenLength`、`issuedAt`、`ageSeconds`、`active`、`accountEnabled`、`huntAttempts`、`nextProbeAt`、`observations`、`installations`。签发和观察时间均为 Unix 秒；尚未安装时令牌元数据为 `null`。过期后保留最后安装的长度和签发水位供诊断，`active=false`，令牌正文清除。`active` 表示账号启用、桶启用或已手动应用且本地令牌仍有效，不保证上游接受。`huntAttempts` 为当前寻获周期的累计尝试数，跨预算轮次累计；`nextProbeAt` 为预计下次开始时间，调度周期和并发限制可能使实际开始稍晚，账号或桶停用时为 `null`。
+状态项包含 `accountId`、`accountName`、`model`、`config`、`tokenLength`、`issuedAt`、`ageSeconds`、`active`、`accountEnabled`、`businessStatus`、`huntAttempts`、`nextProbeAt`、`observations`、`installations`。签发和观察时间均为 Unix 秒；尚未安装时令牌元数据为 `null`。过期后保留最后安装的长度和签发水位供诊断，`active=false`，令牌正文清除。`active` 表示账号启用且同桶已安装令牌满足身份、长度及有效期检查，不保证上游接受。`businessStatus` 为 `ready`、`manual_disabled`、`waiting_for_state`、`model_denied`、`quota_exhausted`、`rate_limited` 或 `account_error`；这是当前桶的资格投影，不承诺具体 Client Key 权限或瞬时并发容量。`accountEnabled` 是手动账号开关，`config.enabled` 是自动探测开关，均不能从缺票状态推断。`huntAttempts` 为当前寻获周期的累计尝试数，跨预算轮次累计；`nextProbeAt` 为预计下次开始时间，调度周期和并发限制可能使实际开始稍晚，账号或自动探测停用时为 `null`。
 
 `observations` 分别保留最近 100 条主动探测和 100 条被动采集；包含 `source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode` 和 `stopReason`。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`length_miss`、`invalid_token`、`expired_or_future` 均不会安装。回应策略最多读取 1 MiB、30 秒，不保存正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。无令牌正文、Bearer 或代理认证。
 
-启用自动轮换的桶以模型专属覆盖为准，没有有效令牌时清除请求中的旧覆盖；安装只接受比该桶历史签发水位严格更新的候选。自动令牌不会写入旧的账号级标量 `turnStateOverride`，避免被其他模型读取。未启用自动轮换的模型仍沿用原有手工覆盖行为；手工覆盖接口不具备自动轮换的寿命和桶隔离保证。操作与模板说明见 [Turn State 轮换](../deploy/README.md#turn-state-轮换)。
+启用自动轮换、采用 `pause` 或曾安装令牌的桶以模型专属覆盖为准，没有有效令牌时清除请求中的旧覆盖；安装只接受比该桶历史签发水位严格更新的候选。自动令牌不会写入账号级标量 `turnStateOverride`。其余模型仍沿用原有账号手工覆盖行为；该接口不具备桶的寿命和隔离保证，不能满足 `pause` 的有票条件。操作与模板说明见 [Turn State 轮换](../deploy/README.md#turn-state-轮换)。
 
 ### 账号模型限制
 

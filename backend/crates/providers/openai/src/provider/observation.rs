@@ -788,6 +788,13 @@ pub(super) fn map_selection_error(error: CredentialSelectionError) -> ProviderEr
             ProviderErrorKind::NoEligibleAccount,
             UpstreamSendState::NotSent,
         ),
+        CredentialSelectionError::MissingTurnState => provider_error(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        ).with_no_eligible_account_reason(gateway_core::error::NoEligibleAccountReason::MissingTurnState)
+        .with_diagnostic(gateway_core::error::ProviderDiagnostic::new(
+            "No eligible account: waiting for a valid installed turn state for the upstream model",
+        ).with_classification("account_selection", "missing_turn_state")),
         CredentialSelectionError::InvalidCredential
         | CredentialSelectionError::Store
         | CredentialSelectionError::Coordinator

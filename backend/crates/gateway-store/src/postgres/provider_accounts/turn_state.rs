@@ -1,8 +1,8 @@
 //! 路由令牌的原子候选更新、安装及有界观测历史。
 
 use gateway_core::account::{
-    TurnStateBucket, TurnStateConfig, TurnStateInstallation, TurnStateObservation, TurnStateStatus,
-    TurnStateToken,
+    MissingTurnStatePolicy, TurnStateBucket, TurnStateBusinessStatus, TurnStateConfig,
+    TurnStateInstallation, TurnStateObservation, TurnStateStatus, TurnStateToken,
 };
 
 use super::*;
@@ -57,6 +57,32 @@ fn bucket(row: sqlx::postgres::PgRow) -> Result<TurnStateBucket, CoreStoreError>
 }
 
 impl PgProviderAccountRepository {
+    pub(super) async fn load_turn_state_buckets_for_model(
+        &self,
+        accounts: &[CoreProviderAccountId],
+        model: &str,
+    ) -> Result<Vec<TurnStateBucket>, CoreStoreError> {
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query(
+            "select * from account_turn_states where account_id = any($1::text[]) and model = $2",
+        )
+        .bind(
+            accounts
+                .iter()
+                .map(CoreProviderAccountId::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .bind(model)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?
+        .into_iter()
+        .map(bucket)
+        .collect()
+    }
+
     pub(super) async fn load_turn_state_buckets(
         &self,
     ) -> Result<Vec<TurnStateBucket>, CoreStoreError> {
@@ -175,13 +201,15 @@ impl PgProviderAccountRepository {
         &self,
         account_id: Option<&str>,
     ) -> Result<Vec<TurnStateStatus>, CoreStoreError> {
-        let rows = sqlx::query("select s.*, a.name as account_name, a.email as account_email, a.enabled as account_enabled, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation'), '[]'::jsonb) as observations, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'installation'), '[]'::jsonb) as installations from account_turn_states s join provider_accounts a on a.id = s.account_id where ($1::text is null or s.account_id = $1) order by s.account_id, s.model")
+        let rows = sqlx::query("select s.*, a.name as account_name, a.email as account_email, a.enabled as account_enabled, (a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id) as identity_matches, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation'), '[]'::jsonb) as observations, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'installation'), '[]'::jsonb) as installations from account_turn_states s join provider_accounts a on a.id = s.account_id where ($1::text is null or s.account_id = $1) order by s.account_id, s.model")
             .bind(account_id).fetch_all(&self.pool).await.map_err(unavailable)?;
         rows.into_iter()
             .map(|row| {
                 let account_name = row.try_get("account_name").map_err(unavailable)?;
                 let account_email = row.try_get("account_email").map_err(unavailable)?;
                 let account_enabled: bool = row.try_get("account_enabled").map_err(unavailable)?;
+                let identity_matches: bool =
+                    row.try_get("identity_matches").map_err(unavailable)?;
                 let observations =
                     serde_json::from_value(row.try_get("observations").map_err(unavailable)?)
                         .map_err(unavailable)?;
@@ -189,9 +217,22 @@ impl PgProviderAccountRepository {
                     serde_json::from_value(row.try_get("installations").map_err(unavailable)?)
                         .map_err(unavailable)?;
                 let state = bucket(row)?;
+                let installed = state
+                    .installed_token(Utc::now().timestamp())
+                    .filter(|_| identity_matches);
+                let active = account_enabled && installed.is_some();
+                let business_status = if !account_enabled {
+                    TurnStateBusinessStatus::ManualDisabled
+                } else if state.config.missing_state_policy == MissingTurnStatePolicy::Pause
+                    && !active
+                {
+                    TurnStateBusinessStatus::WaitingForState
+                } else {
+                    TurnStateBusinessStatus::Ready
+                };
                 let next_probe_at = if !account_enabled || !state.config.enabled {
                     None
-                } else if let Some(token) = state.current.as_ref().filter(|token| {
+                } else if let Some(token) = installed.filter(|token| {
                     token.is_fresh(Utc::now().timestamp(), state.config.refresh_after_seconds)
                 }) {
                     Some(token.issued_at + state.config.refresh_after_seconds as i64)
@@ -207,9 +248,8 @@ impl PgProviderAccountRepository {
                     account_name,
                     account_email,
                     model: state.model,
-                    active: account_enabled
-                        && (state.config.enabled || state.manual_override)
-                        && state.current.is_some(),
+                    active,
+                    business_status,
                     account_enabled,
                     hunt_attempts: state.hunt_attempts,
                     next_probe_at,

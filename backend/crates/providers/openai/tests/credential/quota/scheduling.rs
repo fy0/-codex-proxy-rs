@@ -80,6 +80,7 @@ async fn old_weekly_quota_should_outweigh_one_in_flight_title_request() {
         .into_iter()
         .map(|account| AccountCandidate {
             signals: AccountRuntimeSignals {
+                turn_state: Default::default(),
                 in_flight: u32::from(account.id().as_str() == "acct_74"),
                 last_started_at: None,
                 quota_reset_at: None,

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct TurnStateConfig {
     pub enabled: bool,
+    pub missing_state_policy: MissingTurnStatePolicy,
     pub target_length: usize,
     pub ttl_seconds: u64,
     pub refresh_after_seconds: u64,
@@ -26,6 +27,33 @@ pub struct TurnStateConfig {
     pub stop_strategy: TurnStateStopStrategy,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingTurnStatePolicy {
+    #[default]
+    Allow,
+    Pause,
+}
+
+/// 调度只携带有效期，不传播令牌正文；每次选号仍按当前时间判断。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TurnStateAvailability {
+    #[default]
+    Optional,
+    Required {
+        expires_at: Option<std::time::SystemTime>,
+    },
+}
+
+impl TurnStateAvailability {
+    pub fn allows(self, now: std::time::SystemTime) -> bool {
+        match self {
+            Self::Optional => true,
+            Self::Required { expires_at } => expires_at.is_some_and(|expiry| now < expiry),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStateStopStrategy {
@@ -39,6 +67,7 @@ impl Default for TurnStateConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            missing_state_policy: MissingTurnStatePolicy::Allow,
             target_length: 292,
             ttl_seconds: 3600,
             refresh_after_seconds: 2100,
@@ -196,6 +225,54 @@ pub struct TurnStateBucket {
     pub manual_override: bool,
 }
 
+impl TurnStateBucket {
+    /// 已安装正文才是票，候选及账号级通用覆盖不能满足模型桶的要求。
+    pub fn installed_token(&self, now: i64) -> Option<&TurnStateToken> {
+        self.current.as_ref().filter(|token| {
+            Some(token.issued_at) == self.current_issued_at
+                && token.value.len() == self.config.target_length
+                && token.is_fresh(now, self.config.ttl_seconds)
+                && TurnStateToken::parse(&token.value)
+                    .is_some_and(|parsed| parsed.issued_at == token.issued_at)
+        })
+    }
+
+    pub fn matches_account(&self, account: &super::ProviderAccount, model: &str) -> bool {
+        self.account_id == account.id().as_str()
+            && self.model == model
+            && self.upstream_account_id.as_deref() == account.upstream_account_id()
+            && self.upstream_user_id.as_deref() == account.upstream_user_id()
+            && account.authentication_kind() == "oauth"
+    }
+
+    pub fn scheduling_availability(
+        &self,
+        account: &super::ProviderAccount,
+        model: &str,
+        now: i64,
+    ) -> TurnStateAvailability {
+        if self.config.missing_state_policy == MissingTurnStatePolicy::Allow {
+            return TurnStateAvailability::Optional;
+        }
+        let expires_at = self
+            .installed_token(now)
+            .filter(|_| self.matches_account(account, model))
+            .and_then(|token| {
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
+                    token.issued_at as u64 + self.config.ttl_seconds,
+                ))
+            });
+        TurnStateAvailability::Required { expires_at }
+    }
+
+    pub fn manages_injection(&self) -> bool {
+        self.config.enabled
+            || self.manual_override
+            || self.current_issued_at.is_some()
+            || self.config.missing_state_policy == MissingTurnStatePolicy::Pause
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStateStatus {
@@ -208,6 +285,7 @@ pub struct TurnStateStatus {
     pub issued_at: Option<i64>,
     pub age_seconds: Option<i64>,
     pub active: bool,
+    pub business_status: TurnStateBusinessStatus,
     pub account_enabled: bool,
     pub hunt_attempts: u64,
     pub next_probe_at: Option<i64>,
@@ -217,4 +295,16 @@ pub struct TurnStateStatus {
     pub candidate_length: Option<usize>,
     pub observations: Vec<TurnStateObservation>,
     pub installations: Vec<TurnStateInstallation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStateBusinessStatus {
+    Ready,
+    ManualDisabled,
+    WaitingForState,
+    ModelDenied,
+    QuotaExhausted,
+    RateLimited,
+    AccountError,
 }

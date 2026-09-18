@@ -10,6 +10,84 @@ use super::{candidate, candidate_with_concurrency, context};
 
 const FAILURE_RATE_HALF_LIFE: Duration = Duration::from_secs(15 * 60);
 
+#[test]
+fn missing_ticket_blocks_sticky_selection_capacity_and_waiting_until_installed() {
+    use gateway_core::account::{
+        AccountSchedulingBlocker, PreferredAccountSelection, TurnStateAvailability,
+    };
+    for strategy in [
+        RotationStrategy::Smart,
+        RotationStrategy::Sticky,
+        RotationStrategy::RoundRobin,
+        RotationStrategy::QuotaResetPriority,
+    ] {
+        let mut context = context(strategy);
+        let mut candidates = vec![
+            candidate("acct_waiting", 0, None),
+            candidate("acct_ready", 0, None),
+        ];
+        context.preferred_account = Some(candidates[0].account.id().clone());
+        candidates[0].signals.turn_state = TurnStateAvailability::Required { expires_at: None };
+        let selected = AccountSelector.select(&candidates, &context).unwrap();
+        assert_eq!(selected.candidate().account.id().as_str(), "acct_ready");
+        assert_eq!(
+            selected.preferred(),
+            PreferredAccountSelection::Blocked(AccountSchedulingBlocker::MissingTurnState)
+        );
+        assert!(AccountSelector.select(&candidates[..1], &context).is_none());
+        assert!(
+            AccountSelector
+                .wait_candidates(&candidates[..1], &context)
+                .is_empty()
+        );
+        assert!(
+            AccountSelector
+                .capacity_snapshot(&candidates[..1], &context)
+                .is_none()
+        );
+        let expires_at = context.now + Duration::from_secs(1);
+        candidates[0].signals.turn_state = TurnStateAvailability::Required {
+            expires_at: Some(expires_at),
+        };
+        assert_eq!(
+            AccountSelector
+                .select(&candidates, &context)
+                .unwrap()
+                .candidate()
+                .account
+                .id()
+                .as_str(),
+            "acct_waiting"
+        );
+        context.now = expires_at;
+        assert_eq!(
+            AccountSelector
+                .select(&candidates, &context)
+                .unwrap()
+                .candidate()
+                .account
+                .id()
+                .as_str(),
+            "acct_ready"
+        );
+        assert!(
+            AccountSelector
+                .wait_candidates(&candidates[..1], &context)
+                .is_empty()
+        );
+        // 拿票不能覆盖账号的手动停用事实。
+        context.now -= Duration::from_secs(1);
+        candidates[0].account = candidates[0].account.clone().with_account_facts(
+            false,
+            gateway_core::account::CredentialState::Ready,
+            gateway_core::account::QuotaState::unknown(),
+            None,
+            None,
+        );
+        assert!(AccountSelector.select(&candidates[..1], &context).is_none());
+    }
+}
+
 fn feedback_subject() -> (AccountFeedbackStats, ProviderKind, ProviderAccountId) {
     (
         AccountFeedbackStats::default(),

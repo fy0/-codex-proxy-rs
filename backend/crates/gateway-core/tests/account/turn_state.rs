@@ -1,5 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
-use gateway_core::account::{TurnStateConfig, TurnStateToken};
+use gateway_core::account::{
+    MissingTurnStatePolicy, TurnStateBucket, TurnStateConfig, TurnStateToken,
+};
 
 fn encoded(issued_at: u64, size: usize) -> String {
     let mut bytes = vec![0; size];
@@ -90,4 +92,83 @@ fn probe_persona_defaults_are_compatible_and_reject_header_injection() {
         assert!(!config.is_valid());
     }
     assert!(serde_json::from_str::<TurnStateConfig>(r#"{"timezone":"not-a-timezone"}"#).is_err());
+}
+
+#[test]
+fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_ticket() {
+    let now = 1_800_000_000;
+    let account = super::account("acct_state");
+    let mut bucket = TurnStateBucket {
+        account_id: account.id().as_str().to_owned(),
+        upstream_account_id: account.upstream_account_id().map(str::to_owned),
+        upstream_user_id: account.upstream_user_id().map(str::to_owned),
+        model: "upstream-model".to_owned(),
+        config: serde_json::from_str("{}").unwrap(),
+        current: None,
+        current_issued_at: None,
+        current_length: None,
+        candidate: Some(TurnStateToken::parse(&encoded(now as u64, 217)).unwrap()),
+        hunt_attempts: 0,
+        next_probe_at: None,
+        manual_probe_requested_at: None,
+        manual_override: false,
+    };
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now as u64);
+    assert_eq!(
+        bucket.config.missing_state_policy,
+        MissingTurnStatePolicy::Allow
+    );
+    assert!(
+        bucket
+            .scheduling_availability(&account, &bucket.model, now)
+            .allows(time)
+    );
+    bucket.config.missing_state_policy = MissingTurnStatePolicy::Pause;
+    assert!(bucket.manages_injection());
+    assert!(
+        !bucket
+            .scheduling_availability(&account, &bucket.model, now)
+            .allows(time)
+    );
+    bucket.current = bucket.candidate.take();
+    bucket.current_issued_at = Some(now);
+    bucket.current_length = Some(292);
+    assert!(
+        bucket
+            .scheduling_availability(&account, &bucket.model, now)
+            .allows(time)
+    );
+    // 探测开关与安装来源不改变有票事实。
+    assert!(!bucket.config.enabled);
+    assert!(!bucket.manual_override);
+    for (model, other) in [
+        (&bucket.model[..], super::account("other")),
+        ("alias", account.clone()),
+    ] {
+        assert!(
+            !bucket
+                .scheduling_availability(&other, model, now)
+                .allows(time)
+        );
+    }
+    bucket.upstream_user_id = Some("different-user".to_owned());
+    assert!(
+        !bucket
+            .scheduling_availability(&account, &bucket.model, now)
+            .allows(time)
+    );
+    bucket.upstream_user_id = account.upstream_user_id().map(str::to_owned);
+    assert!(bucket.installed_token(now + 3599).is_some());
+    assert!(bucket.installed_token(now + 3600).is_none());
+    assert!(bucket.installed_token(now - 1).is_none());
+    bucket.current = Some(TurnStateToken::parse(&encoded(now as u64, 233)).unwrap());
+    assert!(bucket.installed_token(now).is_none());
+    bucket.current = Some(TurnStateToken {
+        value: encoded((now - 3600) as u64, 217),
+        issued_at: now,
+    });
+    assert!(bucket.installed_token(now).is_none());
+    assert!(
+        serde_json::from_str::<TurnStateConfig>(r#"{"missingStatePolicy":"invalid"}"#).is_err()
+    );
 }

@@ -520,6 +520,7 @@ impl RedisProviderLeaseCoordinator {
                 Ok((
                     account,
                     AccountRuntimeSignals {
+                        turn_state: Default::default(),
                         in_flight: signal.in_flight,
                         last_started_at: signal.last_started_at.map(Into::into),
                         quota_reset_at: None,
