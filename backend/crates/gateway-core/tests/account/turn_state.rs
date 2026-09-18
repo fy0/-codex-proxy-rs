@@ -142,7 +142,7 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
     assert!(!bucket.config.enabled);
     assert!(!bucket.manual_override);
     for (model, other) in [
-        (&bucket.model[..], super::account("other")),
+        (&bucket.model[..], super::account("acct_other")),
         ("alias", account.clone()),
     ] {
         assert!(
