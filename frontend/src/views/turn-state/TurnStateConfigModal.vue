@@ -28,7 +28,7 @@ const config = ref<TurnStateConfig>(defaultTurnStateConfig(true))
 const proxySearch = ref('')
 const { proxies, loading: loadingProxies } = useProxyCatalog()
 const { loading: saving, run } = useAsyncAction()
-const accountOptions = computed(() => props.accounts.filter(account => account.provider === 'openai' && account.authenticationKind === 'oauth').map(account => ({ value: account.id, label: account.name })))
+const accountOptions = computed(() => props.accounts.filter(account => account.provider === 'openai' && account.authenticationKind === 'oauth').map(account => ({ value: account.id, label: `${account.email?.trim() || account.name} · ${account.id}` })))
 const selectedAccount = computed(() => props.accounts.find(account => account.id === accountId.value))
 const existing = computed(() => !!props.bucket && props.bucket.configured !== false)
 const proxyOptions = computed(() => proxies.value.filter(proxy => `${proxy.name} ${proxy.endpoint}`.toLowerCase().includes(proxySearch.value.toLowerCase())))
@@ -38,7 +38,7 @@ watch(open, (value) => {
     return
   accountId.value = props.bucket?.accountId ?? ''
   model.value = props.bucket?.model ?? 'gpt-6-astra'
-  config.value = props.bucket ? { ...props.bucket.config, proxyIds: [...props.bucket.config.proxyIds] } : defaultTurnStateConfig(true)
+  config.value = props.bucket ? { ...defaultTurnStateConfig(), ...props.bucket.config, proxyIds: [...props.bucket.config.proxyIds] } : defaultTurnStateConfig(true)
   proxySearch.value = ''
 })
 
@@ -52,7 +52,11 @@ async function save() {
     return
   }
   if (config.value.refreshAfterSeconds >= config.value.ttlSeconds) {
-    toast.warning('轮换龄必须小于令牌寿命')
+    toast.warning('轮换龄必须小于 state 有效期')
+    return
+  }
+  if (!config.value.originator.trim() || !config.value.timezone.trim()) {
+    toast.warning('请填写探测 originator 和时区')
     return
   }
   if (!config.value.includeAccountProxy && !config.value.includeDirect && !config.value.proxyIds.length) {
@@ -87,8 +91,8 @@ async function save() {
         <BaseFormItem label="目标长度">
           <BaseNumberInput v-model="config.targetLength" label="目标长度" :min="76" :max="4096" :disabled="saving" />
         </BaseFormItem>
-        <BaseFormItem label="令牌寿命（秒）">
-          <BaseNumberInput v-model="config.ttlSeconds" label="令牌寿命" :min="60" :max="3600" :step="60" :disabled="saving" />
+        <BaseFormItem label="state 有效期（秒）">
+          <BaseNumberInput v-model="config.ttlSeconds" label="state 有效期" :min="60" :max="3600" :step="60" :disabled="saving" />
         </BaseFormItem>
         <BaseFormItem label="轮换龄（秒）">
           <BaseNumberInput v-model="config.refreshAfterSeconds" label="轮换龄" :min="30" :max="3599" :step="60" :disabled="saving" />
@@ -106,9 +110,17 @@ async function save() {
           <BaseNumberInput v-model="config.idleSeconds" label="空闲间隔" :min="10" :max="86400" :step="10" :disabled="saving" />
         </BaseFormItem>
       </div>
-      <BaseFormItem label="备用时区">
-        <BaseInput v-model="config.timezone" aria-label="备用时区" :disabled="saving" />
-      </BaseFormItem>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <BaseFormItem label="探测 originator" required>
+          <BaseInput v-model="config.originator" aria-label="探测 originator" maxlength="128" :disabled="saving" />
+        </BaseFormItem>
+        <BaseFormItem label="探测时区" required>
+          <BaseInput v-model="config.timezone" aria-label="探测时区" placeholder="Asia/Taipei" :disabled="saving" />
+        </BaseFormItem>
+        <BaseFormItem label="探测 User-Agent" class="sm:col-span-2">
+          <BaseInput v-model="config.userAgent" aria-label="探测 User-Agent" placeholder="自动" maxlength="1024" :disabled="saving" />
+        </BaseFormItem>
+      </div>
       <fieldset class="m-0 min-w-0 border-0 p-0">
         <legend class="mb-3 text-cp font-semibold text-cp-text">
           探测出口

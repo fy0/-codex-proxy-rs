@@ -88,6 +88,33 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    async fn apply_turn_state(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _issued_at: i64,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "turn_state",
+            "turn state store unavailable",
+        ))
+    }
+
+    async fn request_turn_state_probe(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "turn_state",
+            "turn state store unavailable",
+        ))
+    }
+
     async fn turn_state_status(
         &self,
         _account_id: Option<&str>,

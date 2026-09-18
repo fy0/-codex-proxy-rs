@@ -11,6 +11,8 @@ where
 {
     Router::new()
         .route("/api/admin/accounts/turn-state", get(status::<S>))
+        .route("/api/admin/accounts/turn-state/probe", post(probe::<S>))
+        .route("/api/admin/accounts/turn-state/apply", post(apply::<S>))
         .route(
             "/api/admin/accounts/turn-state/configure",
             post(configure::<S>),
@@ -29,6 +31,76 @@ struct ConfigureRequest {
     account_id: String,
     model: String,
     config: TurnStateConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProbeRequest {
+    account_id: String,
+    model: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyRequest {
+    account_id: String,
+    model: String,
+    issued_at: i64,
+}
+
+async fn apply<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<ApplyRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let account_id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .apply_turn_state(
+            &auth.context().mutation_context(),
+            account_id,
+            request.model,
+            request.issued_at,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(UpdatedAccountData::from(result)),
+    ))
+}
+
+async fn probe<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<ProbeRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let account_id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .request_turn_state_probe(
+            &auth.context().mutation_context(),
+            account_id,
+            request.model,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::ACCEPTED,
+        AdminEnvelope::ok(UpdatedAccountData::from(result)),
+    ))
 }
 
 async fn status<S>(

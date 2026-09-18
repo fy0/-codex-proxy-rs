@@ -47,6 +47,25 @@ const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
+    async fn apply_turn_state(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _model: String,
+        _issued_at: i64,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        Err(AdminError::invalid("当前服务不支持应用 turn state"))
+    }
+
+    async fn request_turn_state_probe(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _model: String,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        Err(AdminError::invalid("当前服务不支持 turn state 探测"))
+    }
+
     async fn turn_state_status(
         &self,
         _account_id: Option<&str>,
@@ -381,6 +400,68 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
+    async fn apply_turn_state(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        model: String,
+        issued_at: i64,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        if model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+            || issued_at <= 0
+        {
+            return Err(AdminError::invalid("模型或签发时间不合法"));
+        }
+        let (stored, _) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai"
+            || stored.account.authentication_kind != "oauth"
+            || !stored.account.enabled
+        {
+            return Err(AdminError::invalid(
+                "仅启用的 OpenAI OAuth 账号支持应用 state",
+            ));
+        }
+        let result = self
+            .accounts
+            .apply_turn_state(&account_id, &model, issued_at, context)
+            .await
+            .map_err(|error| map_store_error(error, "turn state apply"))?;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
+    async fn request_turn_state_probe(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        model: String,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        if model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+        {
+            return Err(AdminError::invalid("模型 ID 不合法"));
+        }
+        let (stored, _) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai"
+            || stored.account.authentication_kind != "oauth"
+            || !stored.account.enabled
+        {
+            return Err(AdminError::invalid("仅启用的 OpenAI OAuth 账号支持探测"));
+        }
+        let result = self
+            .accounts
+            .request_turn_state_probe(&account_id, &model, context)
+            .await
+            .map_err(|error| map_store_error(error, "turn state probe"))?;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
     async fn turn_state_status(
         &self,
         account_id: Option<&str>,

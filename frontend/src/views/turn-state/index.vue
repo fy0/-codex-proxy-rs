@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { getAccounts, TurnStateInstallation, TurnStateObservation, TurnStateStatus } from '@/api'
-import { Eye, Plus, RefreshCw, Settings2 } from '@lucide/vue'
+import { Check, Eye, Play, Plus, RefreshCw, Settings2 } from '@lucide/vue'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, onMounted, ref, watch } from 'vue'
-import { defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus } from '@/api'
+import { applyTurnState, defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus, probeTurnState } from '@/api'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
@@ -13,6 +13,7 @@ import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
+import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import TurnStateConfigModal from './TurnStateConfigModal.vue'
 
@@ -27,12 +28,15 @@ const page = ref(1)
 const pageSize = ref(20)
 const showConfig = ref(false)
 const editing = ref<TurnStateStatus | null>(null)
+const probing = ref(new Set<string>())
+const applying = ref(false)
 const { loading, run } = useAsyncAction()
 const tableBuckets = computed<TurnStateStatus[]>(() => {
   const configured = new Set(buckets.value.map(bucket => bucket.accountId))
   const unconfigured = accounts.value.filter(account => account.authenticationKind === 'oauth' && !configured.has(account.id) && (!accountFilter.value || account.id === accountFilter.value)).map(account => ({
     accountId: account.id,
     accountName: account.name,
+    accountEmail: account.email,
     model: 'gpt-6-astra',
     config: defaultTurnStateConfig(),
     tokenLength: null,
@@ -46,11 +50,14 @@ const tableBuckets = computed<TurnStateStatus[]>(() => {
     installations: [],
     configured: false,
   }))
-  return [...buckets.value, ...unconfigured]
+  return [...buckets.value.map((bucket) => {
+    const account = accounts.value.find(account => account.id === bucket.accountId)
+    return { ...bucket, accountEmail: bucket.accountEmail ?? account?.email }
+  }), ...unconfigured]
 })
 const selection = computed(() => tableBuckets.value.find(bucket => bucketKey(bucket) === selectedKey.value))
-const accountOptions = computed(() => [{ label: '全部账号', value: '' }, ...accounts.value.map(account => ({ label: account.name, value: account.id }))])
-const bucketOptions = computed(() => tableBuckets.value.map(bucket => ({ label: `${bucket.accountName} / ${bucket.model}`, value: bucketKey(bucket) })))
+const accountOptions = computed(() => [{ label: '全部账号', value: '' }, ...accounts.value.map(account => ({ label: `${account.email?.trim() || account.name} · ${account.id}`, value: account.id }))])
+const bucketOptions = computed(() => tableBuckets.value.map(bucket => ({ label: `${bucket.accountEmail?.trim() || bucket.accountName} · ${bucket.accountId} / ${bucket.model}`, value: bucketKey(bucket) })))
 const observations = computed(() => selection.value?.observations.filter(item => item.source === tab.value) ?? [])
 const installations = computed(() => selection.value?.installations ?? [])
 const total = computed(() => tab.value === 'history' ? installations.value.length : observations.value.length)
@@ -63,18 +70,21 @@ const distribution = computed(() => {
   return [...counts.entries()]
 })
 const columns = defineTableColumns<TurnStateStatus>([
-  { key: 'accountName', label: '账号 / 模型', kind: 'identity', size: 'xl' },
+  { key: 'accountName', label: '账号 / 模型', kind: 'identity', size: '3xl' },
   { key: 'enabled', label: '探测改写', kind: 'status', size: 'md' },
   { key: 'state', label: '当前 state', kind: 'custom', size: 'lg' },
   { key: 'acquiredAt', label: '获取时间', kind: 'datetime', format: (_, row) => date(row.installations[0]?.acquiredAt ?? null) },
   { key: 'retries', label: '本次重试', kind: 'numeric', size: 'sm', format: (_, row) => row.installations[0] ? Math.max(0, row.installations[0].attempts - 1) : '-' },
   { key: 'average', label: '近期平均重试', kind: 'numeric', size: 'md', format: (_, row) => averageRetries(row) },
-  { key: 'nextProbeAt', label: '预计开始时间', kind: 'datetime', format: value => value !== null && Number(value) <= Date.now() / 1000 ? '即将开始' : date(value as number | null) },
-  { key: 'actions', label: '操作', kind: 'actions' },
+  { key: 'nextProbeAt', label: '预计开始时间', kind: 'datetime', format: (value, row) => row.manualProbeRequestedAt != null ? '手动探测待执行' : value !== null && Number(value) <= Date.now() / 1000 ? '即将开始' : date(value as number | null) },
+  { key: 'actions', label: '操作', kind: 'actions', size: 'xl' },
 ])
 const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'observedAt', label: '时间', kind: 'datetime', format: value => date(value as number) },
-  { key: 'outcome', label: '结果', kind: 'text', size: 'lg', format: value => outcome(String(value)) },
+  { key: 'outcome', label: '结果', kind: 'text', size: 'xl', format: value => outcome(String(value)) },
+  { key: 'requestStateSource', label: '请求 state', kind: 'text', size: 'lg', format: value => requestStateSource(value as string | null) },
+  { key: 'responseSource', label: '观测位置', kind: 'text', size: 'lg', format: value => responseSource(value as string | null) },
+  { key: 'probeTrigger', label: '触发方式', kind: 'text', size: 'sm', format: value => value === 'manual' ? '手动' : value === 'scheduled' ? '自动' : '-' },
   { key: 'httpStatus', label: 'HTTP', kind: 'numeric', size: 'sm' },
   { key: 'tokenLength', label: '实际长度', kind: 'numeric', size: 'sm' },
   { key: 'egress', label: '出口', kind: 'text' },
@@ -84,6 +94,7 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'stopMode', label: '中断策略', kind: 'text', size: 'lg', format: value => value === 'headers' ? '获得 state' : value === 'first_output' ? '获得回应' : '-' },
   { key: 'stopReason', label: '中断原因', kind: 'text', size: 'lg' },
   { key: 'probeId', label: '请求 ID', kind: 'mono', size: '3xl' },
+  { key: 'actions', label: '操作', kind: 'actions', size: 'sm' },
 ])
 const historyColumns = defineTableColumns<TurnStateInstallation>([
   { key: 'installedAt', label: '安装时间', kind: 'datetime', format: value => date(value as number) },
@@ -104,12 +115,31 @@ function date(value: number | null) {
 function age(value: number | null) {
   return value === null ? '-' : `${Math.floor(value / 60)} 分 ${value % 60} 秒`
 }
+function expiresAt(bucket: TurnStateStatus) {
+  return bucket.issuedAt === null ? null : bucket.issuedAt + bucket.config.ttlSeconds
+}
+function expired(bucket: TurnStateStatus) {
+  const expiry = expiresAt(bucket)
+  return expiry !== null && expiry <= Date.now() / 1000
+}
+function requestStateSource(value: string | null) {
+  const labels: Record<string, string> = { none: '未携带', client: '客户端 / 会话', automatic_override: '自动改写', manual_override: '手动改写' }
+  return value ? labels[value] ?? value : '未记录'
+}
+function responseSource(value: string | null) {
+  const labels: Record<string, string> = { http_headers: 'HTTP 响应头', websocket_start: 'WS 响应起始', websocket_metadata: 'WS 元数据' }
+  return value ? labels[value] ?? value : '未记录'
+}
 function averageRetries(bucket: TurnStateStatus) {
   const samples = bucket.installations.filter(item => item.source === 'probe')
   return samples.length ? (samples.reduce((sum, item) => sum + Math.max(0, item.attempts - 1), 0) / samples.length).toFixed(1) : '-'
 }
 function outcome(value: string) {
   const labels: Record<string, string> = { candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
+  if (value === 'reused_state')
+    return '相同 state（未续期）'
+  if (value === 'not_newer')
+    return '非更新 state（未安装）'
   return labels[value] ?? value
 }
 
@@ -130,6 +160,53 @@ async function load() {
 function configure(bucket: TurnStateStatus | null = null) {
   editing.value = bucket
   showConfig.value = true
+}
+
+async function probeOnce(bucket: TurnStateStatus) {
+  const key = bucketKey(bucket)
+  if (probing.value.has(key) || bucket.manualProbeRequestedAt != null)
+    return
+  probing.value.add(key)
+  try {
+    await probeTurnState({ accountId: bucket.accountId, model: bucket.model })
+    selectedKey.value = key
+    tab.value = 'probe'
+    toast.success('单次探测已排队')
+    await load()
+  }
+  catch {
+    // 请求层统一展示错误，保留当前状态以便重试。
+  }
+  finally {
+    probing.value.delete(key)
+  }
+}
+
+function canApply(observation: TurnStateObservation) {
+  const bucket = selection.value
+  return !!bucket?.accountEnabled && observation.outcome === 'candidate'
+    && observation.issuedAt != null && observation.issuedAt === bucket.candidateIssuedAt
+    && observation.issuedAt + bucket.config.ttlSeconds > Date.now() / 1000
+    && (bucket.issuedAt === null || observation.issuedAt > bucket.issuedAt)
+}
+
+async function applyState(observation: TurnStateObservation) {
+  const bucket = selection.value
+  if (!bucket || !canApply(observation) || applying.value || observation.issuedAt === null)
+    return
+  applying.value = true
+  try {
+    await applyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt: observation.issuedAt })
+    toast.success('state 已应用，自动探测设置未变更')
+    await load()
+  }
+  catch {
+    // 候选可能被并发探测替换或已经过期，刷新后重新判断可用性。
+    await load()
+  }
+  finally {
+    applying.value = false
+  }
 }
 
 watch(accountFilter, load)
@@ -180,21 +257,27 @@ onMounted(async () => {
     <BaseTable :columns="columns" :rows="tableBuckets" :row-key="bucketKey" :loading="loading" empty-text="暂无路由状态">
       <template #accountName="{ row }">
         <div class="grid gap-1">
-          <span>{{ row.accountName }}</span>
-          <span class="font-mono text-cp-xs text-cp-text-secondary">{{ row.model }}</span>
+          <span class="break-all" :title="row.accountName">{{ row.accountEmail?.trim() || row.accountName || row.accountId }}</span>
+          <span class="break-all font-mono text-cp-xs text-cp-text-secondary">{{ row.accountId }}</span>
+          <span class="break-all font-mono text-cp-xs text-cp-text-secondary">{{ row.model }}</span>
         </div>
       </template>
       <template #enabled="{ row }">
         <span :class="row.config.enabled ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.config.enabled ? '已启用' : '未启用' }}</span>
+        <span v-if="row.manualOverride && row.active && !expired(row)" class="block text-cp-xs text-cp-success-text">手动改写中</span>
         <span v-if="!row.accountEnabled" class="block text-cp-xs text-cp-warning-text">账号已停用</span>
       </template>
       <template #state="{ row }">
-        <div class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}`">
-          <span :class="row.active ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.active ? `${row.tokenLength} · 使用中` : row.tokenLength ? `${row.tokenLength} · 未使用` : '尚未获取' }}</span>
-          <span class="text-cp-xs text-cp-text-secondary">{{ row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
+        <div class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}\n到期时间：${date(expiresAt(row))}`">
+          <span :class="row.active && !expired(row) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ expired(row) ? `${row.tokenLength} · 已过期` : row.active ? `${row.tokenLength} · 使用中` : row.tokenLength ? `${row.tokenLength} · 未使用` : '尚未获取' }}</span>
+          <span class="text-cp-xs text-cp-text-secondary">{{ expired(row) ? '改写已解除' : row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
+          <span v-if="row.candidateIssuedAt != null" class="text-cp-xs text-cp-success-text">{{ row.candidateLength }} · 候选可应用</span>
         </div>
       </template>
       <template #actions="{ row }">
+        <BaseIconButton :label="row.manualProbeRequestedAt != null ? '探测已排队' : '探测一次'" :disabled="!row.accountEnabled || probing.has(bucketKey(row)) || row.manualProbeRequestedAt != null" @click="probeOnce(row)">
+          <Play class="size-4" />
+        </BaseIconButton>
         <BaseIconButton label="查看探测记录" @click="selectedKey = bucketKey(row)">
           <Eye class="size-4" />
         </BaseIconButton>
@@ -228,9 +311,25 @@ onMounted(async () => {
         </div>
         <div>
           <dt class="text-cp-text-secondary">
-            轮换龄 / 寿命
+            轮换龄 / 有效期
           </dt><dd class="m-0 mt-1">
             {{ selection.config.refreshAfterSeconds / 60 }} / {{ selection.config.ttlSeconds / 60 }} 分
+          </dd>
+        </div>
+        <div>
+          <dt class="text-cp-text-secondary">
+            签发时间
+          </dt>
+          <dd class="m-0 mt-1 font-mono">
+            {{ date(selection.issuedAt) }}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-cp-text-secondary">
+            到期时间
+          </dt>
+          <dd class="m-0 mt-1 font-mono">
+            {{ date(expiresAt(selection)) }}
           </dd>
         </div>
         <div v-for="[length, count] in distribution" :key="length">
@@ -243,7 +342,15 @@ onMounted(async () => {
       </dl>
       <BaseSegmented v-model="tab" label="记录类型" class="w-full sm:w-96" :options="[{ label: '主动探测', value: 'probe' }, { label: '被动采集', value: 'passive' }, { label: '安装历史', value: 'history' }]" />
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
-      <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact" />
+      <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">
+        <template #actions="{ row }">
+          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(row)">
+            <Check class="size-4" />
+          </BaseIconButton>
+          <span v-else-if="row.issuedAt != null && row.issuedAt === selection.issuedAt" class="text-cp-xs text-cp-text-secondary">已安装</span>
+          <span v-else class="text-cp-text-secondary">-</span>
+        </template>
+      </BaseTable>
       <BaseTablePagination :pagination="{ currentPage: page, pageSize, total }" :loading="loading" @page-change="page = $event" @page-size-change="pageSize = $event; page = 1" />
     </section>
     <TurnStateConfigModal v-model="showConfig" :bucket="editing" :accounts="accounts" @saved="load" />

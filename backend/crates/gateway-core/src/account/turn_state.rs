@@ -18,6 +18,8 @@ pub struct TurnStateConfig {
     pub budget: u32,
     pub idle_seconds: u64,
     pub timezone: chrono_tz::Tz,
+    pub originator: String,
+    pub user_agent: String,
     pub include_account_proxy: bool,
     pub include_direct: bool,
     pub proxy_ids: Vec<String>,
@@ -38,13 +40,15 @@ impl Default for TurnStateConfig {
         Self {
             enabled: false,
             target_length: 292,
-            ttl_seconds: 2700,
+            ttl_seconds: 3600,
             refresh_after_seconds: 2100,
             retry_seconds: 30,
             jitter_seconds: 15,
             budget: 40,
             idle_seconds: 300,
             timezone: chrono_tz::UTC,
+            originator: "codex-tui".to_owned(),
+            user_agent: String::new(),
             include_account_proxy: true,
             include_direct: false,
             proxy_ids: Vec::new(),
@@ -62,6 +66,18 @@ impl TurnStateConfig {
             && self.jitter_seconds <= 3600
             && (1..=100).contains(&self.budget)
             && (10..=86400).contains(&self.idle_seconds)
+            && !self.originator.trim().is_empty()
+            && self.originator.len() <= 128
+            && self
+                .originator
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte))
+            && self.user_agent.len() <= 1024
+            && (self.user_agent.is_empty() || !self.user_agent.trim().is_empty())
+            && self
+                .user_agent
+                .bytes()
+                .all(|byte| (0x20..=0x7e).contains(&byte))
             && (self.include_account_proxy || self.include_direct || !self.proxy_ids.is_empty())
             && self.proxy_ids.len() <= 32
             && self.proxy_ids.iter().all(|id| {
@@ -130,6 +146,12 @@ pub struct TurnStateObservation {
     #[serde(default)]
     pub started_at: Option<i64>,
     pub source: String,
+    #[serde(default)]
+    pub request_state_source: Option<String>,
+    #[serde(default)]
+    pub response_source: Option<String>,
+    #[serde(default)]
+    pub probe_trigger: Option<String>,
     pub outcome: String,
     pub http_status: Option<u16>,
     pub token_length: Option<usize>,
@@ -170,6 +192,8 @@ pub struct TurnStateBucket {
     pub candidate: Option<TurnStateToken>,
     pub hunt_attempts: u64,
     pub next_probe_at: Option<i64>,
+    pub manual_probe_requested_at: Option<i64>,
+    pub manual_override: bool,
 }
 
 #[derive(Serialize)]
@@ -177,6 +201,7 @@ pub struct TurnStateBucket {
 pub struct TurnStateStatus {
     pub account_id: String,
     pub account_name: String,
+    pub account_email: Option<String>,
     pub model: String,
     pub config: TurnStateConfig,
     pub token_length: Option<usize>,
@@ -186,6 +211,10 @@ pub struct TurnStateStatus {
     pub account_enabled: bool,
     pub hunt_attempts: u64,
     pub next_probe_at: Option<i64>,
+    pub manual_probe_requested_at: Option<i64>,
+    pub manual_override: bool,
+    pub candidate_issued_at: Option<i64>,
+    pub candidate_length: Option<usize>,
     pub observations: Vec<TurnStateObservation>,
     pub installations: Vec<TurnStateInstallation>,
 }

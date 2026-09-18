@@ -135,6 +135,7 @@ impl CodexBackendClient {
                 .map(|value| value.as_bytes().to_vec()),
             elapsed_ms: u64::try_from(headers_elapsed.as_millis()).unwrap_or(u64::MAX),
             transport_error: response.is_err(),
+            source: "http_headers",
         })
         .await;
         let response = response?;
@@ -494,6 +495,7 @@ impl CodexBackendClient {
                         .map(|value| value.as_bytes().to_vec()),
                     elapsed_ms: metrics.upstream_headers_ms.unwrap_or_default().max(0) as u64,
                     transport_error: false,
+                    source: "websocket_start",
                 })
                 .await;
                 Ok(CodexBackendStreamingResponse {

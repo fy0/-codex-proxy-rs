@@ -11,6 +11,8 @@ export interface TurnStateConfig {
   budget: number
   idleSeconds: number
   timezone: string
+  originator: string
+  userAgent: string
   includeAccountProxy: boolean
   includeDirect: boolean
   proxyIds: string[]
@@ -18,7 +20,7 @@ export interface TurnStateConfig {
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, targetLength: 292, ttlSeconds: 2700, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers' }
+  return { enabled, targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers' }
 }
 
 export interface TurnStateObservation {
@@ -26,6 +28,9 @@ export interface TurnStateObservation {
   model: string
   observedAt: number
   source: string
+  requestStateSource?: string | null
+  responseSource?: string | null
+  probeTrigger?: string | null
   outcome: string
   httpStatus: number | null
   tokenLength: number | null
@@ -52,6 +57,7 @@ export interface TurnStateInstallation {
 export interface TurnStateStatus {
   accountId: string
   accountName: string
+  accountEmail?: string | null
   model: string
   config: TurnStateConfig
   tokenLength: number | null
@@ -61,6 +67,10 @@ export interface TurnStateStatus {
   accountEnabled: boolean
   huntAttempts: number
   nextProbeAt: number | null
+  manualProbeRequestedAt?: number | null
+  manualOverride?: boolean
+  candidateIssuedAt?: number | null
+  candidateLength?: number | null
   configured?: boolean
   observations: TurnStateObservation[]
   installations: TurnStateInstallation[]
@@ -78,6 +88,22 @@ export function getTurnStateStatus(accountId?: string, options: RequestOptions =
 export function configureTurnState(data: { accountId: string, model: string, config: TurnStateConfig }) {
   return request<{ accountId: string, configRevision: number }>({
     url: '/api/admin/accounts/turn-state/configure',
+    method: 'POST',
+    data,
+  })
+}
+
+export function probeTurnState(data: { accountId: string, model: string }) {
+  return request<{ accountId: string, configRevision: number }>({
+    url: '/api/admin/accounts/turn-state/probe',
+    method: 'POST',
+    data,
+  })
+}
+
+export function applyTurnState(data: { accountId: string, model: string, issuedAt: number }) {
+  return request<{ accountId: string, configRevision: number }>({
+    url: '/api/admin/accounts/turn-state/apply',
     method: 'POST',
     data,
   })

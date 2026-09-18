@@ -77,6 +77,29 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
     let server = MockServer::start().await;
     let store = Arc::new(MemoryAccountStore::default());
     seed(&store, false).await;
+    store.seed_turn_state(
+        "acct_turn_probe",
+        "gpt-5.4",
+        TurnStateConfig {
+            enabled: true,
+            retry_seconds: 1,
+            jitter_seconds: 0,
+            timezone: chrono_tz::Pacific::Kiritimati,
+            originator: "test-probe-persona".to_owned(),
+            user_agent: "test-probe-agent/1.0".to_owned(),
+            ..TurnStateConfig::default()
+        },
+    );
+    store.set_egress(
+        "acct_turn_probe",
+        None,
+        Some(gateway_core::account::RequestLocation {
+            country: "US".to_owned(),
+            region: "Hawaii".to_owned(),
+            city: "Honolulu".to_owned(),
+            timezone: chrono_tz::Pacific::Honolulu,
+        }),
+    );
     let runtime = tempfile::tempdir().unwrap();
     let mut config = OpenAiConfig::default();
     config.api.base_url = server.uri();
@@ -125,6 +148,8 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.headers["chatgpt-account-id"], "upstream-probe");
+        assert_eq!(request.headers["originator"], "test-probe-persona");
+        assert_eq!(request.headers["user-agent"], "test-probe-agent/1.0");
         let bytes = zstd::stream::decode_all(std::io::Cursor::new(&request.body)).unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         for key in [
@@ -171,6 +196,12 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
                         .to_string()
                 )
         );
+        assert!(
+            body["input"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("<timezone>Pacific/Kiritimati</timezone>")
+        );
         let bucket = store
             .turn_state_bucket(&id, "gpt-5.4")
             .await
@@ -196,39 +227,104 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         vec![Some(312), Some(552), Some(292)]
     );
     assert_eq!(observations[0].outcome, "length_miss");
-    Mock::given(method("POST")).and(path("/codex/responses"))
+    for phase in 0..4 {
+        if phase == 2 {
+            store.set_current_turn_state(
+                id.as_str(),
+                "gpt-5.4",
+                gateway_core::account::TurnStateToken::parse(&target).unwrap(),
+                true,
+            );
+        }
+        if phase == 3 {
+            let mut bytes = vec![0; 217];
+            bytes[0] = 0x80;
+            bytes[1..9].copy_from_slice(&((Utc::now().timestamp() - 3600) as u64).to_be_bytes());
+            store.set_current_turn_state(
+                id.as_str(),
+                "gpt-5.4",
+                gateway_core::account::TurnStateToken::parse(&URL_SAFE.encode(bytes)).unwrap(),
+                true,
+            );
+        }
+        Mock::given(method("POST")).and(path("/codex/responses"))
         .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
-            .insert_header("x-codex-turn-state", token(233))
+            .insert_header("x-codex-turn-state", if phase == 0 { token(233) } else { target.clone() })
             .set_body_string("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_turn_test\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n"))
         .mount(&server).await;
-    let payload = ProtocolPayload::json_object(
+        let payload = ProtocolPayload::json_object(
         "openai",
-        json!({"model": "gpt-5.4", "input": "Hello"})
+        json!({"model": "gpt-5.4", "input": "Hello", "client_metadata": {"x-codex-turn-state": target}})
             .as_object()
             .unwrap()
             .clone(),
     )
     .unwrap()
     .with_context(json!({"use_websocket": false}).as_object().unwrap().clone());
-    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
-    let mut stream = bundle
-        .core_provider()
-        .execute(
-            initialized_provider_request(operation, id.as_str()),
-            initialized_attempt_context("req_turn_state", id.as_str()),
-        )
-        .await
-        .unwrap();
-    while let Some(event) = stream.next().await {
-        event.unwrap();
+        let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
+        let mut stream = bundle
+            .core_provider()
+            .execute(
+                initialized_provider_request(operation, id.as_str()),
+                initialized_attempt_context("req_turn_state", id.as_str()),
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        if phase == 3 {
+            assert!(!requests[0].headers.contains_key("x-codex-turn-state"));
+            let bytes = zstd::stream::decode_all(std::io::Cursor::new(&requests[0].body)).unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(body["client_metadata"]["x-codex-turn-state"].is_null());
+        } else {
+            assert_eq!(requests[0].headers["x-codex-turn-state"], target);
+        }
+        assert_eq!(requests[0].headers["originator"], "Codex Desktop");
+        assert!(
+            requests[0].headers["user-agent"]
+                .to_str()
+                .unwrap()
+                .starts_with("Codex Desktop/")
+        );
+        let observation = store.turn_observations().pop().unwrap();
+        assert_eq!(
+            observation.outcome,
+            ["length_miss", "reused_state", "reused_state", "candidate"][phase]
+        );
+        assert_eq!(
+            observation.request_state_source.as_deref(),
+            Some(if phase == 3 {
+                "none"
+            } else if phase == 2 {
+                "manual_override"
+            } else {
+                "automatic_override"
+            })
+        );
+        if phase == 1 {
+            let bucket = store
+                .turn_state_bucket(&id, "gpt-5.4")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(bucket.candidate.is_none());
+            assert_eq!(
+                bucket.current_issued_at,
+                gateway_core::account::TurnStateToken::parse(&target).map(|token| token.issued_at)
+            );
+        }
+        server.reset().await;
     }
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["x-codex-turn-state"], target);
     assert!(
         store
             .turn_observations()
             .iter()
-            .any(|item| item.source == "passive" && item.token_length == Some(312))
+            .any(|item| item.source == "passive"
+                && item.token_length == Some(312)
+                && item.request_state_source.as_deref() == Some("automatic_override"))
     );
 }
 
@@ -432,4 +528,34 @@ async fn probes_default_to_account_proxy_and_respect_selected_pool() {
         [proxy_a.endpoint(), proxy_b.endpoint()].contains(&store.turn_observations()[1].egress)
     );
     assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn manual_probe_runs_once_without_enabling_rotation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(217)))
+        .mount(&server)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    store.seed_turn_state("acct_turn_probe", "gpt-5.4", TurnStateConfig::default());
+    store.request_turn_probe("acct_turn_probe", "gpt-5.4");
+    cycle(Arc::clone(&store), server.uri()).await;
+    cycle(Arc::clone(&store), server.uri()).await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let observation = store.turn_observations().pop().unwrap();
+    assert_eq!(observation.probe_trigger.as_deref(), Some("manual"));
+    let bucket = store
+        .turn_state_bucket(
+            &ProviderAccountId::new("acct_turn_probe").unwrap(),
+            "gpt-5.4",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!bucket.config.enabled);
+    assert!(bucket.current.is_none());
+    assert!(bucket.candidate.is_some());
+    assert!(bucket.manual_probe_requested_at.is_none());
 }

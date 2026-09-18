@@ -26,6 +26,14 @@ pub trait ProviderAccountStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn claim_turn_state_probe(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
     async fn turn_state_bucket(
         &self,
         _account: &ProviderAccountId,

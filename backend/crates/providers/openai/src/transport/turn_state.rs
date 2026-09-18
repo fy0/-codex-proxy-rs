@@ -8,6 +8,7 @@ pub(crate) struct TurnStateResponse {
     pub value: Option<Vec<u8>>,
     pub elapsed_ms: u64,
     pub transport_error: bool,
+    pub source: &'static str,
 }
 
 impl TurnStateResponse {
@@ -35,6 +36,7 @@ impl TurnStateResponse {
                     .map(|value| value.as_bytes().to_vec()),
                 elapsed_ms,
                 transport_error: false,
+                source: "websocket_start",
             }),
             Error::Connect(_)
             | Error::Transport(_)
@@ -44,6 +46,7 @@ impl TurnStateResponse {
                 value: None,
                 elapsed_ms,
                 transport_error: true,
+                source: "websocket_start",
             }),
             // 本地熔断、排队和续接策略不是一次已发出的上游响应。
             _ => None,

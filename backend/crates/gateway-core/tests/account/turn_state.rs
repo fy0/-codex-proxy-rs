@@ -54,6 +54,7 @@ fn all_lengths_are_parseable_without_treating_errors_as_tokens() {
 fn rotation_config_bounds_ttl_budget_and_proxy_selection() {
     let mut config = TurnStateConfig::default();
     assert!(config.is_valid());
+    assert_eq!(config.ttl_seconds, 3600);
     assert!(config.include_account_proxy);
     assert!(!config.include_direct);
     config.refresh_after_seconds = config.ttl_seconds;
@@ -65,4 +66,28 @@ fn rotation_config_bounds_ttl_budget_and_proxy_selection() {
     assert!(config.is_valid());
     config.budget = 0;
     assert!(!config.is_valid());
+}
+
+#[test]
+fn probe_persona_defaults_are_compatible_and_reject_header_injection() {
+    let mut config: TurnStateConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(config.originator, "codex-tui");
+    assert!(config.user_agent.is_empty());
+    config.originator = "Custom Probe".to_owned();
+    config.user_agent = "Custom Probe/1.0".to_owned();
+    assert!(config.is_valid());
+    for invalid in [
+        "\r\nx-test: injected".to_owned(),
+        " ".to_owned(),
+        "x".repeat(1025),
+    ] {
+        config.user_agent = invalid;
+        assert!(!config.is_valid());
+    }
+    config.user_agent.clear();
+    for invalid in ["".to_owned(), "\n".to_owned(), "x".repeat(129)] {
+        config.originator = invalid;
+        assert!(!config.is_valid());
+    }
+    assert!(serde_json::from_str::<TurnStateConfig>(r#"{"timezone":"not-a-timezone"}"#).is_err());
 }

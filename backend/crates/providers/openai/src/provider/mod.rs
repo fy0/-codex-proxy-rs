@@ -523,8 +523,14 @@ impl Provider for CodexProvider {
             account_scope,
         );
         // 管理员配置的 turn state 覆盖值无视客户端输入与账号归属判定，无条件生效。
+        let mut request_state_source = if upstream_request.turn_state.is_some() {
+            "client"
+        } else {
+            "none"
+        };
         if let Some(turn_state) = lease.account().turn_state_override() {
             force_turn_state_override(&mut upstream_request, turn_state);
+            request_state_source = "manual_override";
         }
         let oauth = lease.authentication().oauth().is_some();
         if oauth
@@ -532,10 +538,11 @@ impl Provider for CodexProvider {
             && let Some(bucket) = service
                 .current(lease.account_id(), upstream_model.as_str())
                 .await
-            && bucket.config.enabled
+            && (bucket.config.enabled || bucket.manual_override)
         {
             // 管理桶没有有效令牌时也清除旧覆盖，禁止降级到账号级旧值。
             crate::transport::request::clear_turn_state_override(&mut upstream_request);
+            request_state_source = "none";
             if let Some(token) = bucket.current.filter(|token| {
                 bucket.upstream_account_id.as_deref() == lease.account().upstream_account_id()
                     && bucket.upstream_user_id.as_deref() == lease.account().upstream_user_id()
@@ -545,6 +552,11 @@ impl Provider for CodexProvider {
                         .is_some_and(|parsed| parsed.issued_at == token.issued_at)
             }) {
                 force_turn_state_override(&mut upstream_request, &token.value);
+                request_state_source = if bucket.manual_override {
+                    "manual_override"
+                } else {
+                    "automatic_override"
+                };
             }
         }
         // 每次执行从原始请求编码，选定出口后再覆盖，避免换号时携带上次位置。
@@ -632,6 +644,8 @@ impl Provider for CodexProvider {
                         .and_then(|value| value.get("effort"))
                         .and_then(Value::as_str)
                         .map(str::to_owned),
+                    request_state_source,
+                    upstream_request.turn_state.clone(),
                 )
             })
         } else {

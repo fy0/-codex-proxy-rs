@@ -4,6 +4,7 @@ use std::{io::Read, path::Path};
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use gateway_core::account::TurnStateConfig;
 use gateway_protocol::openai::sse::SseEventDecoder;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
@@ -131,7 +132,7 @@ pub(super) struct ProbeRequest {
 
 pub(super) fn request(
     model: &str,
-    timezone: chrono_tz::Tz,
+    config: &TurnStateConfig,
     instructions: &str,
     profile: &CodexWireProfileState,
     now: DateTime<Utc>,
@@ -152,15 +153,20 @@ pub(super) fn request(
     let (shape, prompt) = SHAPES[random_index(SHAPES.len())];
     let effort = ["medium", "high", "xhigh"][random_index(3)];
     let profile = profile.snapshot();
-    let ua = format!(
-        "codex-tui/{} ({} {}; {}) {} (codex-tui; {})",
-        profile.codex_version,
-        profile.os_type,
-        profile.os_version,
-        profile.arch,
-        profile.terminal,
-        profile.codex_version
-    );
+    let originator = &config.originator;
+    let ua = if config.user_agent.is_empty() {
+        format!(
+            "{originator}/{} ({} {}; {}) {} ({originator}; {})",
+            profile.codex_version,
+            profile.os_type,
+            profile.os_version,
+            profile.arch,
+            profile.terminal,
+            profile.codex_version
+        )
+    } else {
+        config.user_agent.clone()
+    };
     let mut headers = HeaderMap::new();
     for (name, value) in [
         ("session-id", session.as_str()),
@@ -168,7 +174,7 @@ pub(super) fn request(
         ("x-client-request-id", id.as_str()),
         ("x-codex-window-id", window.as_str()),
         ("x-codex-turn-metadata", metadata.as_str()),
-        ("originator", "codex-tui"),
+        ("originator", originator.as_str()),
         ("version", profile.codex_version.as_str()),
         ("user-agent", ua.as_str()),
         ("accept", "text/event-stream"),
@@ -178,6 +184,7 @@ pub(super) fn request(
             headers.insert(name, value);
         }
     }
+    let timezone = config.timezone;
     let environment = format!(
         "<environment_context>\n  <cwd>/workspace</cwd>\n  <shell>bash</shell>\n  <current_date>{}</current_date>\n  <timezone>{timezone}</timezone>\n</environment_context>",
         now.with_timezone(&timezone).format("%Y-%m-%d")

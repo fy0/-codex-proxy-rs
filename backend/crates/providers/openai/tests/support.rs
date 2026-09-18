@@ -83,12 +83,41 @@ impl MemoryAccountStore {
                 candidate: None,
                 hunt_attempts: 0,
                 next_probe_at: None,
+                manual_probe_requested_at: None,
+                manual_override: false,
             },
         );
     }
 
     pub(crate) fn turn_observations(&self) -> Vec<gateway_core::account::TurnStateObservation> {
         self.turn_observations.lock().unwrap().clone()
+    }
+
+    pub(crate) fn set_current_turn_state(
+        &self,
+        account: &str,
+        model: &str,
+        token: gateway_core::account::TurnStateToken,
+        manual: bool,
+    ) {
+        let mut states = self.turn_states.lock().unwrap();
+        let state = states
+            .get_mut(&(account.to_owned(), model.to_owned()))
+            .unwrap();
+        state.current_issued_at = Some(token.issued_at);
+        state.current_length = Some(token.value.len());
+        state.current = Some(token);
+        state.manual_override = manual;
+        state.config.enabled = !manual;
+    }
+
+    pub(crate) fn request_turn_probe(&self, account: &str, model: &str) {
+        self.turn_states
+            .lock()
+            .unwrap()
+            .get_mut(&(account.to_owned(), model.to_owned()))
+            .unwrap()
+            .manual_probe_requested_at = Some(chrono::Utc::now().timestamp());
     }
 
     pub(crate) fn repository(self: &Arc<Self>) -> CodexCredentialRepository {
@@ -221,6 +250,19 @@ impl MemoryAccountStore {
 
 #[async_trait]
 impl ProviderAccountStore for MemoryAccountStore {
+    async fn claim_turn_state_probe(
+        &self,
+        account: &ProviderAccountId,
+        model: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .turn_states
+            .lock()
+            .unwrap()
+            .get_mut(&(account.as_str().to_owned(), model.to_owned()))
+            .is_some_and(|state| state.manual_probe_requested_at.take().is_some()))
+    }
+
     async fn schedule_turn_state(
         &self,
         account: &ProviderAccountId,

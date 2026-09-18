@@ -19,6 +19,9 @@ fn observation(account: &str, model: &str, length: usize, issued_at: i64) -> Tur
         observed_at: Utc::now().timestamp(),
         started_at: Some(Utc::now().timestamp() - 1),
         source: "probe".to_owned(),
+        request_state_source: Some("none".to_owned()),
+        response_source: Some("http_headers".to_owned()),
+        probe_trigger: Some("scheduled".to_owned()),
         outcome: if length == 292 {
             "candidate"
         } else {
@@ -70,6 +73,36 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
         }
     }
     let id = ProviderAccountId::new("acct_turn_a").unwrap();
+    admin
+        .request_turn_state_probe(&id, "manual-model", &context)
+        .await
+        .unwrap();
+    admin
+        .request_turn_state_probe(&id, "manual-model", &context)
+        .await
+        .unwrap();
+    let manual = repository
+        .turn_state_bucket(&id, "manual-model")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!manual.config.enabled);
+    assert!(manual.manual_probe_requested_at.is_some());
+    assert!(manual.next_probe_at.is_none());
+    let (first, second) = tokio::join!(
+        repository.claim_turn_state_probe(&id, "manual-model"),
+        repository.claim_turn_state_probe(&id, "manual-model")
+    );
+    assert_eq!(
+        usize::from(first.unwrap()) + usize::from(second.unwrap()),
+        1
+    );
+    assert!(
+        !repository
+            .claim_turn_state_probe(&id, "manual-model")
+            .await
+            .unwrap()
+    );
     let issued = Utc::now().timestamp() - 60;
     let initial = token(292, issued);
     repository
@@ -118,6 +151,17 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
         .find(|bucket| bucket.model == "model-a")
         .unwrap();
     assert_eq!(model.installations.len(), 1);
+    assert_eq!(
+        model.account_email.as_deref(),
+        Some("acct_turn_a@example.invalid")
+    );
+    assert!(
+        model
+            .observations
+            .iter()
+            .any(|item| item.outcome == "not_newer")
+    );
+    assert_eq!(model.issued_at, Some(issued));
     assert_eq!(model.installations[0].attempts, 1);
     assert!(model.installations[0].acquired_at >= issued);
     assert!(model.next_probe_at.is_some());
@@ -174,6 +218,10 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
         .bind(id.as_str()).fetch_one(&database.pool).await.unwrap();
     assert!(expired.is_none());
     // 原身份发出的在途响应不能在重新授权后重新填入同一个本地账号桶。
+    admin
+        .request_turn_state_probe(&id, "model-a", &context)
+        .await
+        .unwrap();
     sqlx::query("update provider_accounts set upstream_user_id = 'new-user' where id = $1")
         .bind(id.as_str())
         .execute(&database.pool)
@@ -194,7 +242,101 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
     assert!(replaced.current.is_none());
     assert!(replaced.candidate.is_none());
     assert!(replaced.current_issued_at.is_none());
+    assert!(replaced.manual_probe_requested_at.is_none());
+    assert!(!replaced.manual_override);
     assert!(replaced.config.enabled);
     assert_eq!(replaced.upstream_user_id.as_deref(), Some("new-user"));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
+    let Some(database) = TestDatabase::create("turn_state_manual_apply").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_manual_apply").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "manual-apply-test".to_owned(),
+    };
+    let issued = Utc::now().timestamp() - 60;
+    repository
+        .observe_turn_state(
+            observation(id.as_str(), "model-a", 292, issued),
+            Some(token(292, issued)),
+        )
+        .await
+        .unwrap();
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.candidate_issued_at, Some(issued));
+    assert_eq!(status.candidate_length, Some(292));
+    assert!(!status.config.enabled);
+    assert!(!status.active);
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-b", issued, &context)
+            .await
+            .is_err()
+    );
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued - 1, &context)
+            .await
+            .is_err()
+    );
+    let (first, second) = tokio::join!(
+        admin.apply_turn_state(&id, "model-a", issued, &context),
+        admin.apply_turn_state(&id, "model-a", issued, &context),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(status.active);
+    assert!(status.manual_override);
+    assert!(!status.config.enabled);
+    assert!(status.next_probe_at.is_none());
+    assert!(status.candidate_issued_at.is_none());
+    assert_eq!(status.installations.len(), 1);
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued, &context)
+            .await
+            .is_err()
+    );
+    let expired = Utc::now().timestamp() - 3600;
+    sqlx::query("update account_turn_states set candidate = $2, candidate_issued_at = $3, current_issued_at = null, turn_state_override = null where account_id = $1")
+        .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", expired, &context)
+            .await
+            .is_err()
+    );
+    admin
+        .configure_turn_state(&id, "model-a", TurnStateConfig::default(), &context)
+        .await
+        .unwrap();
+    let state = repository
+        .turn_state_bucket(&id, "model-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!state.manual_override);
+    assert!(state.current.is_none());
     database.close().await;
 }

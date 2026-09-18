@@ -394,6 +394,103 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn apply_turn_state(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        issued_at: i64,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        let mut transaction = self.pool.begin().await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "turn state transaction unavailable",
+            )
+        })?;
+        if !super::turn_state::install_candidate(
+            &mut transaction,
+            account_id,
+            model,
+            Some(issued_at),
+        )
+        .await
+        .map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "turn state installation unavailable",
+            )
+        })? {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Conflict,
+                ENTITY,
+                "turn state candidate expired or changed",
+            ));
+        }
+        let result: StoreResult<Revision> = async {
+            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+            append_admin_audit_event_in_transaction(
+                &mut transaction,
+                mutation_audit(
+                    context,
+                    "apply_turn_state",
+                    "provider_account",
+                    account_id.as_str(),
+                    vec!["turn_state_override".to_owned()],
+                ),
+                revision,
+            )
+            .await?;
+            Ok(revision)
+        }
+        .await;
+        let revision =
+            super::repository::finish_admin_transaction(transaction, result, "apply turn state")
+                .await
+                .map_err(|error| admin_store_error(ENTITY, error))?;
+        Ok(AccountUpdateResult {
+            account_id: account_id.clone(),
+            config_revision: admin_revision(revision)?,
+        })
+    }
+
+    async fn request_turn_state_probe(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        let mut transaction = self.pool.begin().await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "turn state transaction unavailable",
+            )
+        })?;
+        let result: StoreResult<Revision> = async {
+            let config = serde_json::to_value(gateway_core::account::TurnStateConfig::default())
+                .map_err(|_| postgres_unavailable("encode turn state configuration"))?;
+            sqlx::query("insert into account_turn_states(account_id, model, config, upstream_account_id, upstream_user_id, manual_probe_requested_at) select id, $2, $3, upstream_account_id, upstream_user_id, $4 from provider_accounts where id = $1 and enabled and provider_kind = 'openai' and authentication_kind = 'oauth' on conflict (account_id, model) do update set manual_probe_requested_at = coalesce(account_turn_states.manual_probe_requested_at, excluded.manual_probe_requested_at) returning account_id")
+                .bind(account_id.as_str()).bind(model).bind(config).bind(Utc::now().timestamp())
+                .fetch_one(&mut *transaction).await.map_err(|_| postgres_unavailable("request turn state probe"))?;
+            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+            append_admin_audit_event_in_transaction(&mut transaction, mutation_audit(context, "request_turn_state_probe", "provider_account", account_id.as_str(), vec!["turn_state_probe".to_owned()]), revision).await?;
+            Ok(revision)
+        }.await;
+        let revision = super::repository::finish_admin_transaction(
+            transaction,
+            result,
+            "request turn state probe",
+        )
+        .await
+        .map_err(|error| admin_store_error(ENTITY, error))?;
+        Ok(AccountUpdateResult {
+            account_id: account_id.clone(),
+            config_revision: admin_revision(revision)?,
+        })
+    }
+
     async fn turn_state_status(
         &self,
         account_id: Option<&str>,
@@ -453,7 +550,7 @@ impl AccountStore for PgAdminAccountStore {
         })?;
         let result: StoreResult<Revision> = async {
             let config = serde_json::to_value(config).map_err(|_| postgres_unavailable("encode turn state configuration"))?;
-            sqlx::query("insert into account_turn_states(account_id, model, config, upstream_account_id, upstream_user_id) select id, $2, $3, upstream_account_id, upstream_user_id from provider_accounts where id = $1 on conflict (account_id, model) do update set config = excluded.config, next_probe_at = null, turn_state_override = case when not (excluded.config->>'enabled')::boolean or length(account_turn_states.turn_state_override) <> (excluded.config->>'targetLength')::integer or account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.turn_state_override end, candidate = case when length(account_turn_states.candidate) <> (excluded.config->>'targetLength')::integer or account_turn_states.candidate_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.candidate end")
+            sqlx::query("insert into account_turn_states(account_id, model, config, upstream_account_id, upstream_user_id) select id, $2, $3, upstream_account_id, upstream_user_id from provider_accounts where id = $1 on conflict (account_id, model) do update set config = excluded.config, next_probe_at = null, manual_override = false, turn_state_override = case when not (excluded.config->>'enabled')::boolean or length(account_turn_states.turn_state_override) <> (excluded.config->>'targetLength')::integer or account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.turn_state_override end, candidate = case when length(account_turn_states.candidate) <> (excluded.config->>'targetLength')::integer or account_turn_states.candidate_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.candidate end")
                 .bind(account_id.as_str()).bind(model).bind(config).execute(&mut *transaction).await
                 .map_err(|_| postgres_unavailable("configure turn state"))?;
             let revision = bump_config_revision_in_transaction(&mut transaction).await?;

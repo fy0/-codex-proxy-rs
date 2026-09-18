@@ -80,6 +80,8 @@ impl TurnStateService {
         account: &ProviderAccount,
         model: &str,
         effort: Option<String>,
+        request_state_source: &'static str,
+        request_state: Option<String>,
     ) -> TurnStateObserver {
         let service = Arc::clone(self);
         let account_id = account.id().clone();
@@ -97,12 +99,15 @@ impl TurnStateService {
             let model = model.clone();
             let egress = egress.clone();
             let effort = effort.clone();
+            let request_state = request_state.clone();
             Box::pin(async move {
-                let config = service
-                    .current(&account_id, &model)
-                    .await
-                    .map(|bucket| bucket.config)
-                    .unwrap_or_default();
+                let bucket = service.current(&account_id, &model).await;
+                let latest_issued_at = bucket.as_ref().and_then(|bucket| {
+                    bucket
+                        .current_issued_at
+                        .max(bucket.candidate.as_ref().map(|token| token.issued_at))
+                });
+                let config = bucket.map(|bucket| bucket.config).unwrap_or_default();
                 let observation = TurnStateObservation {
                     account_id: account_id.as_str().to_owned(),
                     upstream_account_id,
@@ -111,6 +116,9 @@ impl TurnStateService {
                     observed_at: Utc::now().timestamp(),
                     started_at: None,
                     source: "passive".to_owned(),
+                    request_state_source: Some(request_state_source.to_owned()),
+                    response_source: None,
+                    probe_trigger: None,
                     outcome: String::new(),
                     http_status: None,
                     token_length: None,
@@ -123,7 +131,15 @@ impl TurnStateService {
                     stop_mode: None,
                     stop_reason: None,
                 };
-                service.observe(observation, response, &config).await;
+                service
+                    .observe(
+                        observation,
+                        response,
+                        &config,
+                        request_state.as_deref(),
+                        latest_issued_at,
+                    )
+                    .await;
             })
         })
     }
@@ -133,7 +149,10 @@ impl TurnStateService {
         mut observation: TurnStateObservation,
         response: TurnStateResponse,
         config: &TurnStateConfig,
+        request_state: Option<&str>,
+        latest_issued_at: Option<i64>,
     ) {
+        observation.response_source = Some(response.source.to_owned());
         observation.http_status = response.status;
         observation.elapsed_ms = response.elapsed_ms;
         observation.token_length = response.value.as_ref().map(Vec::len);
@@ -161,6 +180,16 @@ impl TurnStateService {
             .is_some_and(|token| !token.is_fresh(observation.observed_at, config.ttl_seconds))
         {
             "expired_or_future"
+        } else if token
+            .as_ref()
+            .is_some_and(|token| Some(token.value.as_str()) == request_state)
+        {
+            "reused_state"
+        } else if token
+            .as_ref()
+            .is_some_and(|token| !token.is_newer_than(latest_issued_at))
+        {
+            "not_newer"
         } else {
             "candidate"
         }
@@ -176,6 +205,9 @@ impl TurnStateService {
             account_id = observation.account_id,
             model = observation.model,
             source = observation.source,
+            request_state_source = observation.request_state_source,
+            response_source = observation.response_source,
+            probe_trigger = observation.probe_trigger,
             outcome = observation.outcome,
             http_status = observation.http_status,
             token_length = observation.token_length,
@@ -223,6 +255,7 @@ impl TurnStateService {
         &self,
         bucket: &TurnStateBucket,
         account_id: &ProviderAccountId,
+        manual: bool,
     ) -> ProbeOutcome {
         let mut observation = TurnStateObservation {
             account_id: bucket.account_id.clone(),
@@ -232,6 +265,9 @@ impl TurnStateService {
             observed_at: Utc::now().timestamp(),
             started_at: None,
             source: "probe".to_owned(),
+            request_state_source: Some("none".to_owned()),
+            response_source: None,
+            probe_trigger: Some(if manual { "manual" } else { "scheduled" }.to_owned()),
             outcome: String::new(),
             http_status: None,
             token_length: None,
@@ -299,12 +335,10 @@ impl TurnStateService {
         }
         let proxy = exits[probe::random_index(exits.len())].as_ref();
         observation.egress = proxy.map_or_else(|| "direct".to_owned(), OutboundProxy::endpoint);
-        let timezone = account
-            .request_location()
-            .map_or(bucket.config.timezone, |location| location.timezone);
+        // 探测画像属于模型桶，不覆盖账号的业务画像或出口位置。
         let request = probe::request(
             &bucket.model,
-            timezone,
+            &bucket.config,
             &self.instructions,
             &self.profile,
             Utc::now(),
@@ -372,6 +406,7 @@ impl TurnStateService {
                 .map(|value| value.as_bytes().to_vec()),
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             transport_error: result.is_err(),
+            source: "http_headers",
         };
         // 只在明确选择回应策略时读取有界 SSE，任何策略都不保留响应正文。
         observation.stop_reason = Some(
@@ -388,7 +423,17 @@ impl TurnStateService {
         );
         response.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         drop(client);
-        self.observe(observation, response, &bucket.config).await;
+        let latest_issued_at = bucket
+            .current_issued_at
+            .max(bucket.candidate.as_ref().map(|token| token.issued_at));
+        self.observe(
+            observation,
+            response,
+            &bucket.config,
+            None,
+            latest_issued_at,
+        )
+        .await;
         if self.install(account_id, &bucket.model).await {
             ProbeOutcome::Installed
         } else {

@@ -13,6 +13,17 @@ fn loaded_credential_from_record(
 
 #[async_trait]
 impl ProviderAccountStore for PgProviderAccountRepository {
+    async fn claim_turn_state_probe(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+    ) -> Result<bool, CoreStoreError> {
+        let result = sqlx::query("update account_turn_states set manual_probe_requested_at = null where account_id = $1 and model = $2 and manual_probe_requested_at is not null")
+            .bind(account.as_str()).bind(model).execute(&self.pool).await
+            .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn schedule_turn_state(
         &self,
         account: &CoreProviderAccountId,

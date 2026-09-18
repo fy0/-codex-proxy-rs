@@ -1153,6 +1153,7 @@ async fn merge_response_metadata_updates(
                 value: Some(turn_state.as_bytes().to_vec()),
                 elapsed_ms: 0,
                 transport_error: false,
+                source: "websocket_metadata",
             })
             .await;
         if let Some(capture) = session_capture.as_mut() {
