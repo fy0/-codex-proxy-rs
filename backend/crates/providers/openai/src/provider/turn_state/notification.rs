@@ -1,6 +1,6 @@
 //! 飞书网络副作用由后台任务执行；失败日志不携带 Webhook、响应正文或 state。
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
 use gateway_core::{
@@ -17,7 +17,7 @@ struct FeishuResponse {
 }
 
 impl TurnStateService {
-    pub(super) async fn notify_installations(&self, cancellation: &CancellationToken) {
+    pub(super) async fn notify_installations(self: &Arc<Self>, cancellation: &CancellationToken) {
         let notices = match self.store.claim_turn_state_notifications().await {
             Ok(notices) => notices,
             Err(_) => {
@@ -40,14 +40,16 @@ impl TurnStateService {
         };
         futures::stream::iter(notices)
             .for_each_concurrent(4, |notice| {
-                let client = &client;
+                let client = client.clone();
+                let service = Arc::clone(self);
+                let cancellation = cancellation.clone();
                 async move {
                     let Ok(account) = ProviderAccountId::new(notice.account_id.clone()) else {
                         return;
                     };
                     let delivered = tokio::select! {
                         () = cancellation.cancelled() => return,
-                        result = send(client, &notice) => result,
+                        result = send(&client, &notice) => result,
                     };
                     if !delivered {
                         tracing::warn!(
@@ -56,7 +58,7 @@ impl TurnStateService {
                             "turn state Feishu notification failed"
                         );
                     }
-                    if self
+                    if service
                         .store
                         .finish_turn_state_notification(
                             &account,
