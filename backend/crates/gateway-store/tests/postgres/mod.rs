@@ -226,6 +226,8 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "_sqlx_migrations",
             "account_group_accounts",
             "account_groups",
+            "account_turn_state_events",
+            "account_turn_states",
             "admin_audit_events",
             "admin_users",
             "backup_records",
