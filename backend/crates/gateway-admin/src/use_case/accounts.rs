@@ -579,14 +579,26 @@ impl AccountsService for DefaultAccountsService {
     ) -> Result<AccountUpdateResult, AdminError> {
         let account_id = ProviderAccountId::new(command.account_id.clone())
             .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
-        let (_, provider) = self.provider_for_account(&account_id).await?;
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
         let enabled = command.enabled;
+        // 前端每次保存都会带上该字段，只有值真正变化才需要断开池化连接。
+        let turn_state_changed = command.turn_state_override.as_deref().is_some_and(|new| {
+            new.trim()
+                != stored
+                    .account
+                    .turn_state_override
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+        });
         let result = self
             .accounts
             .update_account(command, context)
             .await
             .map_err(|error| map_store_error(error, "provider account"))?;
-        if !enabled {
+        // turn-state 覆盖值变更时同样要断开该账号的池化 WS 连接：
+        // 握手级 turn-state 已固化在连接上，续接查找不区分画像会复用它。
+        if !enabled || turn_state_changed {
             provider.account_unavailable(&account_id).await;
         }
         provider
@@ -603,7 +615,14 @@ impl AccountsService for DefaultAccountsService {
     ) -> Result<AccountUpdateResult, AdminError> {
         let account_id = ProviderAccountId::new(command.account_id.clone())
             .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
-        let (_, provider) = self.provider_for_account(&account_id).await?;
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        let turn_state_changed = command.turn_state.as_deref().map(str::trim).unwrap_or("")
+            != stored
+                .account
+                .turn_state_override
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("");
         let result = self
             .accounts
             .batch_update_accounts(
@@ -625,6 +644,11 @@ impl AccountsService for DefaultAccountsService {
         provider
             .account_facts_changed(std::slice::from_ref(&account_id))
             .await;
+        // 覆盖值变化立即驱逐该账号的池化 WS 连接：握手级 turn-state 已固化，
+        // 续接查找不区分握手画像仍会复用旧连接。
+        if turn_state_changed {
+            provider.account_unavailable(&account_id).await;
+        }
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(AccountUpdateResult {
             config_revision: result.config_revision,
@@ -673,8 +697,21 @@ impl AccountsService for DefaultAccountsService {
                 Vec<ProviderAccountId>,
             ),
         >::new();
+        // turn-state 覆盖值按账号比较，记录值真正变化的账号以便驱逐其池化连接。
+        let mut turn_state_changed_ids = Vec::new();
         for account_id in &account_ids {
             let (item, provider) = self.provider_for_account(account_id).await?;
+            if command.turn_state_override.as_deref().is_some_and(|new| {
+                new.trim()
+                    != item
+                        .account
+                        .turn_state_override
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or("")
+            }) {
+                turn_state_changed_ids.push(account_id.clone());
+            }
             providers
                 .entry(item.account.provider_kind)
                 .or_insert_with(|| (provider, Vec::new()))
@@ -688,8 +725,8 @@ impl AccountsService for DefaultAccountsService {
             .await
             .map_err(|error| map_store_error(error, "provider accounts"))?;
         for (provider, provider_ids) in providers.values() {
-            if enabled == Some(false) {
-                for account_id in provider_ids {
+            for account_id in provider_ids {
+                if enabled == Some(false) || turn_state_changed_ids.contains(account_id) {
                     provider.account_unavailable(account_id).await;
                 }
             }
