@@ -394,6 +394,78 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn turn_state_token(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        issued_at: i64,
+    ) -> AdminStoreResult<Option<gateway_core::account::TurnStateToken>> {
+        self.accounts
+            .copyable_turn_state(account_id, model, issued_at)
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "turn state unavailable",
+                )
+            })
+    }
+
+    async fn remove_turn_state(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        issued_at: i64,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        let mut transaction = self.pool.begin().await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "turn state transaction unavailable",
+            )
+        })?;
+        // 保留签发时间水位，阻止同一张旧票被在途响应或后台任务重新安装。
+        let removed = sqlx::query("update account_turn_states set turn_state_override = null, manual_override = false, next_probe_at = null where account_id = $1 and model = $2 and current_issued_at = $3 and turn_state_override is not null")
+            .bind(account_id.as_str()).bind(model).bind(issued_at)
+            .execute(&mut *transaction).await.map_err(|_| {
+                AdminStoreError::new(AdminStoreErrorKind::Unavailable, ENTITY, "turn state removal unavailable")
+            })?;
+        if removed.rows_affected() == 0 {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Conflict,
+                ENTITY,
+                "installed state changed or already removed",
+            ));
+        }
+        let result: StoreResult<Revision> = async {
+            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+            append_admin_audit_event_in_transaction(
+                &mut transaction,
+                mutation_audit(
+                    context,
+                    "remove_turn_state",
+                    "provider_account",
+                    account_id.as_str(),
+                    vec!["turn_state_override".to_owned()],
+                ),
+                revision,
+            )
+            .await?;
+            Ok(revision)
+        }
+        .await;
+        let revision =
+            super::repository::finish_admin_transaction(transaction, result, "remove turn state")
+                .await
+                .map_err(|error| admin_store_error(ENTITY, error))?;
+        Ok(AccountUpdateResult {
+            account_id: account_id.clone(),
+            config_revision: admin_revision(revision)?,
+        })
+    }
+
     async fn apply_turn_state(
         &self,
         account_id: &CoreProviderAccountId,

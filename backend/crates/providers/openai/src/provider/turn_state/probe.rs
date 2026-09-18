@@ -155,15 +155,7 @@ pub(super) fn request(
     let profile = profile.snapshot();
     let originator = &config.originator;
     let ua = if config.user_agent.is_empty() {
-        format!(
-            "{originator}/{} ({} {}; {}) {} ({originator}; {})",
-            profile.codex_version,
-            profile.os_type,
-            profile.os_version,
-            profile.arch,
-            profile.terminal,
-            profile.codex_version
-        )
+        profile.turn_state_user_agent(originator)
     } else {
         config.user_agent.clone()
     };

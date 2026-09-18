@@ -24,6 +24,30 @@ export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
   return { enabled, missingStatePolicy: 'allow', targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers' }
 }
 
+export interface TurnStateProbePreview {
+  userAgent: string
+  version: string
+  timezone: string
+  currentDate: string
+}
+
+export function previewTurnState(config: TurnStateConfig) {
+  return request<TurnStateProbePreview>({
+    url: '/api/admin/accounts/turn-state/preview',
+    method: 'POST',
+    data: { config },
+    silent: true,
+  })
+}
+
+export function copyTurnState(data: { accountId: string, model: string, issuedAt: number }) {
+  return request<{ value: string, issuedAt: number }>({
+    url: '/api/admin/accounts/turn-state/copy',
+    method: 'POST',
+    data,
+  })
+}
+
 export interface TurnStateObservation {
   accountId: string
   model: string
@@ -65,6 +89,7 @@ export interface TurnStateStatus {
   issuedAt: number | null
   ageSeconds: number | null
   active: boolean
+  hasInstalledState: boolean
   businessStatus: 'ready' | 'manual_disabled' | 'waiting_for_state' | 'model_denied' | 'quota_exhausted' | 'rate_limited' | 'account_error'
   accountEnabled: boolean
   huntAttempts: number
@@ -106,6 +131,14 @@ export function probeTurnState(data: { accountId: string, model: string }) {
 export function applyTurnState(data: { accountId: string, model: string, issuedAt: number }) {
   return request<{ accountId: string, configRevision: number }>({
     url: '/api/admin/accounts/turn-state/apply',
+    method: 'POST',
+    data,
+  })
+}
+
+export function removeTurnState(data: { accountId: string, model: string, issuedAt: number }) {
+  return request<{ accountId: string, configRevision: number }>({
+    url: '/api/admin/accounts/turn-state/remove',
     method: 'POST',
     data,
   })

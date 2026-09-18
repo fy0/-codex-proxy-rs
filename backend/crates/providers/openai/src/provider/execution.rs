@@ -1160,7 +1160,7 @@ fn prepare_turn_state(
     };
     if let Some(value) = lease.account().turn_state_override() {
         force_turn_state_override(request, value);
-        source = "manual_override";
+        source = "account_override";
     }
     if let Some(bucket) = lease
         .turn_state()
@@ -1184,7 +1184,7 @@ fn prepare_turn_state(
         {
             force_turn_state_override(request, &token.value);
             source = if bucket.manual_override {
-                "manual_override"
+                "bucket_manual_override"
             } else {
                 "automatic_override"
             };

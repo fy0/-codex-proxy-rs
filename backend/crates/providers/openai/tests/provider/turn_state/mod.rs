@@ -264,7 +264,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         .mount(&server).await;
         let payload = ProtocolPayload::json_object(
         "openai",
-        json!({"model": "gpt-5.4", "input": "Hello", "client_metadata": {"x-codex-turn-state": target}})
+        json!({"model": "gpt-5.4", "input": "Hello", "prompt_cache_key": format!("session-{phase}"), "client_metadata": {"x-codex-turn-state": "stale-session-state"}})
             .as_object()
             .unwrap()
             .clone(),
@@ -291,6 +291,9 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             assert!(body["client_metadata"]["x-codex-turn-state"].is_null());
         } else {
             assert_eq!(requests[0].headers["x-codex-turn-state"], target);
+            let bytes = zstd::stream::decode_all(std::io::Cursor::new(&requests[0].body)).unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["client_metadata"]["x-codex-turn-state"], target);
         }
         assert_eq!(requests[0].headers["originator"], "Codex Desktop");
         assert!(
@@ -309,7 +312,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             Some(if phase == 3 {
                 "none"
             } else if phase == 2 {
-                "manual_override"
+                "bucket_manual_override"
             } else {
                 "automatic_override"
             })

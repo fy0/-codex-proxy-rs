@@ -279,11 +279,13 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
             .unwrap(),
     );
     store.set_enabled(&id, false).await.unwrap();
+    let observation_count = store.turn_observations().len();
     store.request_turn_probe(ACCOUNT, MODEL);
     server.reset().await;
     task.run_cycle(cycle()).await.unwrap();
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(!store.account(ACCOUNT).unwrap().enabled());
+    assert_eq!(store.turn_observations().len(), observation_count);
     let (input, context) = request(&[ACCOUNT], MODEL);
     let Err(error) = bundle.core_provider().execute(input, context).await else {
         panic!("manual disable must block business scheduling")

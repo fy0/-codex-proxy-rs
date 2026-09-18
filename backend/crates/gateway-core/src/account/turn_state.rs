@@ -285,6 +285,7 @@ pub struct TurnStateStatus {
     pub issued_at: Option<i64>,
     pub age_seconds: Option<i64>,
     pub active: bool,
+    pub has_installed_state: bool,
     pub business_status: TurnStateBusinessStatus,
     pub account_enabled: bool,
     pub hunt_attempts: u64,

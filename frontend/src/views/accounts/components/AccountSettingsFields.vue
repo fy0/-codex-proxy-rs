@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import type { AccountGroup, AccountModelAccess } from '@/api'
+import { Copy } from '@lucide/vue'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
+import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
+import { useCopyText } from '@/composables/useCopyText'
 import AccountModelAccessField from './AccountModelAccessField.vue'
 import AccountProxyField from './AccountProxyField.vue'
 
@@ -27,6 +30,7 @@ const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
 const turnStateOverride = defineModel<string>('turnStateOverride', { default: '' })
+const copyText = useCopyText()
 </script>
 
 <template>
@@ -75,13 +79,22 @@ const turnStateOverride = defineModel<string>('turnStateOverride', { default: ''
       />
     </BaseFormItem>
     <AccountProxyField v-model:mode="proxyMode" v-model:proxy-id="proxyId" :preserve="preserveProxy" :error="proxyError" :endpoint="endpoint" :account-id="accountId" :disabled="disabled" />
-    <BaseFormItem v-if="showTurnState" label="自定义 x-codex-turn-state">
-      <BaseInput
-        v-model="turnStateOverride"
-        aria-label="自定义 x-codex-turn-state"
-        placeholder="留空不覆盖，填写后无条件强制覆盖该请求头"
-        :disabled="disabled"
-      />
+    <BaseFormItem v-if="showTurnState" label="账号通用 x-codex-turn-state">
+      <div class="flex min-w-0 items-center gap-2">
+        <BaseInput
+          v-model="turnStateOverride"
+          class="min-w-0 flex-1"
+          aria-label="自定义 x-codex-turn-state"
+          placeholder="未受模型桶管理的请求使用此覆盖"
+          :disabled="disabled"
+        />
+        <BaseIconButton label="复制账号通用 state" :disabled="!turnStateOverride" @click="copyText(turnStateOverride, { successText: 'state 已复制' })">
+          <Copy :size="15" />
+        </BaseIconButton>
+      </div>
+      <p class="mb-0 mt-2 text-cp-xs text-cp-text-secondary">
+        受模型桶管理时以桶内 state 为准，缺票也不会回退到此通用覆盖。
+      </p>
     </BaseFormItem>
   </div>
 </template>

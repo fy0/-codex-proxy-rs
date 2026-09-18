@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import type { getAccounts, TurnStateConfig, TurnStateStatus } from '@/api'
-import { Save } from '@lucide/vue'
-import { computed, ref, watch } from 'vue'
-import { configureTurnState, defaultTurnStateConfig } from '@/api'
+import type { getAccounts, TurnStateConfig, TurnStateProbePreview, TurnStateStatus } from '@/api'
+import { Copy, Save } from '@lucide/vue'
+import { watchDebounced } from '@vueuse/core'
+import { computed, ref, useId, watch } from 'vue'
+import { configureTurnState, defaultTurnStateConfig, previewTurnState } from '@/api'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseForm from '@/components/base/BaseForm/index.vue'
+import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseNumberInput from '@/components/base/BaseNumberInput.vue'
@@ -14,6 +16,7 @@ import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
+import { useCopyText } from '@/composables/useCopyText'
 import { useProxyCatalog } from '@/composables/useProxyCatalog'
 
 const props = defineProps<{
@@ -28,6 +31,13 @@ const config = ref<TurnStateConfig>(defaultTurnStateConfig(true))
 const proxySearch = ref('')
 const { proxies, loading: loadingProxies } = useProxyCatalog()
 const { loading: saving, run } = useAsyncAction()
+const preview = ref<TurnStateProbePreview | null>(null)
+const previewError = ref('')
+const previewLoading = ref(false)
+const copyText = useCopyText()
+const timezoneListId = useId()
+const timezones = ['UTC', 'Asia/Shanghai', 'Asia/Taipei', 'Asia/Hong_Kong', 'Asia/Tokyo', 'Asia/Singapore', 'America/Los_Angeles', 'America/New_York', 'Europe/London', 'Europe/Berlin']
+let previewVersion = 0
 const accountOptions = computed(() => props.accounts.filter(account => account.provider === 'openai' && account.authenticationKind === 'oauth').map(account => ({ value: account.id, label: `${account.email?.trim() || account.name} · ${account.id}` })))
 const selectedAccount = computed(() => props.accounts.find(account => account.id === accountId.value))
 const existing = computed(() => !!props.bucket && props.bucket.configured !== false)
@@ -41,6 +51,28 @@ watch(open, (value) => {
   config.value = props.bucket ? { ...defaultTurnStateConfig(), ...props.bucket.config, proxyIds: [...props.bucket.config.proxyIds] } : defaultTurnStateConfig(true)
   proxySearch.value = ''
 })
+
+watchDebounced(() => [open.value, config.value.originator, config.value.userAgent, config.value.timezone], async () => {
+  const version = ++previewVersion
+  preview.value = null
+  previewError.value = ''
+  if (!open.value)
+    return
+  previewLoading.value = true
+  try {
+    const value = await previewTurnState({ ...defaultTurnStateConfig(), originator: config.value.originator, userAgent: config.value.userAgent, timezone: config.value.timezone })
+    if (version === previewVersion)
+      preview.value = value
+  }
+  catch {
+    if (version === previewVersion)
+      previewError.value = '预览失败，请检查 IANA 时区、originator 和 User-Agent'
+  }
+  finally {
+    if (version === previewVersion)
+      previewLoading.value = false
+  }
+}, { debounce: 250 })
 
 function selectProxy(id: string, selected: boolean) {
   config.value.proxyIds = selected ? [...new Set([...config.value.proxyIds, id])] : config.value.proxyIds.filter(value => value !== id)
@@ -121,11 +153,27 @@ async function save() {
           <BaseInput v-model="config.originator" aria-label="探测 originator" maxlength="128" :disabled="saving" />
         </BaseFormItem>
         <BaseFormItem label="探测时区" required>
-          <BaseInput v-model="config.timezone" aria-label="探测时区" placeholder="Asia/Taipei" :disabled="saving" />
+          <BaseInput v-model="config.timezone" aria-label="探测时区" :list="timezoneListId" placeholder="Asia/Shanghai" :disabled="saving" />
+          <datalist :id="timezoneListId">
+            <option v-for="timezone in timezones" :key="timezone" :value="timezone" />
+          </datalist>
+          <span class="text-cp-xs text-cp-text-secondary">IANA 时区，如 Asia/Shanghai、Asia/Taipei、UTC；用于探测环境中的日期。</span>
         </BaseFormItem>
         <BaseFormItem label="探测 User-Agent" class="sm:col-span-2">
-          <BaseInput v-model="config.userAgent" aria-label="探测 User-Agent" placeholder="自动" maxlength="1024" :disabled="saving" />
+          <BaseInput v-model="config.userAgent" aria-label="探测 User-Agent" placeholder="留空使用运行时 Codex Core 画像" maxlength="1024" :disabled="saving" />
+          <span class="text-cp-xs text-cp-text-secondary">自动值由运行中的 Core 版本、部署系统画像和此处 originator 生成，随已核验的运行时版本更新。</span>
         </BaseFormItem>
+        <div class="grid min-w-0 gap-2 sm:col-span-2" aria-live="polite">
+          <div class="flex items-center justify-between gap-2 text-cp-sm">
+            <span>实际探测 User-Agent</span>
+            <BaseIconButton label="复制探测 User-Agent" :disabled="!preview || previewLoading" @click="copyText(preview?.userAgent ?? '', { successText: 'User-Agent 已复制' })">
+              <Copy class="size-4" />
+            </BaseIconButton>
+          </div>
+          <code v-if="preview" class="whitespace-pre-wrap break-all text-cp-sm">{{ preview.userAgent }}</code>
+          <span v-else :class="previewError ? 'text-cp-error-text' : 'text-cp-text-secondary'">{{ previewError || '正在读取运行时画像' }}</span>
+          <span v-if="preview" class="text-cp-xs text-cp-text-secondary">version 请求头：{{ preview.version }} · 探测日期：{{ preview.currentDate }}（{{ preview.timezone }}）</span>
+        </div>
       </div>
       <fieldset class="m-0 min-w-0 border-0 p-0">
         <legend class="mb-3 text-cp font-semibold text-cp-text">

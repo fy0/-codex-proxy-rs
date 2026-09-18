@@ -8,6 +8,77 @@ use tower::ServiceExt as _;
 use super::super::{AdminTestFixture, AdminTestState};
 
 #[tokio::test]
+async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    for (path, body, authenticated, expected) in [
+        (
+            "remove",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000}"#,
+            false,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "remove",
+            r#"{"accountId":"invalid","model":"model-a","issuedAt":1800000000}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "remove",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"enabled":true}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "copy",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000}"#,
+            false,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "preview",
+            r#"{"config":{}}"#,
+            false,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "copy",
+            r#"{"accountId":"invalid","model":"model-a","issuedAt":1800000000}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "copy",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"value":"not-accepted"}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "preview",
+            r#"{"config":{"timezone":"not-a-timezone"}}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/admin/accounts/turn-state/{path}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if authenticated {
+            request = request.header(header::COOKIE, "cpr_session=valid-session");
+        }
+        let response = admin::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+}
+
+#[tokio::test]
 async fn personal_info_requires_admin_and_a_valid_account_query() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");

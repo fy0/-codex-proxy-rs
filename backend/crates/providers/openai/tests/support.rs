@@ -313,10 +313,18 @@ impl ProviderAccountStore for MemoryAccountStore {
         observation: gateway_core::account::TurnStateObservation,
         candidate: Option<gateway_core::account::TurnStateToken>,
     ) -> Result<(), StoreError> {
+        if self
+            .account(&observation.account_id)
+            .is_none_or(|account| !account.enabled())
+        {
+            return Ok(());
+        }
         let mut states = self.turn_states.lock().unwrap();
+        let mut record = observation.probe_trigger.as_deref() == Some("manual");
         if let Some(state) =
             states.get_mut(&(observation.account_id.clone(), observation.model.clone()))
         {
+            record |= state.config.enabled;
             if observation.source == "probe" && observation.probe_id.is_some() {
                 state.hunt_attempts += 1;
             }
@@ -328,7 +336,9 @@ impl ProviderAccountStore for MemoryAccountStore {
                 state.candidate = Some(candidate);
             }
         }
-        self.turn_observations.lock().unwrap().push(observation);
+        if record {
+            self.turn_observations.lock().unwrap().push(observation);
+        }
         Ok(())
     }
 

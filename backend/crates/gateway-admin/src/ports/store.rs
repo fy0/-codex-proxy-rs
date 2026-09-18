@@ -88,6 +88,30 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    /// 仅管理员主动复制时读取当前票或候选，状态轮询不携带正文。
+    async fn turn_state_token(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _issued_at: i64,
+    ) -> AdminStoreResult<Option<gateway_core::account::TurnStateToken>> {
+        Ok(None)
+    }
+
+    async fn remove_turn_state(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _issued_at: i64,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "turn_state",
+            "turn state removal unavailable",
+        ))
+    }
+
     async fn apply_turn_state(
         &self,
         _account_id: &gateway_core::account::ProviderAccountId,

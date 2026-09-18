@@ -296,6 +296,25 @@ async fn openai_admin_provider_exposes_live_wire_profile_and_validated_billing()
     let admin = bundle.admin_provider();
     let profile = admin.dashboard_wire_profile().expect("wire profile");
     assert_eq!(profile.version, "0.102.0");
+    let mut probe_config = gateway_core::account::TurnStateConfig {
+        timezone: chrono_tz::Asia::Taipei,
+        ..Default::default()
+    };
+    let preview = admin.turn_state_probe_preview(&probe_config).unwrap();
+    assert_eq!(preview.version, profile.version);
+    assert_eq!(preview.timezone, "Asia/Taipei");
+    assert_eq!(
+        preview.user_agent,
+        "codex-tui/0.102.0 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.102.0)"
+    );
+    probe_config.user_agent = "Custom Probe/1.0".to_owned();
+    assert_eq!(
+        admin
+            .turn_state_probe_preview(&probe_config)
+            .unwrap()
+            .user_agent,
+        "Custom Probe/1.0"
+    );
     assert_eq!(profile.build, None);
     assert_eq!(profile.target.os_type, "Mac OS");
     assert_eq!(profile.target.os_version, "15.5.0");

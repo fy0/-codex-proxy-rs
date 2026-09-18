@@ -18,6 +18,15 @@ pub use gateway_core::account::{
     QuotaState, resolve_account_status,
 };
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateProbePreview {
+    pub user_agent: String,
+    pub version: String,
+    pub timezone: String,
+    pub current_date: String,
+}
+
 /// 导入时统一应用的账号备注、调度与分组设置；缺省时保留原有导入语义。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountImportSettings {

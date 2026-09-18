@@ -201,26 +201,7 @@ impl TurnStateService {
     }
 
     async fn persist(&self, observation: TurnStateObservation, candidate: Option<TurnStateToken>) {
-        tracing::info!(
-            account_id = observation.account_id,
-            model = observation.model,
-            source = observation.source,
-            request_state_source = observation.request_state_source,
-            response_source = observation.response_source,
-            probe_trigger = observation.probe_trigger,
-            outcome = observation.outcome,
-            http_status = observation.http_status,
-            token_length = observation.token_length,
-            issued_at = observation.issued_at,
-            egress = observation.egress,
-            shape = observation.shape,
-            effort = observation.effort,
-            elapsed_ms = observation.elapsed_ms,
-            probe_id = observation.probe_id,
-            stop_mode = observation.stop_mode,
-            stop_reason = observation.stop_reason,
-            "turn state observation"
-        );
+        // 是否记录由存储在同一事务内按最新开关判断，避免停用后仍输出观察日志。
         if self
             .store
             .observe_turn_state(observation, candidate)
@@ -288,9 +269,7 @@ impl TurnStateService {
         observation.upstream_account_id = account.upstream_account_id().map(str::to_owned);
         observation.upstream_user_id = account.upstream_user_id().map(str::to_owned);
         if !account.enabled() || !account.model_access().allows(&bucket.model) {
-            return self
-                .skip(observation, "account_disabled_or_model_denied")
-                .await;
+            return ProbeOutcome::Skipped;
         }
         let credential = match self.repository.decode_runtime_credential(&loaded) {
             Ok(credential) => credential,

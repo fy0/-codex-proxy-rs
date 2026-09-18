@@ -47,6 +47,32 @@ const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
+    fn turn_state_probe_preview(
+        &self,
+        _config: gateway_core::account::TurnStateConfig,
+    ) -> Result<crate::model::accounts::TurnStateProbePreview, AdminError> {
+        Err(AdminError::invalid("当前服务不支持探测画像预览"))
+    }
+
+    async fn turn_state_token(
+        &self,
+        _account_id: ProviderAccountId,
+        _model: String,
+        _issued_at: i64,
+    ) -> Result<gateway_core::account::TurnStateToken, AdminError> {
+        Err(AdminError::invalid("当前服务不支持复制 state"))
+    }
+
+    async fn remove_turn_state(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _model: String,
+        _issued_at: i64,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        Err(AdminError::invalid("不支持移除 state"))
+    }
+
     async fn apply_turn_state(
         &self,
         _context: &MutationContext,
@@ -400,6 +426,36 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
+    fn turn_state_probe_preview(
+        &self,
+        config: gateway_core::account::TurnStateConfig,
+    ) -> Result<crate::model::accounts::TurnStateProbePreview, AdminError> {
+        if !config.is_valid() {
+            return Err(AdminError::invalid("探测画像配置不合法"));
+        }
+        self.providers
+            .require(&ProviderKind::new("openai").expect("静态 Provider ID 合法"))
+            .map_err(|error| map_provider_error(error, "turn state preview"))?
+            .turn_state_probe_preview(&config)
+            .ok_or_else(|| AdminError::invalid("当前 Provider 不支持探测画像预览"))
+    }
+
+    async fn turn_state_token(
+        &self,
+        account_id: ProviderAccountId,
+        model: String,
+        issued_at: i64,
+    ) -> Result<gateway_core::account::TurnStateToken, AdminError> {
+        if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+            return Err(AdminError::invalid("模型 ID 不合法"));
+        }
+        self.accounts
+            .turn_state_token(&account_id, &model, issued_at)
+            .await
+            .map_err(|error| map_store_error(error, "turn state token"))?
+            .ok_or_else(|| AdminError::invalid("state 已过期、已被替换或身份不匹配，请刷新后重试"))
+    }
+
     async fn apply_turn_state(
         &self,
         context: &MutationContext,
@@ -415,7 +471,7 @@ impl AccountsService for DefaultAccountsService {
         {
             return Err(AdminError::invalid("模型或签发时间不合法"));
         }
-        let (stored, _) = self.provider_for_account(&account_id).await?;
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
         if stored.account.provider_kind.as_str() != "openai"
             || stored.account.authentication_kind != "oauth"
             || !stored.account.enabled
@@ -429,6 +485,38 @@ impl AccountsService for DefaultAccountsService {
             .apply_turn_state(&account_id, &model, issued_at, context)
             .await
             .map_err(|error| map_store_error(error, "turn state apply"))?;
+        provider.account_unavailable(&account_id).await;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
+    async fn remove_turn_state(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        model: String,
+        issued_at: i64,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        if model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+            || issued_at <= 0
+        {
+            return Err(AdminError::invalid("模型或签发时间不合法"));
+        }
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai"
+            || stored.account.authentication_kind != "oauth"
+        {
+            return Err(AdminError::invalid("仅 OpenAI OAuth 账号支持移除 state"));
+        }
+        let result = self
+            .accounts
+            .remove_turn_state(&account_id, &model, issued_at, context)
+            .await
+            .map_err(|error| map_store_error(error, "turn state removal"))?;
+        provider.account_unavailable(&account_id).await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(result)
     }

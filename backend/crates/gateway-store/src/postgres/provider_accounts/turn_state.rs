@@ -57,6 +57,31 @@ fn bucket(row: sqlx::postgres::PgRow) -> Result<TurnStateBucket, CoreStoreError>
 }
 
 impl PgProviderAccountRepository {
+    pub(super) async fn copyable_turn_state(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+        issued_at: i64,
+    ) -> Result<Option<TurnStateToken>, CoreStoreError> {
+        let row = sqlx::query("select s.* from account_turn_states s join provider_accounts a on a.id = s.account_id where s.account_id = $1 and s.model = $2 and a.provider_kind = 'openai' and a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id")
+            .bind(account.as_str()).bind(model).fetch_optional(&self.pool).await.map_err(unavailable)?;
+        let Some(state) = row.map(bucket).transpose()? else {
+            return Ok(None);
+        };
+        let now = Utc::now().timestamp();
+        let token = state
+            .installed_token(now)
+            .into_iter()
+            .chain(state.candidate.as_ref().filter(|token| {
+                token.value.len() == state.config.target_length
+                    && token.is_fresh(now, state.config.ttl_seconds)
+                    && TurnStateToken::parse(&token.value)
+                        .is_some_and(|parsed| parsed.issued_at == token.issued_at)
+            }))
+            .find(|token| token.issued_at == issued_at);
+        Ok(token.cloned())
+    }
+
     pub(super) async fn load_turn_state_buckets_for_model(
         &self,
         accounts: &[CoreProviderAccountId],
@@ -125,7 +150,7 @@ impl PgProviderAccountRepository {
             .bind(&observation.account_id).bind(&observation.model).bind(default_config).execute(&mut *tx).await.map_err(unavailable)?;
         // 同桶观测串行化，避免候选竞态与并发历史裁剪失效。
         let row = sqlx::query(
-            "select * from account_turn_states where account_id = $1 and model = $2 and upstream_account_id is not distinct from $3 and upstream_user_id is not distinct from $4 for update",
+            "select s.*, a.enabled as account_enabled from account_turn_states s join provider_accounts a on a.id = s.account_id where s.account_id = $1 and s.model = $2 and s.upstream_account_id is not distinct from $3 and s.upstream_user_id is not distinct from $4 for update of s",
         )
         .bind(&observation.account_id)
         .bind(&observation.model)
@@ -137,6 +162,12 @@ impl PgProviderAccountRepository {
         let Some(row) = row else {
             return Ok(());
         };
+        if !row
+            .try_get::<bool, _>("account_enabled")
+            .map_err(unavailable)?
+        {
+            return Ok(());
+        }
         let hunt_started_at: Option<i64> = row.try_get("hunt_started_at").map_err(unavailable)?;
         let mut state = bucket(row)?;
         if observation.outcome == "candidate"
@@ -175,14 +206,17 @@ impl PgProviderAccountRepository {
                 .bind(observation.observed_at).bind(attempts).bind(hunt_started_at)
                 .execute(&mut *tx).await.map_err(unavailable)?;
         }
-        append_event(
-            &mut tx,
-            &observation.account_id,
-            &observation.model,
-            "observation",
-            serde_json::to_value(&observation).map_err(unavailable)?,
-        )
-        .await?;
+        // 停止后台日志不丢弃有效候选；手动发起的探测仍保留可操作结果。
+        if state.config.enabled || observation.probe_trigger.as_deref() == Some("manual") {
+            append_event(
+                &mut tx,
+                &observation.account_id,
+                &observation.model,
+                "observation",
+                serde_json::to_value(&observation).map_err(unavailable)?,
+            )
+            .await?;
+        }
         tx.commit().await.map_err(unavailable)
     }
 
@@ -221,6 +255,7 @@ impl PgProviderAccountRepository {
                     .installed_token(Utc::now().timestamp())
                     .filter(|_| identity_matches);
                 let active = account_enabled && installed.is_some();
+                let has_installed_state = installed.is_some();
                 let business_status = if !account_enabled {
                     TurnStateBusinessStatus::ManualDisabled
                 } else if state.config.missing_state_policy == MissingTurnStatePolicy::Pause
@@ -249,6 +284,7 @@ impl PgProviderAccountRepository {
                     account_email,
                     model: state.model,
                     active,
+                    has_installed_state,
                     business_status,
                     account_enabled,
                     hunt_attempts: state.hunt_attempts,

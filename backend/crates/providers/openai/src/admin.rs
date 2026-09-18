@@ -217,6 +217,26 @@ impl ProviderAdmin for OpenAiAdminProvider {
         build_connection_test_operation(upstream_model, input_text)
     }
 
+    fn turn_state_probe_preview(
+        &self,
+        config: &gateway_core::account::TurnStateConfig,
+    ) -> Option<gateway_admin::model::accounts::TurnStateProbePreview> {
+        let profile = self.profile.snapshot();
+        Some(gateway_admin::model::accounts::TurnStateProbePreview {
+            user_agent: if config.user_agent.is_empty() {
+                profile.turn_state_user_agent(&config.originator)
+            } else {
+                config.user_agent.clone()
+            },
+            version: profile.codex_version,
+            timezone: config.timezone.to_string(),
+            current_date: chrono::Utc::now()
+                .with_timezone(&config.timezone)
+                .format("%Y-%m-%d")
+                .to_string(),
+        })
+    }
+
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile> {
         let profile = self.profile.snapshot();
         let release = self.desktop_release.snapshot();

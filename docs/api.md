@@ -370,6 +370,9 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/turn-state/configure` | `{ accountId, model, config }` | 配置 OpenAI OAuth 账号的一个模型桶，返回账号 ID 与配置版本 |
 | `POST` | `/api/admin/accounts/turn-state/probe` | `{ accountId, model }` | 排队一次探测，返回 202 和账号配置版本；账号须启用，不要求桶启用轮换 |
 | `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt }` | 应用指定签发时间的当前候选，不改变自动轮换开关；候选已变更、过期或不再可安装时返回 409 |
+| `POST` | `/api/admin/accounts/turn-state/remove` | `{ accountId, model, issuedAt }` | 移除该桶已安装票，预期签发时间不匹配或已移除时返回 409，不改变账号或探测开关 |
+| `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt }` | 按需读取仍有效的已安装票或当前候选，返回正文和签发时间，响应禁止缓存 |
+| `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、Core 版本和时区日期，不发送上游请求 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
@@ -421,6 +424,14 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 桶键为账号 ID 与实际发送的上游模型 ID，不能用模型别名代替。配置写入需要管理员身份，复用账号变更的审计和配置发布；`config` 按完整配置替换，省略的字段使用下列默认值，未知字段会拒绝。
 
+`POST /api/admin/accounts/turn-state/preview` 接收 `{ "config": { ... } }`，返回当前部署实际生成的 `userAgent`、Core `version`、IANA `timezone` 和该时区的 `currentDate`，不发送上游请求。自定义 UA 不改变独立的 `version` 请求头；留空时使用运行时已核验的 Core 画像，预览与真实探测共用生成逻辑。
+
+`POST /api/admin/accounts/turn-state/copy` 仅供管理员主动复制，接收 `accountId`、实际上游 `model` 和预期 `issuedAt`，返回 `{ "value": "...", "issuedAt": ... }`。只读取身份匹配、目标长度正确且尚未过期的已安装票或当前候选；已被替换的历史值不可读取。响应为 `Cache-Control: no-store`；令牌正文不会加入列表、审计或观测日志。
+
+`POST /api/admin/accounts/turn-state/remove` 移除匹配 `accountId`、`model`、`issuedAt` 的已安装票，保留签发水位、候选、历史和配置。并发续票后旧签发时间不能移除新票；同一张旧票不能重新安装，更新候选仍可按原配置安装。手动停用的账号也可移除；操作不修改任何开关，严格策略下后续业务等待新票。移除与审计、配置版本同事务提交，并失效旧 WS 连接。
+
+账号停用或模型禁用时不产生周期性跳过日志；账号停用后到达的观测不落库。关闭自动探测后不追加后台观测日志，仍可保留业务响应产生的有效候选；管理员手动探测的结果照常记录。既有历史保留，可在当前候选处直接复制或应用，不依赖日志是否存在。
+
 | 配置字段 | 默认值 | 范围或语义 |
 | --- | --- | --- |
 | `enabled` | `false` | 启用该桶的后台探测与自动安装；关闭不撤销仍有效的已安装 state，被动观测不依赖此开关 |
@@ -446,13 +457,15 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 `pause` 的有票条件只认可同账号、同上游模型、上游身份匹配、目标长度正确、内嵌签发时间有效且已安装的 state；候选、客户端 state 和账号级通用覆盖均不能解除限制。安装提交后后续业务选号即可恢复，到期后后续选号立即跳过，无须等待清理 worker；已经发出的请求继续完成。312、其他非目标长度、无响应头及传输错误不会撤销仍有效的旧票。账号权限、模型权限、凭据、额度、限流与并发限制仍按原条件执行；所有候选不可用时保持 `503 / no_available_provider` 合同，因缺票拒绝时安全消息包含等待已安装 state 的原因，诊断码为 `missing_turn_state`，不进入并发等待队列。自动探测关闭时可手动探测取得候选，再调用 `apply` 恢复业务；任何过程都不自动修改账号 `enabled`。
 
-状态中的 `accountEmail` 提供邮箱身份；管理页同时显示账号 ID，避免通用名称或重复邮箱无法区分。被动观测的 `requestStateSource` 区分 `none`（未携带）、`client`（客户端或会话）、`automatic_override` 和 `manual_override`；旧记录为 null。`responseSource` 区分 `http_headers`、`websocket_start` 和 `websocket_metadata`，一次 WS 请求可能产生起始及元数据两条观测，不应当作两次探测。返回令牌与请求相同时标为 `reused_state`，签发时间不更新时标为 `not_newer`，两者均不新增候选或延长有效期。携带 state 后返回的新令牌仍标明请求来源，不能当作未携带 state 的自然采样。
+状态中的 `accountEmail` 提供邮箱身份；管理页同时显示账号 ID，避免通用名称或重复邮箱无法区分。被动观测的 `requestStateSource` 区分 `none`（未携带）、`client`（客户端或会话）、`automatic_override`（模型桶自动安装）、`bucket_manual_override`（模型桶手动应用）和 `account_override`（账号通用覆盖）；历史 `manual_override` 无法区分两种手动来源，更早记录为 null。此字段表示发送请求时使用的来源，不表示本次响应安装了新票。`responseSource` 区分 `http_headers`、`websocket_start` 和 `websocket_metadata`，一次 WS 请求可能产生起始及元数据两条观测，不应当作两次探测。返回令牌与请求相同时标为 `reused_state`，签发时间不更新时标为 `not_newer`，两者均不新增候选或延长有效期。携带 state 后返回的新令牌仍标明请求来源，不能当作未携带 state 的自然采样。
 
 有效期到达后已安装令牌不再注入，清除请求头、正文及客户端 metadata 中的旧覆盖；WebSocket 按包含 state 的握手画像隔离，新请求、粘性路由、重试及连接复用均重新执行缺票资格判断。签发水位和安装历史保留供诊断，`allow` 下的无自动覆盖请求继续采集新 state，`pause` 下仅探测继续按配置运行。
 
 状态项包含 `accountId`、`accountName`、`model`、`config`、`tokenLength`、`issuedAt`、`ageSeconds`、`active`、`accountEnabled`、`businessStatus`、`huntAttempts`、`nextProbeAt`、`observations`、`installations`。签发和观察时间均为 Unix 秒；尚未安装时令牌元数据为 `null`。过期后保留最后安装的长度和签发水位供诊断，`active=false`，令牌正文清除。`active` 表示账号启用且同桶已安装令牌满足身份、长度及有效期检查，不保证上游接受。`businessStatus` 为 `ready`、`manual_disabled`、`waiting_for_state`、`model_denied`、`quota_exhausted`、`rate_limited` 或 `account_error`；这是当前桶的资格投影，不承诺具体 Client Key 权限或瞬时并发容量。`accountEnabled` 是手动账号开关，`config.enabled` 是自动探测开关，均不能从缺票状态推断。`huntAttempts` 为当前寻获周期的累计尝试数，跨预算轮次累计；`nextProbeAt` 为预计下次开始时间，调度周期和并发限制可能使实际开始稍晚，账号或自动探测停用时为 `null`。
 
 `observations` 分别保留最近 100 条主动探测和 100 条被动采集；包含 `source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode` 和 `stopReason`。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`length_miss`、`invalid_token`、`expired_or_future` 均不会安装。回应策略最多读取 1 MiB、30 秒，不保存正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。无令牌正文、Bearer 或代理认证。
+
+`hasInstalledState` 表示当前存在身份、长度、有效期均匹配的已安装票，不依赖账号开关；因此手动停用时仍可复制有效票。移除后为 false，保留的 `issuedAt` 仅是历史水位，不能用于判断有票。模型票与通用覆盖使用相同的强制注入路径，同时覆盖请求头及会话元数据；切换会话后继续按本次选中账号与实际上游模型应用。
 
 启用自动轮换、采用 `pause` 或曾安装令牌的桶以模型专属覆盖为准，没有有效令牌时清除请求中的旧覆盖；安装只接受比该桶历史签发水位严格更新的候选。自动令牌不会写入账号级标量 `turnStateOverride`。其余模型仍沿用原有账号手工覆盖行为；该接口不具备桶的寿命和隔离保证，不能满足 `pause` 的有票条件。操作与模板说明见 [Turn State 轮换](../deploy/README.md#turn-state-轮换)。
 

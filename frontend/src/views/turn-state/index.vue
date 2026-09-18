@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { getAccounts, TurnStateInstallation, TurnStateObservation, TurnStateStatus } from '@/api'
-import { Check, Eye, Play, Plus, RefreshCw, Settings2 } from '@lucide/vue'
+import { Check, Copy, Eye, Play, Plus, RefreshCw, Settings2, Trash2 } from '@lucide/vue'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, onMounted, ref, watch } from 'vue'
-import { applyTurnState, defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus, probeTurnState } from '@/api'
+import { applyTurnState, copyTurnState, defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus, probeTurnState, removeTurnState } from '@/api'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
@@ -14,7 +14,7 @@ import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination
 import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import { toast } from '@/components/base/BaseToast'
-import { useAsyncAction } from '@/composables/useAsyncAction'
+import { useCopyText } from '@/composables/useCopyText'
 import TurnStateConfigModal from './TurnStateConfigModal.vue'
 
 const buckets = ref<TurnStateStatus[]>([])
@@ -30,8 +30,12 @@ const showConfig = ref(false)
 const editing = ref<TurnStateStatus | null>(null)
 const probing = ref(new Set<string>())
 const applying = ref(false)
+const removing = ref(false)
 const now = ref(Date.now() / 1000)
-const { loading, run } = useAsyncAction()
+const loading = ref(false)
+const copying = ref(false)
+const copyText = useCopyText()
+let loadVersion = 0
 const tableBuckets = computed<TurnStateStatus[]>(() => {
   const configured = new Set(buckets.value.map(bucket => bucket.accountId))
   const unconfigured = accounts.value.filter(account => account.authenticationKind === 'oauth' && !configured.has(account.id) && (!accountFilter.value || account.id === accountFilter.value)).map(account => ({
@@ -44,6 +48,7 @@ const tableBuckets = computed<TurnStateStatus[]>(() => {
     issuedAt: null,
     ageSeconds: null,
     active: false,
+    hasInstalledState: false,
     businessStatus: !account.enabled ? 'manual_disabled' as const : account.status === 'normal' ? 'ready' as const : account.status === 'error' || account.status === 'disabled' ? 'account_error' as const : account.status,
     accountEnabled: account.enabled,
     huntAttempts: 0,
@@ -83,7 +88,7 @@ const columns = defineTableColumns<TurnStateStatus>([
 const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'observedAt', label: '时间', kind: 'datetime', format: value => date(value as number) },
   { key: 'outcome', label: '结果', kind: 'text', size: 'xl', format: value => outcome(String(value)) },
-  { key: 'requestStateSource', label: '请求 state', kind: 'text', size: 'lg', format: value => requestStateSource(value as string | null) },
+  { key: 'requestStateSource', label: '请求 state 来源', kind: 'text', size: 'xl', format: value => requestStateSource(value as string | null) },
   { key: 'responseSource', label: '观测位置', kind: 'text', size: 'lg', format: value => responseSource(value as string | null) },
   { key: 'probeTrigger', label: '触发方式', kind: 'text', size: 'sm', format: value => value === 'manual' ? '手动' : value === 'scheduled' ? '自动' : '-' },
   { key: 'httpStatus', label: 'HTTP', kind: 'numeric', size: 'sm' },
@@ -95,7 +100,7 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'stopMode', label: '中断策略', kind: 'text', size: 'lg', format: value => value === 'headers' ? '获得 state' : value === 'first_output' ? '获得回应' : '-' },
   { key: 'stopReason', label: '中断原因', kind: 'text', size: 'lg' },
   { key: 'probeId', label: '请求 ID', kind: 'mono', size: '3xl' },
-  { key: 'actions', label: '操作', kind: 'actions', size: 'sm' },
+  { key: 'actions', label: '操作', kind: 'actions', size: 'lg' },
 ])
 const historyColumns = defineTableColumns<TurnStateInstallation>([
   { key: 'installedAt', label: '安装时间', kind: 'datetime', format: value => date(value as number) },
@@ -138,7 +143,7 @@ function recentProbe(bucket: TurnStateStatus) {
   return bucket.observations.find(item => item.source === 'probe')
 }
 function requestStateSource(value: string | null) {
-  const labels: Record<string, string> = { none: '未携带', client: '客户端 / 会话', automatic_override: '自动改写', manual_override: '手动改写' }
+  const labels: Record<string, string> = { none: '未携带', client: '客户端 / 会话', automatic_override: '模型桶自动安装', bucket_manual_override: '模型桶手动应用', account_override: '账号通用覆盖', manual_override: '手动覆盖（历史记录）' }
   return value ? labels[value] ?? value : '未记录'
 }
 function responseSource(value: string | null) {
@@ -159,17 +164,75 @@ function outcome(value: string) {
 }
 
 async function load() {
-  await run(async () => {
-    try {
-      buckets.value = await getTurnStateStatus(accountFilter.value || undefined, { silent: true })
+  const version = ++loadVersion
+  loading.value = true
+  try {
+    const data = await getTurnStateStatus(accountFilter.value || undefined, { silent: true })
+    if (version === loadVersion) {
+      buckets.value = data
       if (!selection.value)
         selectedKey.value = buckets.value[0] ? bucketKey(buckets.value[0]) : ''
       error.value = ''
     }
-    catch {
+  }
+  catch {
+    if (version === loadVersion)
       error.value = '路由状态加载失败'
-    }
-  })
+  }
+  finally {
+    if (version === loadVersion)
+      loading.value = false
+  }
+}
+
+function managesInjection(bucket: TurnStateStatus) {
+  return bucket.config.enabled || bucket.manualOverride || bucket.issuedAt !== null || bucket.config.missingStatePolicy === 'pause'
+}
+function hasAccountOverride(bucket: TurnStateStatus) {
+  return !!accounts.value.find(account => account.id === bucket.accountId)?.turnStateOverride
+}
+function injectionLabel(bucket: TurnStateStatus) {
+  if (businessStatus(bucket) !== 'ready')
+    return '业务暂停，不发送'
+  if (managesInjection(bucket))
+    return bucket.active && !expired(bucket) ? `模型桶：${bucket.manualOverride ? '手动应用' : '自动安装'}` : '模型桶：不携带 state'
+  return hasAccountOverride(bucket) ? '账号通用自定义 state' : '不强制覆盖客户端 / 会话 state'
+}
+function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
+  return issuedAt != null && issuedAt + bucket.config.ttlSeconds > now.value
+    && ((bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt)
+}
+async function removeState(bucket: TurnStateStatus) {
+  if (removing.value || !bucket.hasInstalledState || bucket.issuedAt == null)
+    return
+  removing.value = true
+  try {
+    await removeTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt: bucket.issuedAt })
+    toast.success('已移除 state，账号和自动探测开关保持不变')
+  }
+  catch {
+    // 签发时间可能已变化，刷新后再操作。
+  }
+  finally {
+    await load()
+    removing.value = false
+  }
+}
+async function copyState(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
+  if (copying.value || !canCopy(bucket, issuedAt) || issuedAt == null)
+    return
+  copying.value = true
+  try {
+    const token = await copyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt })
+    await copyText(token.value, { successText: 'state 已复制' })
+  }
+  catch {
+    // 不把正文缓存到页面状态，失败后重新核对候选或当前票。
+    await load()
+  }
+  finally {
+    copying.value = false
+  }
 }
 
 function configure(bucket: TurnStateStatus | null = null) {
@@ -198,20 +261,18 @@ async function probeOnce(bucket: TurnStateStatus) {
 }
 
 function canApply(observation: TurnStateObservation) {
-  const bucket = selection.value
-  return !!bucket?.accountEnabled && observation.outcome === 'candidate'
-    && observation.issuedAt != null && observation.issuedAt === bucket.candidateIssuedAt
-    && observation.issuedAt + bucket.config.ttlSeconds > now.value
-    && (bucket.issuedAt === null || observation.issuedAt > bucket.issuedAt)
+  return !!selection.value && observation.outcome === 'candidate' && canApplyCandidate(selection.value, observation.issuedAt)
 }
-
-async function applyState(observation: TurnStateObservation) {
-  const bucket = selection.value
-  if (!bucket || !canApply(observation) || applying.value || observation.issuedAt === null)
+function canApplyCandidate(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
+  return bucket.accountEnabled && issuedAt != null && issuedAt === bucket.candidateIssuedAt
+    && issuedAt + bucket.config.ttlSeconds > now.value && (bucket.issuedAt === null || issuedAt > bucket.issuedAt)
+}
+async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
+  if (!canApplyCandidate(bucket, issuedAt) || applying.value || issuedAt == null)
     return
   applying.value = true
   try {
-    await applyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt: observation.issuedAt })
+    await applyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt })
     toast.success('state 已应用，自动探测设置未变更')
     await load()
   }
@@ -232,7 +293,7 @@ useIntervalFn(() => {
   now.value = Date.now() / 1000
 }, 1000)
 useIntervalFn(() => {
-  if (autoRefresh.value && !showConfig.value && !document.hidden)
+  if (autoRefresh.value && !loading.value && !showConfig.value && !document.hidden)
     void load()
 }, 15000)
 onMounted(async () => {
@@ -272,7 +333,7 @@ onMounted(async () => {
     <p v-if="error" role="alert" class="m-0 text-cp-error-text">
       {{ error }}
     </p>
-    <BaseTable :columns="columns" :rows="tableBuckets" :row-key="bucketKey" :loading="loading" empty-text="暂无路由状态">
+    <BaseTable :columns="columns" :rows="tableBuckets" :row-key="bucketKey" :loading="loading && !tableBuckets.length" empty-text="暂无路由状态">
       <template #accountName="{ row }">
         <div class="grid gap-1">
           <span class="break-all" :title="row.accountName">{{ row.accountEmail?.trim() || row.accountName || row.accountId }}</span>
@@ -306,6 +367,20 @@ onMounted(async () => {
           <span class="text-cp-xs text-cp-text-secondary">{{ expired(row) ? '改写已解除' : row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
           <span v-if="row.candidateIssuedAt != null" class="text-cp-xs text-cp-success-text">{{ row.candidateLength }} · 候选可应用</span>
           <span v-if="row.manualOverride && row.active && !expired(row)" class="text-cp-xs text-cp-success-text">手动应用</span>
+          <div v-if="canCopy(row, row.issuedAt) || canCopy(row, row.candidateIssuedAt)" class="flex flex-wrap gap-1">
+            <BaseIconButton v-if="canCopy(row, row.issuedAt)" label="复制已安装 state" :disabled="copying" @click="copyState(row, row.issuedAt)">
+              <Copy class="size-4" />
+            </BaseIconButton>
+            <BaseIconButton v-if="row.hasInstalledState" label="移除已安装 state" :disabled="removing" @click="removeState(row)">
+              <Trash2 :size="14" />
+            </BaseIconButton>
+            <BaseIconButton v-if="canCopy(row, row.candidateIssuedAt)" label="复制候选 state" :disabled="copying" @click="copyState(row, row.candidateIssuedAt)">
+              <Copy class="size-4" />
+            </BaseIconButton>
+            <BaseIconButton v-if="canApplyCandidate(row, row.candidateIssuedAt)" label="应用候选 state" :disabled="applying" @click="applyState(row, row.candidateIssuedAt)">
+              <Check class="size-4" />
+            </BaseIconButton>
+          </div>
         </div>
       </template>
       <template #actions="{ row }">
@@ -328,6 +403,15 @@ onMounted(async () => {
         <BaseSelect v-model="selectedKey" :options="bucketOptions" class="w-full sm:w-80" aria-label="查看账号与模型" />
       </div>
       <dl class="m-0 flex flex-wrap gap-x-8 gap-y-3 text-cp-sm">
+        <div class="min-w-0 basis-full">
+          <dt class="text-cp-text-secondary">
+            x-codex-turn-state 生效来源
+          </dt>
+          <dd class="m-0 mt-1 break-words">
+            {{ injectionLabel(selection) }}
+            <span v-if="hasAccountOverride(selection) && managesInjection(selection)" class="ml-2 text-cp-warning-text">该模型由桶管理，账号通用自定义 state 不生效</span>
+          </dd>
+        </div>
         <div>
           <dt class="text-cp-text-secondary">
             最近获取时间
@@ -392,14 +476,17 @@ onMounted(async () => {
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
       <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">
         <template #actions="{ row }">
-          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(row)">
+          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(selection, row.issuedAt)">
             <Check class="size-4" />
           </BaseIconButton>
           <span v-else-if="row.issuedAt != null && row.issuedAt === selection.issuedAt" class="text-cp-xs text-cp-text-secondary">已安装</span>
           <span v-else class="text-cp-text-secondary">-</span>
+          <BaseIconButton v-if="canCopy(selection, row.issuedAt)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt)">
+            <Copy class="size-4" />
+          </BaseIconButton>
         </template>
       </BaseTable>
-      <BaseTablePagination :pagination="{ currentPage: page, pageSize, total }" :loading="loading" @page-change="page = $event" @page-size-change="pageSize = $event; page = 1" />
+      <BaseTablePagination :pagination="{ currentPage: page, pageSize, total }" :loading="false" @page-change="page = $event" @page-size-change="pageSize = $event; page = 1" />
     </section>
     <TurnStateConfigModal v-model="showConfig" :bucket="editing" :accounts="accounts" @saved="load" />
   </div>

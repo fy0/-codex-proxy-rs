@@ -71,6 +71,19 @@ pub struct CodexWireProfile {
 }
 
 impl CodexWireProfile {
+    /// 探测使用桶内 originator，版本与运行中的 Core 画像保持一致。
+    pub fn turn_state_user_agent(&self, originator: &str) -> String {
+        format!(
+            "{originator}/{} ({} {}; {}) {} ({originator}; {})",
+            self.codex_version,
+            self.os_type,
+            self.os_version,
+            self.arch,
+            self.terminal,
+            self.codex_version
+        )
+    }
+
     /// 按 bundled Core app-server 的官方格式生成最终 User-Agent。
     pub fn user_agent(&self) -> String {
         format!(

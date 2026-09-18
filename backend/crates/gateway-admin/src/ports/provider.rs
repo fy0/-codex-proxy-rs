@@ -139,6 +139,14 @@ pub trait ProviderAdmin: Send + Sync {
     /// 返回该 Provider 实际持有的 Dashboard 上游身份画像。
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile>;
 
+    /// 预览与实际探测共享运行时画像，不从 Dashboard 文案反推版本。
+    fn turn_state_probe_preview(
+        &self,
+        _config: &gateway_core::account::TurnStateConfig,
+    ) -> Option<crate::model::accounts::TurnStateProbePreview> {
+        None
+    }
+
     /// 使用 Provider-owned 价格规则恢复持久请求的逐项费用。
     fn calculated_billing(
         &self,

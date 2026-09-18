@@ -12,6 +12,7 @@ import AccountApiKeyFields from './AccountApiKeyFields.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
 import AccountPlanBadge from './AccountPlanBadge.vue'
 import AccountSettingsFields from './AccountSettingsFields.vue'
+import AccountTurnStatePanel from './AccountTurnStatePanel.vue'
 
 defineProps<{
   account: AccountRow | null
@@ -92,6 +93,13 @@ const turnStateOverride = defineModel<string>('turnStateOverride', { required: t
         :disabled="saving"
         :endpoint="account.outboundProxyEndpoint"
         :account-id="account.id"
+      />
+
+      <AccountTurnStatePanel
+        v-if="open && account.provider === 'openai' && account.authenticationKind === 'oauth'"
+        :key="account.id"
+        :account-id="account.id"
+        :has-account-override="!!account.turnStateOverride"
       />
 
       <BaseFormItem label="备注">
