@@ -338,6 +338,7 @@ pub(super) async fn install_candidate(
             .max(0) as u64,
         hunt_seconds: acquired_at.saturating_sub(started_at).max(0) as u64,
     };
+    super::turn_state_notifications::enqueue(tx, account, model, &installation).await?;
     append_event(
         tx,
         account.as_str(),

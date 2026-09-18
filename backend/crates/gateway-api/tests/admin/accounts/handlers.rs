@@ -64,6 +64,7 @@ async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
         let mut request = Request::builder()
             .method("POST")
             .uri(format!("/api/admin/accounts/turn-state/{path}"))
+            .header("x-request-id", "req_turn_state_controls")
             .header(header::CONTENT_TYPE, "application/json");
         if authenticated {
             request = request.header(header::COOKIE, "cpr_session=valid-session");
@@ -73,7 +74,7 @@ async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
             .oneshot(request.body(Body::from(body)).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), expected);
+        assert_eq!(response.status(), expected, "{path}: {body}");
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     }
 }

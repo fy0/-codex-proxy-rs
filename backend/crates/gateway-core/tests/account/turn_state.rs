@@ -11,6 +11,48 @@ fn encoded(issued_at: u64, size: usize) -> String {
 }
 
 #[test]
+fn feishu_webhook_accepts_only_official_https_bot_endpoints() {
+    for (url, valid) in [
+        ("", true),
+        (
+            "https://open.feishu.cn/open-apis/bot/v2/hook/test-bot",
+            true,
+        ),
+        (
+            "https://open.larksuite.com/open-apis/bot/v2/hook/test-bot",
+            true,
+        ),
+        (
+            "http://open.feishu.cn/open-apis/bot/v2/hook/test-bot",
+            false,
+        ),
+        (
+            "https://open.feishu.cn.attacker.invalid/open-apis/bot/v2/hook/test-bot",
+            false,
+        ),
+        (
+            "https://user@open.feishu.cn/open-apis/bot/v2/hook/test-bot",
+            false,
+        ),
+        (
+            "https://open.feishu.cn/open-apis/bot/v2/hook/test-bot?redirect=other",
+            false,
+        ),
+        (
+            "https://open.feishu.cn/open-apis/bot/v2/hook/test-bot#fragment",
+            false,
+        ),
+        ("https://open.feishu.cn/open-apis/bot/v2/hook/", false),
+    ] {
+        let config = TurnStateConfig {
+            feishu_webhook_url: url.to_owned(),
+            ..TurnStateConfig::default()
+        };
+        assert_eq!(config.is_valid(), valid);
+    }
+}
+
+#[test]
 fn embedded_timestamp_is_big_endian_and_age_never_uses_observation_time() {
     let value = encoded(1_800_000_000, 217);
     assert_eq!(value.len(), 292);

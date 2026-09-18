@@ -1,5 +1,6 @@
 //! 从真实初始化、worker 到业务转发的离线协议回归。
 
+mod notification;
 mod service;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};

@@ -25,6 +25,7 @@ pub struct TurnStateConfig {
     pub include_direct: bool,
     pub proxy_ids: Vec<String>,
     pub stop_strategy: TurnStateStopStrategy,
+    pub feishu_webhook_url: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -82,6 +83,7 @@ impl Default for TurnStateConfig {
             include_direct: false,
             proxy_ids: Vec::new(),
             stop_strategy: TurnStateStopStrategy::Headers,
+            feishu_webhook_url: String::new(),
         }
     }
 }
@@ -112,7 +114,36 @@ impl TurnStateConfig {
             && self.proxy_ids.iter().all(|id| {
                 id.starts_with("proxy_") && id.len() <= 128 && !id.chars().any(char::is_control)
             })
+            && (self.feishu_webhook_url.is_empty()
+                || valid_feishu_webhook(&self.feishu_webhook_url))
     }
+}
+
+fn valid_feishu_webhook(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    value.len() <= 512
+        && value.trim() == value
+        && url.scheme() == "https"
+        && matches!(
+            url.host_str(),
+            Some("open.feishu.cn" | "open.larksuite.com")
+        )
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url
+            .path()
+            .strip_prefix("/open-apis/bot/v2/hook/")
+            .is_some_and(|id| {
+                !id.is_empty()
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
 }
 
 #[derive(Clone)]
@@ -206,6 +237,18 @@ pub struct TurnStateInstallation {
     pub acquired_at: i64,
     pub attempts: u64,
     pub hunt_seconds: u64,
+}
+
+/// 通知从当前有效票按需组装，持久化通知任务不复制令牌正文。
+pub struct TurnStateNotification {
+    pub account_id: String,
+    pub account_name: String,
+    pub model: String,
+    pub webhook_url: String,
+    pub token: TurnStateToken,
+    pub installation: TurnStateInstallation,
+    pub previous_installed_at: Option<i64>,
+    pub manual: bool,
 }
 
 #[derive(Clone)]

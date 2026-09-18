@@ -66,6 +66,7 @@ mod repository;
 mod rows;
 mod runtime;
 mod turn_state;
+mod turn_state_notifications;
 
 pub use admin_adapter::*;
 pub(crate) use admin_queries::*;

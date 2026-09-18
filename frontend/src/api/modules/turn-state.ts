@@ -18,10 +18,11 @@ export interface TurnStateConfig {
   includeDirect: boolean
   proxyIds: string[]
   stopStrategy: 'headers' | 'first_output' | 'mixed'
+  feishuWebhookUrl: string
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, missingStatePolicy: 'allow', targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers' }
+  return { enabled, missingStatePolicy: 'allow', targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
 }
 
 export interface TurnStateProbePreview {

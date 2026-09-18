@@ -13,6 +13,27 @@ fn loaded_credential_from_record(
 
 #[async_trait]
 impl ProviderAccountStore for PgProviderAccountRepository {
+    async fn claim_turn_state_notifications(
+        &self,
+    ) -> Result<Vec<gateway_core::account::TurnStateNotification>, CoreStoreError> {
+        self.claim_state_notifications().await
+    }
+
+    async fn finish_turn_state_notification(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+        issued_at: i64,
+        delivered: bool,
+    ) -> Result<(), CoreStoreError> {
+        if delivered {
+            sqlx::query("update account_turn_state_notifications set sent_at = extract(epoch from now())::bigint where account_id = $1 and model = $2 and issued_at = $3 and sent_at is null")
+                .bind(account.as_str()).bind(model).bind(issued_at).execute(&self.pool).await
+                .map_err(|_| CoreStoreError::new(gateway_core::error::StoreErrorKind::Unavailable))?;
+        }
+        Ok(())
+    }
+
     async fn turn_state_buckets_for_model(
         &self,
         accounts: &[CoreProviderAccountId],

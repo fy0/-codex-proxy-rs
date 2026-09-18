@@ -6,6 +6,8 @@ use gateway_core::account::{
 
 use super::*;
 
+mod notification;
+
 fn token(length: usize, issued_at: i64) -> TurnStateToken {
     let mut bytes = vec![0; (length / 4) * 3 - 2];
     bytes[0] = 0x80;

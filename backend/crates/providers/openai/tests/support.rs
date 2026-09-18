@@ -49,9 +49,22 @@ pub(crate) struct MemoryAccountStore {
     turn_states: Mutex<BTreeMap<(String, String), gateway_core::account::TurnStateBucket>>,
     turn_observations: Mutex<Vec<gateway_core::account::TurnStateObservation>>,
     turn_proxies: Mutex<BTreeMap<String, gateway_core::account::OutboundProxy>>,
+    turn_notifications: Mutex<Vec<gateway_core::account::TurnStateNotification>>,
+    turn_notification_results: Mutex<Vec<bool>>,
 }
 
 impl MemoryAccountStore {
+    pub(crate) fn seed_turn_notification(
+        &self,
+        notice: gateway_core::account::TurnStateNotification,
+    ) {
+        self.turn_notifications.lock().unwrap().push(notice);
+    }
+
+    pub(crate) fn turn_notification_results(&self) -> Vec<bool> {
+        self.turn_notification_results.lock().unwrap().clone()
+    }
+
     pub(crate) fn seed_turn_proxy(&self, id: &str, proxy: gateway_core::account::OutboundProxy) {
         self.turn_proxies
             .lock()
@@ -250,6 +263,28 @@ impl MemoryAccountStore {
 
 #[async_trait]
 impl ProviderAccountStore for MemoryAccountStore {
+    async fn claim_turn_state_notifications(
+        &self,
+    ) -> Result<Vec<gateway_core::account::TurnStateNotification>, StoreError> {
+        Ok(std::mem::take(
+            &mut *self.turn_notifications.lock().unwrap(),
+        ))
+    }
+
+    async fn finish_turn_state_notification(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+        _issued_at: i64,
+        delivered: bool,
+    ) -> Result<(), StoreError> {
+        self.turn_notification_results
+            .lock()
+            .unwrap()
+            .push(delivered);
+        Ok(())
+    }
+
     async fn claim_turn_state_probe(
         &self,
         account: &ProviderAccountId,

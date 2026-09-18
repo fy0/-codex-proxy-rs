@@ -15,6 +15,22 @@ use super::{
 /// `provider_accounts` 的数据库中立端口。
 #[async_trait]
 pub trait ProviderAccountStore: Send + Sync {
+    async fn claim_turn_state_notifications(
+        &self,
+    ) -> Result<Vec<super::TurnStateNotification>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn finish_turn_state_notification(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+        _issued_at: i64,
+        _delivered: bool,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     async fn turn_state_proxies(
         &self,
         _ids: &[String],

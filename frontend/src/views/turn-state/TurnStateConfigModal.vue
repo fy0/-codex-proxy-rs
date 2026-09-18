@@ -175,6 +175,10 @@ async function save() {
           <span v-if="preview" class="text-cp-xs text-cp-text-secondary">version 请求头：{{ preview.version }} · 探测日期：{{ preview.currentDate }}（{{ preview.timezone }}）</span>
         </div>
       </div>
+      <BaseFormItem label="飞书机器人 Webhook">
+        <BaseInput v-model="config.feishuWebhookUrl" type="password" autocomplete="off" aria-label="飞书机器人 Webhook" placeholder="留空关闭通知" maxlength="512" :disabled="saving" />
+        <span class="text-cp-xs text-cp-text-secondary">支持飞书 / Lark 自定义机器人。安装新票后推送完整 state、距上次安装时间、获取耗时和尝试次数。关键词可设为 state；不使用签名校验。</span>
+      </BaseFormItem>
       <fieldset class="m-0 min-w-0 border-0 p-0">
         <legend class="mb-3 text-cp font-semibold text-cp-text">
           探测出口

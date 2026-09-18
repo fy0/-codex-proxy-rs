@@ -1,5 +1,6 @@
 //! OpenAI 路由令牌采集与轮换，由 Host 的账号健康任务监督。
 
+mod notification;
 mod probe;
 mod service;
 mod worker;

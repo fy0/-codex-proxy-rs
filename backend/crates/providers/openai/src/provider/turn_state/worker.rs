@@ -30,7 +30,7 @@ impl ScheduledTask for TurnStateTask {
                 .await
                 .map_err(|_| WorkerTaskError::safe("turn state buckets unavailable"))?;
             let cancellation = context.cancellation();
-            futures::stream::iter(buckets.into_iter().filter(|bucket| {
+            let probes = futures::stream::iter(buckets.into_iter().filter(|bucket| {
                 bucket.config.enabled || bucket.manual_probe_requested_at.is_some()
             }))
             .for_each_concurrent(4, |bucket| async move {
@@ -112,8 +112,8 @@ impl ScheduledTask for TurnStateTask {
                         "turn state schedule persistence failed"
                     );
                 }
-            })
-            .await;
+            });
+            tokio::join!(probes, self.service.notify_installations(cancellation));
             Ok(())
         })
     }
