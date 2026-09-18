@@ -58,6 +58,12 @@ async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
             "preview",
             r#"{"config":{"timezone":"not-a-timezone"}}"#,
             true,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "preview",
+            r#"{"config":{"targetLength":1}}"#,
+            true,
             StatusCode::BAD_REQUEST,
         ),
     ] {
