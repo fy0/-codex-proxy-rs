@@ -121,7 +121,6 @@ impl MemoryAccountStore {
         state.current_length = Some(token.value.len());
         state.current = Some(token);
         state.manual_override = manual;
-        state.config.enabled = !manual;
     }
 
     pub(crate) fn request_turn_probe(&self, account: &str, model: &str) {

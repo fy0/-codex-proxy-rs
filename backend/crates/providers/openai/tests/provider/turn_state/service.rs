@@ -270,6 +270,15 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
     assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
     // 手动安装的持久化事务由 Store 集成测试覆盖，此处验证业务读取安装后的事实。
     store.set_current_turn_state(ACCOUNT, MODEL, bucket.candidate.unwrap(), true);
+    assert!(
+        !store
+            .turn_state_bucket(&id, MODEL)
+            .await
+            .unwrap()
+            .unwrap()
+            .config
+            .enabled
+    );
     let (input, context) = request(&[ACCOUNT], MODEL);
     drop(
         bundle

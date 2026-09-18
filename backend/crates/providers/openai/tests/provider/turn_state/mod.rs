@@ -246,6 +246,15 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
                 gateway_core::account::TurnStateToken::parse(&target).unwrap(),
                 true,
             );
+            assert!(
+                store
+                    .turn_state_bucket(&id, "gpt-5.4")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .config
+                    .enabled
+            );
         }
         if phase == 3 {
             let mut bytes = vec![0; 217];

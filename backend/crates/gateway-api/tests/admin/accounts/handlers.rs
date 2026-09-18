@@ -28,7 +28,7 @@ async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
             "remove",
             r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"enabled":true}"#,
             true,
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ),
         (
             "copy",
@@ -52,7 +52,7 @@ async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
             "copy",
             r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"value":"not-accepted"}"#,
             true,
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ),
         (
             "preview",
