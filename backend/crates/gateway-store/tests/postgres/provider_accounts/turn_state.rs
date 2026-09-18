@@ -6,16 +6,19 @@ use gateway_core::account::{
 
 use super::*;
 
-mod notification;
-
-fn token(length: usize, issued_at: i64) -> TurnStateToken {
+pub(super) fn token(length: usize, issued_at: i64) -> TurnStateToken {
     let mut bytes = vec![0; (length / 4) * 3 - 2];
     bytes[0] = 0x80;
     bytes[1..9].copy_from_slice(&(issued_at as u64).to_be_bytes());
     TurnStateToken::parse(&URL_SAFE.encode(bytes)).unwrap()
 }
 
-fn observation(account: &str, model: &str, length: usize, issued_at: i64) -> TurnStateObservation {
+pub(super) fn observation(
+    account: &str,
+    model: &str,
+    length: usize,
+    issued_at: i64,
+) -> TurnStateObservation {
     TurnStateObservation {
         account_id: account.to_owned(),
         upstream_account_id: None,

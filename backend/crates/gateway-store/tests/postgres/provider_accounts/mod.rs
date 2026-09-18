@@ -6,6 +6,7 @@ use std::{
 
 mod quota_forecast;
 mod turn_state;
+mod turn_state_notifications;
 
 use chrono::{TimeDelta, Utc};
 use gateway_admin::{
