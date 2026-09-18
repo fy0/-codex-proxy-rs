@@ -99,6 +99,14 @@ pub async fn initialize(
     let websocket_pool = Arc::new(CodexWebSocketPool::with_config(
         config.websocket_pool_config(),
     ));
+    let turn_state = Arc::new(provider::TurnStateService::new(
+        Arc::clone(&accounts),
+        profile.clone(),
+        transport::endpoint_url(config.base_url(), transport::CODEX_RESPONSES_PATH),
+        provider::TurnStateService::template(config.turn_state_template.as_deref())
+            .map_err(|_| OpenAiInitializeError::TurnStateTemplate)?,
+        Arc::clone(&websocket_pool),
+    ));
     let catalog = Arc::new(CodexCredentialCatalogService::new(
         repository.clone(),
         profile.clone(),
@@ -144,7 +152,8 @@ pub async fn initialize(
             config.stream_max_retries(),
         )
         .map_err(OpenAiInitializeError::Provider)?
-        .with_session_identity(session_identity),
+        .with_session_identity(session_identity)
+        .with_turn_state(Arc::clone(&turn_state)),
     );
     let token_client = Arc::new(
         credential::token_client::openai_token_client(
@@ -198,7 +207,7 @@ pub async fn initialize(
         websocket_pool,
         desktop_release_status,
     ));
-    let worker_contributions = provider::worker_contributions(
+    let mut worker_contributions = provider::worker_contributions(
         refresh,
         quota,
         catalog,
@@ -207,6 +216,9 @@ pub async fn initialize(
         desktop_release,
     )
     .map_err(|_| OpenAiInitializeError::Worker)?;
+    worker_contributions.push(
+        provider::turn_state_contribution(turn_state).map_err(|_| OpenAiInitializeError::Worker)?,
+    );
 
     Ok(ProviderBundle {
         core_provider,
@@ -259,4 +271,6 @@ pub enum OpenAiInitializeError {
     DesktopRelease,
     #[error("OpenAI worker plan is invalid")]
     Worker,
+    #[error("OpenAI turn state template is invalid")]
+    TurnStateTemplate,
 }

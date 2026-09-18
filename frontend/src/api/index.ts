@@ -17,12 +17,13 @@ export * from './modules/backups'
 export * from './modules/dashboard'
 
 export * from './modules/proxies'
-
 // 设置管理
 export * from './modules/settings'
 
 // 系统更新
 export * from './modules/system'
+
+export * from './modules/turn-state'
 
 // 使用记录
 export * from './modules/usage'

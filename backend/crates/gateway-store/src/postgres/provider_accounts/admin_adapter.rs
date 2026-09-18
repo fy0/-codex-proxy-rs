@@ -394,6 +394,85 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn turn_state_status(
+        &self,
+        account_id: Option<&str>,
+    ) -> AdminStoreResult<Vec<gateway_core::account::TurnStateStatus>> {
+        self.accounts
+            .turn_state_statuses(account_id)
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "turn state status unavailable",
+                )
+            })
+    }
+
+    async fn configure_turn_state(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        config: gateway_core::account::TurnStateConfig,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        if !config.is_valid() {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Invalid,
+                ENTITY,
+                "invalid turn state configuration",
+            ));
+        }
+        let proxy_count = sqlx::query_scalar::<_, i64>(
+            "select count(*) from outbound_proxies where id = any($1::text[])",
+        )
+        .bind(&config.proxy_ids)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "proxy selection unavailable",
+            )
+        })?;
+        if proxy_count as usize != config.proxy_ids.iter().collect::<BTreeSet<_>>().len() {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Invalid,
+                ENTITY,
+                "selected proxy does not exist",
+            ));
+        }
+        let mut transaction = self.pool.begin().await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "turn state transaction unavailable",
+            )
+        })?;
+        let result: StoreResult<Revision> = async {
+            let config = serde_json::to_value(config).map_err(|_| postgres_unavailable("encode turn state configuration"))?;
+            sqlx::query("insert into account_turn_states(account_id, model, config, upstream_account_id, upstream_user_id) select id, $2, $3, upstream_account_id, upstream_user_id from provider_accounts where id = $1 on conflict (account_id, model) do update set config = excluded.config, next_probe_at = null, turn_state_override = case when not (excluded.config->>'enabled')::boolean or length(account_turn_states.turn_state_override) <> (excluded.config->>'targetLength')::integer or account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.turn_state_override end, candidate = case when length(account_turn_states.candidate) <> (excluded.config->>'targetLength')::integer or account_turn_states.candidate_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.candidate end")
+                .bind(account_id.as_str()).bind(model).bind(config).execute(&mut *transaction).await
+                .map_err(|_| postgres_unavailable("configure turn state"))?;
+            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+            append_admin_audit_event_in_transaction(&mut transaction, mutation_audit(context, "configure_turn_state", "provider_account", account_id.as_str(), vec!["turn_state_rotation".to_owned()]), revision).await?;
+            Ok(revision)
+        }.await;
+        let revision = super::repository::finish_admin_transaction(
+            transaction,
+            result,
+            "configure turn state",
+        )
+        .await
+        .map_err(|error| admin_store_error(ENTITY, error))?;
+        Ok(AccountUpdateResult {
+            account_id: account_id.clone(),
+            config_revision: admin_revision(revision)?,
+        })
+    }
+
     async fn list_accounts(
         &self,
         query: AdminAccountListQuery,

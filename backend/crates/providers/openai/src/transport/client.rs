@@ -670,9 +670,30 @@ pub struct CodexBackendClient {
     pub(super) websocket_origin_key: String,
     pub(super) outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub(super) egress_key: String,
+    pub(super) turn_state_observer: Option<super::TurnStateObserver>,
 }
 
 impl CodexBackendClient {
+    pub(crate) fn with_turn_state_observer(
+        mut self,
+        observer: Option<super::TurnStateObserver>,
+    ) -> Self {
+        self.turn_state_observer = observer;
+        self
+    }
+
+    pub(crate) async fn observe_turn_state(&self, response: super::TurnStateResponse) {
+        if let Some(observer) = &self.turn_state_observer {
+            // 观测故障不得拖住业务响应；取消后数据库事务自动回滚。
+            if tokio::time::timeout(Duration::from_millis(500), observer(response))
+                .await
+                .is_err()
+            {
+                tracing::warn!("turn state observation timed out");
+            }
+        }
+    }
+
     pub(crate) fn with_authentication(
         mut self,
         authentication: &crate::credential::CodexRuntimeAuthentication,

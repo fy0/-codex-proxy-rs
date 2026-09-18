@@ -59,6 +59,7 @@ impl CodexBackendClient {
             websocket_origin_key: websocket_origin_key(&base_url),
             outbound_proxy: None,
             egress_key: String::new(),
+            turn_state_observer: None,
             base_url,
             protocol: OpenAiUpstreamProtocol::Codex,
             profile,
@@ -120,8 +121,24 @@ impl CodexBackendClient {
         } else {
             body
         };
-        let response = outbound.body(body).send().await?;
-        let upstream_headers_ms = elapsed_duration_millis(headers_started_at.elapsed());
+        let response = outbound.body(body).send().await;
+        let headers_elapsed = headers_started_at.elapsed();
+        self.observe_turn_state(super::TurnStateResponse {
+            status: response
+                .as_ref()
+                .ok()
+                .map(|response| response.status().as_u16()),
+            value: response
+                .as_ref()
+                .ok()
+                .and_then(|response| response.headers().get("x-codex-turn-state"))
+                .map(|value| value.as_bytes().to_vec()),
+            elapsed_ms: u64::try_from(headers_elapsed.as_millis()).unwrap_or(u64::MAX),
+            transport_error: response.is_err(),
+        })
+        .await;
+        let response = response?;
+        let upstream_headers_ms = elapsed_duration_millis(headers_elapsed);
         let http_version = http_version_name(response.version()).to_string();
         let status = response.status();
         trace.headers(
@@ -307,6 +324,14 @@ impl CodexBackendClient {
             Some(DEFAULT_STREAM_IDLE_TIMEOUT),
         )
         .await;
+        if let Err(error) = &prepared
+            && let Some(observation) = super::TurnStateResponse::websocket_failure(
+                error,
+                u64::try_from(prepare_started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            )
+        {
+            self.observe_turn_state(observation).await;
+        }
         let prepared = match prepared {
             Ok(WebSocketFastPath::Ready(prepared)) => prepared,
             Ok(WebSocketFastPath::Missed) => {
@@ -425,7 +450,8 @@ impl CodexBackendClient {
                     request: websocket_request,
                     prepared,
                 } = *route;
-                let mut exchange = execute_prepared_response_create_request_stream(
+                let exchange_started_at = Instant::now();
+                let exchange = execute_prepared_response_create_request_stream(
                     &websocket_request,
                     prepared,
                     context
@@ -434,8 +460,17 @@ impl CodexBackendClient {
                         .unwrap_or_default()
                         .exchange("websocket"),
                 )
-                .await
-                .map_err(websocket_exchange_error_to_client_error)?;
+                .await;
+                if let Err(error) = &exchange
+                    && let Some(observation) = super::TurnStateResponse::websocket_failure(
+                        error,
+                        u64::try_from(exchange_started_at.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    )
+                {
+                    self.observe_turn_state(observation).await;
+                }
+                let mut exchange = exchange.map_err(websocket_exchange_error_to_client_error)?;
                 if requirement.allows_connection_restart() {
                     match await_websocket_delivery_boundary(&mut exchange).await {
                         Ok(DeliveryBoundary::Ready) => {}
@@ -451,6 +486,16 @@ impl CodexBackendClient {
                         }
                     }
                 }
+                self.observe_turn_state(super::TurnStateResponse {
+                    status: exchange.diagnostics.status_code,
+                    value: exchange
+                        .turn_state
+                        .as_ref()
+                        .map(|value| value.as_bytes().to_vec()),
+                    elapsed_ms: metrics.upstream_headers_ms.unwrap_or_default().max(0) as u64,
+                    transport_error: false,
+                })
+                .await;
                 Ok(CodexBackendStreamingResponse {
                     body: Box::pin(
                         exchange
@@ -625,14 +670,19 @@ async fn read_model_catalog_body(response: ReqwestResponse) -> CodexClientResult
 fn websocket_connection_profile(headers: &HeaderMap) -> String {
     // turn-state 在握手头中发送且连接级绑定；纳入画像防止账号覆盖值变更后
     // 复用到携带旧握手状态的池化连接。逐轮值仍由帧 metadata 覆盖。
-    ["originator", "user-agent", X_OPENAI_MEMGEN_REQUEST_HEADER, "x-codex-turn-state"]
-        .map(|name| {
-            headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-        })
-        .join("\0")
+    [
+        "originator",
+        "user-agent",
+        X_OPENAI_MEMGEN_REQUEST_HEADER,
+        "x-codex-turn-state",
+    ]
+    .map(|name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+    })
+    .join("\0")
 }
 
 fn http_sse_stream(

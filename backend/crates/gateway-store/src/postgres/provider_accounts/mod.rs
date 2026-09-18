@@ -65,6 +65,7 @@ mod quota_forecast;
 mod repository;
 mod rows;
 mod runtime;
+mod turn_state;
 
 pub use admin_adapter::*;
 pub(crate) use admin_queries::*;

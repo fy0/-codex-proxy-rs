@@ -13,6 +13,66 @@ fn loaded_credential_from_record(
 
 #[async_trait]
 impl ProviderAccountStore for PgProviderAccountRepository {
+    async fn schedule_turn_state(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+        next_probe_at: i64,
+    ) -> Result<(), CoreStoreError> {
+        sqlx::query("update account_turn_states set next_probe_at = $3 where account_id = $1 and model = $2 and (config->>'enabled')::boolean")
+            .bind(account.as_str()).bind(model).bind(next_probe_at)
+            .execute(&self.pool).await.map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
+        Ok(())
+    }
+    async fn turn_state_proxies(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<gateway_core::account::OutboundProxy>, CoreStoreError> {
+        let urls = sqlx::query_scalar::<_, String>(
+            "select proxy_url from outbound_proxies where id = any($1::text[]) order by id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
+        urls.into_iter()
+            .map(|url| {
+                gateway_core::account::OutboundProxy::parse(&url)
+                    .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::InvalidData))
+            })
+            .collect()
+    }
+
+    async fn turn_state_buckets(
+        &self,
+    ) -> Result<Vec<gateway_core::account::TurnStateBucket>, CoreStoreError> {
+        self.load_turn_state_buckets().await
+    }
+
+    async fn turn_state_bucket(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+    ) -> Result<Option<gateway_core::account::TurnStateBucket>, CoreStoreError> {
+        self.load_turn_state_bucket(account, model).await
+    }
+
+    async fn observe_turn_state(
+        &self,
+        observation: gateway_core::account::TurnStateObservation,
+        candidate: Option<gateway_core::account::TurnStateToken>,
+    ) -> Result<(), CoreStoreError> {
+        self.record_turn_state(observation, candidate).await
+    }
+
+    async fn install_turn_state(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+    ) -> Result<bool, CoreStoreError> {
+        self.install_turn_state_candidate(account, model).await
+    }
+
     async fn create_account(&self, account: CoreNewProviderAccount) -> Result<(), CoreStoreError> {
         if account.account.revision().get() != 1 {
             return Err(CoreStoreError::new(CoreStoreErrorKind::InvalidData));

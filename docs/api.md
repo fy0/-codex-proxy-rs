@@ -366,6 +366,8 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 更新指定 OpenAI 账号的 OAuth token 或 API Key 上游设置 |
 | `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, turnStateOverride?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
 | `POST` | `/api/admin/accounts/turn-state-override` | `{ accountId, turnStateOverride }` | 单独设置账号级 `x-codex-turn-state` 强制覆盖；`null` 或空白串清除，非空值须为合法 HTTP header 值（≤1024 字节） |
+| `GET` | `/api/admin/accounts/turn-state` | 可选 `accountId` | 按账号、上游模型返回轮换配置、令牌元数据、观测和安装历史，不返回令牌正文 |
+| `POST` | `/api/admin/accounts/turn-state/configure` | `{ accountId, model, config }` | 配置 OpenAI OAuth 账号的一个模型桶，返回账号 ID 与配置版本 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
@@ -412,6 +414,32 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 指定代理后，推理、OAuth 服务端交换/刷新及账号辅助请求使用同一出口；代理失败不会退回直连。
 浏览器打开的第三方 OAuth 授权页仍使用浏览器自身网络。
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)。
+
+### Turn State 自动轮换
+
+桶键为账号 ID 与实际发送的上游模型 ID，不能用模型别名代替。配置写入需要管理员身份，复用账号变更的审计和配置发布；`config` 按完整配置替换，省略的字段使用下列默认值，未知字段会拒绝。
+
+| 配置字段 | 默认值 | 范围或语义 |
+| --- | --- | --- |
+| `enabled` | `false` | 启用该桶的后台探测与自动注入；被动观测不依赖此开关 |
+| `targetLength` | `292` | 76–4096 字节；只有长度命中且信封有效的令牌才进入候选池 |
+| `ttlSeconds` | `2700` | 60–3600 秒，从令牌内嵌签发时间计算的本地寿命 |
+| `refreshAfterSeconds` | `2100` | 至少 30 秒且小于寿命；达到此龄开始寻找更新令牌 |
+| `retrySeconds` / `jitterSeconds` | `30` / `15` | 重试间隔 1–3600 秒，再加 0–jitter 的随机秒数，抖动上限 3600 |
+| `budget` / `idleSeconds` | `40` / `300` | 每轮最多 1–100 次尝试，之后休息 10–86400 秒 |
+| `timezone` | `UTC` | IANA 时区；账号已有出口位置时区优先，否则使用此备用时区 |
+| `includeAccountProxy` | `true` | 默认使用账号当前代理；账号无代理时为直连 |
+| `includeDirect` | `false` | 显式额外加入直连 |
+| `proxyIds` | `[]` | 最多 32 个托管代理 ID，可多选；支持 HTTP、HTTPS、SOCKS5、SOCKS5H |
+| `stopStrategy` | `headers` | `headers` 获得响应头即中断；`first_output` 读取到首个输出/推理 delta 或终态即中断；`mixed` 每次 50% 随机选择前两者 |
+
+出口集合去重后，每次探测均匀随机选择一个。账号代理和托管代理均按尝试时的最新值解析；没有可用出口时记录跳过，不能暗中改为直连。停用探测不修改账号自己的业务出口。
+
+状态项包含 `accountId`、`accountName`、`model`、`config`、`tokenLength`、`issuedAt`、`ageSeconds`、`active`、`accountEnabled`、`huntAttempts`、`nextProbeAt`、`observations`、`installations`。签发和观察时间均为 Unix 秒；尚未安装时令牌元数据为 `null`。过期后保留最后安装的长度和签发水位供诊断，`active=false`，令牌正文清除。`active` 表示账号启用、桶启用且本地令牌仍有效，不保证上游接受。`huntAttempts` 为当前寻获周期的累计尝试数，跨预算轮次累计；`nextProbeAt` 为预计下次开始时间，调度周期和并发限制可能使实际开始稍晚，账号或桶停用时为 `null`。
+
+`observations` 分别保留最近 100 条主动探测和 100 条被动采集；包含 `source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode` 和 `stopReason`。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`length_miss`、`invalid_token`、`expired_or_future` 均不会安装。回应策略最多读取 1 MiB、30 秒，不保存正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。无令牌正文、Bearer 或代理认证。
+
+启用自动轮换的桶以模型专属覆盖为准，没有有效令牌时清除请求中的旧覆盖；安装只接受比该桶历史签发水位严格更新的候选。自动令牌不会写入旧的账号级标量 `turnStateOverride`，避免被其他模型读取。未启用自动轮换的模型仍沿用原有手工覆盖行为；手工覆盖接口不具备自动轮换的寿命和桶隔离保证。操作与模板说明见 [Turn State 轮换](../deploy/README.md#turn-state-轮换)。
 
 ### 账号模型限制
 

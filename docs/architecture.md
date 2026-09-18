@@ -522,7 +522,9 @@ Worker 由各 Bundle 贡献、由 Host 统一监督：
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅；
 - Admin：S3/R2 备份 daemon，负责调度、执行、删除收敛与保留清理；
   以及账号冻结恢复 worker（容量熔断的自适应并发下调与到期探测解冻）；
-- Provider：credential refresh、quota/catalog 健康和官方版本/etag 检查。
+- Provider：credential refresh、quota/catalog 健康、官方版本/etag 检查和 OpenAI turn-state 轮换。
+
+Turn-state 由 OpenAI Provider 收集响应头并贡献 `openai-turn-state` 定时任务，Host 沿用 Redis lease 和统一取消/监督机制运行，不引入外部轮换进程。Core 定义账号/模型桶及令牌信封的共享值合同；Store 持久化候选、模型专属覆盖和有界观测，使用同桶事务和签发时间严格递增条件原子安装。Admin 通过账号端口配置，API 只处理管理 wire，界面不读取令牌正文。自动令牌绝不提升成账号级通用覆盖。重新授权改变上游账号或用户身份时，同一事务中的数据库触发器清除旧令牌与历史、保留配置；在途观测与发送前注入均核对桶的上游身份，避免本地账号 ID 复用导致串号。安装与配置变更使该账号旧 WS 连接失效，后续请求按准确的账号与模型读取覆盖。探测读取现有 OAuth 凭据，绝不调用 refresh；请求直接走 Provider 上游客户端，不进入 Core 业务执行与计量路径。过期或未来签发的令牌不会成为可用候选，寿命从内嵌签发时间计算。
 
 账号容量熔断默认关闭。启用后，仅普通请求收到的容量类上游错误（`server_is_overloaded` 等与
 5xx 不可用）按滑动窗口计数，并把当时观测到的在途并发并入峰值证据；本地连接保护与诊断探测

@@ -14,6 +14,11 @@ pub use proxy::{InvalidOutboundProxy, OutboundProxy};
 pub mod scope;
 mod selection;
 mod store;
+mod turn_state;
+pub use turn_state::{
+    TurnStateBucket, TurnStateConfig, TurnStateInstallation, TurnStateObservation, TurnStateStatus,
+    TurnStateStopStrategy, TurnStateToken,
+};
 
 pub use error::CredentialError;
 pub use model::*;

@@ -15,6 +15,51 @@ use super::{
 /// `provider_accounts` 的数据库中立端口。
 #[async_trait]
 pub trait ProviderAccountStore: Send + Sync {
+    async fn turn_state_proxies(
+        &self,
+        _ids: &[String],
+    ) -> Result<Vec<super::OutboundProxy>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn turn_state_buckets(&self) -> Result<Vec<super::TurnStateBucket>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn turn_state_bucket(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+    ) -> Result<Option<super::TurnStateBucket>, StoreError> {
+        Ok(None)
+    }
+
+    async fn observe_turn_state(
+        &self,
+        _observation: super::TurnStateObservation,
+        _candidate: Option<super::TurnStateToken>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::new(crate::error::StoreErrorKind::Unavailable))
+    }
+
+    /// 在同一事务内检查候选寿命、配置与严格签发时间门，并写入安装历史。
+    async fn install_turn_state(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    async fn schedule_turn_state(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+        _next_probe_at: i64,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     async fn create_account(&self, account: NewProviderAccount) -> Result<(), StoreError>;
 
     async fn get_account(

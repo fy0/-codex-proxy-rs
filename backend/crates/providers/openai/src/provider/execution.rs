@@ -804,6 +804,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         observation_state.merge_rate_limit_headers(&update_headers)
                     };
                     let metadata_merge = merge_response_metadata_updates(
+                        &client,
                         response_metadata_updates.as_ref(),
                         &mut session_capture,
                         &mut observation_state,
@@ -878,6 +879,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 }
             };
             let metadata_merge = merge_response_metadata_updates(
+                &client,
                 response_metadata_updates.as_ref(),
                 &mut session_capture,
                 &mut observation_state,
@@ -1055,6 +1057,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .await;
         }
         let metadata_changed = merge_response_metadata_updates(
+            &client,
             response_metadata_updates.as_ref(),
             &mut session_capture,
             &mut observation_state,
@@ -1128,6 +1131,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
 }
 
 async fn merge_response_metadata_updates(
+    client: &CodexBackendClient,
     updates: Option<&CodexResponseMetadataUpdates>,
     session_capture: &mut Option<OpenAiSessionCapture>,
     observation_state: &mut OpenAiResponseObservationState,
@@ -1143,6 +1147,14 @@ async fn merge_response_metadata_updates(
     }
     let mut changed = false;
     if let Some(turn_state) = turn_state {
+        client
+            .observe_turn_state(crate::transport::TurnStateResponse {
+                status: Some(101),
+                value: Some(turn_state.as_bytes().to_vec()),
+                elapsed_ms: 0,
+                transport_error: false,
+            })
+            .await;
         if let Some(capture) = session_capture.as_mut() {
             capture.turn_state = Some(turn_state.clone());
         }

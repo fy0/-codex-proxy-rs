@@ -586,6 +586,18 @@ pub(crate) fn force_turn_state_override(request: &mut CodexResponsesRequest, val
     request.set_client_metadata(Some(Value::Object(metadata)));
 }
 
+pub(crate) fn clear_turn_state_override(request: &mut CodexResponsesRequest) {
+    request.turn_state = None;
+    request.passthrough_headers.remove("x-codex-turn-state");
+    for key in ["turnState", "turn_state", "x-codex-turn-state"] {
+        request.body_mut().remove(key);
+    }
+    if let Some(Value::Object(mut metadata)) = request.client_metadata().cloned() {
+        metadata.remove("x-codex-turn-state");
+        request.set_client_metadata(Some(Value::Object(metadata)));
+    }
+}
+
 fn metadata_string(request: &CodexResponsesRequest, key: &str) -> Option<String> {
     request
         .client_metadata()?

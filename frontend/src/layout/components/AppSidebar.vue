@@ -12,6 +12,7 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  Radio,
   Settings,
   Sun,
   Users,
@@ -60,6 +61,7 @@ const preferredMotion = usePreferredReducedMotion()
 const navItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
   { label: '账号管理', icon: Users, path: '/accounts' },
+  { label: '路由状态', icon: Radio, path: '/turn-state' },
   { label: '代理管理', icon: Network, path: '/proxies' },
   { label: '分组管理', icon: FolderTree, path: '/groups' },
   { label: 'API 密钥', icon: KeyRound, path: '/keys' },

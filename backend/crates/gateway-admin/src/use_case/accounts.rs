@@ -47,6 +47,23 @@ const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
+    async fn turn_state_status(
+        &self,
+        _account_id: Option<&str>,
+    ) -> Result<Vec<gateway_core::account::TurnStateStatus>, AdminError> {
+        Ok(Vec::new())
+    }
+
+    async fn configure_turn_state(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _model: String,
+        _config: gateway_core::account::TurnStateConfig,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        Err(AdminError::invalid("当前服务不支持 turn state 轮换"))
+    }
+
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError>;
 
     async fn export(
@@ -364,6 +381,52 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
+    async fn turn_state_status(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<gateway_core::account::TurnStateStatus>, AdminError> {
+        if let Some(id) = account_id {
+            ProviderAccountId::new(id).map_err(|_| AdminError::invalid("账号 ID 不合法"))?;
+        }
+        self.accounts
+            .turn_state_status(account_id)
+            .await
+            .map_err(|error| map_store_error(error, "turn state status"))
+    }
+
+    async fn configure_turn_state(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        model: String,
+        config: gateway_core::account::TurnStateConfig,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        if !config.is_valid()
+            || model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+        {
+            return Err(AdminError::invalid("轮换配置或模型 ID 不合法"));
+        }
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai"
+            || stored.account.authentication_kind != "oauth"
+        {
+            return Err(AdminError::invalid(
+                "仅 OpenAI OAuth 账号支持 turn state 轮换",
+            ));
+        }
+        let result = self
+            .accounts
+            .configure_turn_state(&account_id, &model, config, context)
+            .await
+            .map_err(|error| map_store_error(error, "turn state configuration"))?;
+        provider.account_unavailable(&account_id).await;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError> {
         let runtime = self
             .account_runtime

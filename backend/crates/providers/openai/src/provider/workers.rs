@@ -12,6 +12,16 @@ pub(super) const DESKTOP_RELEASE_WORKER_OWNER: &str = "openai-desktop-release";
 pub(super) const MODEL_ETAG_WORKER_OWNER: &str = "openai-model-etag";
 pub(super) const MODEL_CATALOG_WORKER_OWNER: &str = "openai-model-catalog";
 
+pub(crate) fn turn_state_contribution(
+    service: Arc<TurnStateService>,
+) -> Result<WorkerContribution, WorkerDefinitionError> {
+    Ok(WorkerContribution::Registration(scheduled_registration(
+        WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "openai-turn-state")?,
+        Duration::from_secs(5),
+        Box::new(turn_state::TurnStateTask::new(service)),
+    )?))
+}
+
 pub(crate) fn worker_contributions(
     refresh: Arc<CodexCredentialRefreshService>,
     quota: Arc<CodexCredentialQuotaService>,

@@ -3,6 +3,7 @@ mod model_access;
 mod proxy;
 mod selection;
 mod selection_diagnostics;
+mod turn_state;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;

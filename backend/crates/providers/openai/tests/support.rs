@@ -46,9 +46,51 @@ pub(crate) struct MemoryAccountStore {
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
     quota_reads: AtomicUsize,
     fail_provider_listing: AtomicBool,
+    turn_states: Mutex<BTreeMap<(String, String), gateway_core::account::TurnStateBucket>>,
+    turn_observations: Mutex<Vec<gateway_core::account::TurnStateObservation>>,
+    turn_proxies: Mutex<BTreeMap<String, gateway_core::account::OutboundProxy>>,
 }
 
 impl MemoryAccountStore {
+    pub(crate) fn seed_turn_proxy(&self, id: &str, proxy: gateway_core::account::OutboundProxy) {
+        self.turn_proxies
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), proxy);
+    }
+    pub(crate) fn seed_turn_state(
+        &self,
+        account: &str,
+        model: &str,
+        config: gateway_core::account::TurnStateConfig,
+    ) {
+        let identity = self.account(account);
+        self.turn_states.lock().unwrap().insert(
+            (account.to_owned(), model.to_owned()),
+            gateway_core::account::TurnStateBucket {
+                account_id: account.to_owned(),
+                upstream_account_id: identity
+                    .as_ref()
+                    .and_then(|account| account.upstream_account_id().map(str::to_owned)),
+                upstream_user_id: identity
+                    .as_ref()
+                    .and_then(|account| account.upstream_user_id().map(str::to_owned)),
+                model: model.to_owned(),
+                config,
+                current: None,
+                current_issued_at: None,
+                current_length: None,
+                candidate: None,
+                hunt_attempts: 0,
+                next_probe_at: None,
+            },
+        );
+    }
+
+    pub(crate) fn turn_observations(&self) -> Vec<gateway_core::account::TurnStateObservation> {
+        self.turn_observations.lock().unwrap().clone()
+    }
+
     pub(crate) fn repository(self: &Arc<Self>) -> CodexCredentialRepository {
         CodexCredentialRepository::new(self.clone())
     }
@@ -179,6 +221,100 @@ impl MemoryAccountStore {
 
 #[async_trait]
 impl ProviderAccountStore for MemoryAccountStore {
+    async fn schedule_turn_state(
+        &self,
+        account: &ProviderAccountId,
+        model: &str,
+        next_probe_at: i64,
+    ) -> Result<(), StoreError> {
+        if let Some(state) = self
+            .turn_states
+            .lock()
+            .unwrap()
+            .get_mut(&(account.as_str().to_owned(), model.to_owned()))
+        {
+            state.next_probe_at = Some(next_probe_at);
+        }
+        Ok(())
+    }
+    async fn turn_state_proxies(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<gateway_core::account::OutboundProxy>, StoreError> {
+        let proxies = self.turn_proxies.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| proxies.get(id).cloned())
+            .collect())
+    }
+    async fn turn_state_buckets(
+        &self,
+    ) -> Result<Vec<gateway_core::account::TurnStateBucket>, StoreError> {
+        Ok(self.turn_states.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn turn_state_bucket(
+        &self,
+        account: &ProviderAccountId,
+        model: &str,
+    ) -> Result<Option<gateway_core::account::TurnStateBucket>, StoreError> {
+        Ok(self
+            .turn_states
+            .lock()
+            .unwrap()
+            .get(&(account.as_str().to_owned(), model.to_owned()))
+            .cloned())
+    }
+
+    async fn observe_turn_state(
+        &self,
+        observation: gateway_core::account::TurnStateObservation,
+        candidate: Option<gateway_core::account::TurnStateToken>,
+    ) -> Result<(), StoreError> {
+        let mut states = self.turn_states.lock().unwrap();
+        if let Some(state) =
+            states.get_mut(&(observation.account_id.clone(), observation.model.clone()))
+        {
+            if observation.source == "probe" && observation.probe_id.is_some() {
+                state.hunt_attempts += 1;
+            }
+            if let Some(candidate) = candidate.filter(|token| {
+                token.value.len() == state.config.target_length
+                    && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
+                    && token.is_newer_than(state.current_issued_at)
+            }) {
+                state.candidate = Some(candidate);
+            }
+        }
+        self.turn_observations.lock().unwrap().push(observation);
+        Ok(())
+    }
+
+    async fn install_turn_state(
+        &self,
+        account: &ProviderAccountId,
+        model: &str,
+    ) -> Result<bool, StoreError> {
+        let mut states = self.turn_states.lock().unwrap();
+        let Some(state) = states.get_mut(&(account.as_str().to_owned(), model.to_owned())) else {
+            return Ok(false);
+        };
+        if !state.config.enabled {
+            return Ok(false);
+        }
+        let Some(candidate) = state.candidate.take().filter(|token| {
+            token.is_newer_than(state.current_issued_at)
+                && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
+        }) else {
+            return Ok(false);
+        };
+        state.current_issued_at = Some(candidate.issued_at);
+        state.current_length = Some(candidate.value.len());
+        state.current = Some(candidate);
+        state.hunt_attempts = 0;
+        Ok(true)
+    }
+
     async fn create_account(&self, input: NewProviderAccount) -> Result<(), StoreError> {
         let mut accounts = self.accounts.lock().expect("account store lock");
         if accounts.contains_key(input.account.id()) {

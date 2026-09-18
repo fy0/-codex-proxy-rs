@@ -74,7 +74,7 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
     assert_eq!(bundle.core_provider().name(), "openai");
     assert_eq!(bundle.admin_provider().provider_kind().as_str(), "openai");
     let contributions = bundle.take_worker_contributions();
-    assert_eq!(contributions.len(), 5);
+    assert_eq!(contributions.len(), 6);
     assert!(
         contributions
             .iter()
@@ -1261,7 +1261,10 @@ fn reset_credit_command(account_id: ProviderAccountId) -> ConsumeProviderResetCr
     }
 }
 
-fn initialized_provider_request(operation: Operation, account_id: &str) -> ProviderRequest {
+pub(crate) fn initialized_provider_request(
+    operation: Operation,
+    account_id: &str,
+) -> ProviderRequest {
     let provider = ProviderKind::new("openai").expect("provider");
     let upstream_model = UpstreamModelId::new("gpt-5.4").expect("upstream model");
     let public_model = PublicModelId::new(upstream_model.as_str()).expect("public model");
@@ -1291,7 +1294,7 @@ fn initialized_provider_request(operation: Operation, account_id: &str) -> Provi
     ProviderRequest::new(operation, plan.candidates()[0].clone())
 }
 
-fn initialized_attempt_context(request_id: &str, account_id: &str) -> AttemptContext {
+pub(crate) fn initialized_attempt_context(request_id: &str, account_id: &str) -> AttemptContext {
     AttemptContext::new(
         RequestAttemptContext::new(
             ModelRequestId::new(request_id).expect("request id"),
@@ -1323,6 +1326,10 @@ fn provider_ports() -> ProviderStorePorts {
         Arc::new(MemoryAccountStore::default()),
         Arc::new(TestOAuthPending::default()),
     )
+}
+
+pub(crate) fn turn_state_provider_ports(accounts: Arc<MemoryAccountStore>) -> ProviderStorePorts {
+    provider_ports_with(accounts, Arc::new(TestOAuthPending::default()))
 }
 
 fn provider_ports_with(
