@@ -149,13 +149,14 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
     let cycle = || WorkerCycleContext::new(registration.id.clone(), None, CancellationToken::new());
     let id = ProviderAccountId::new(ACCOUNT).unwrap();
     let (input, context) = request(&[ACCOUNT], MODEL);
-    let error = tokio::time::timeout(
+    let Err(error) = tokio::time::timeout(
         Duration::from_secs(1),
         bundle.core_provider().execute(input, context),
     )
     .await
-    .unwrap()
-    .unwrap_err();
+    .unwrap() else {
+        panic!("missing ticket must block business scheduling")
+    };
     assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
     assert_eq!(error.send_state(), UpstreamSendState::NotSent);
     let public = gateway_core::error::GatewayError::from_provider(&error);
@@ -242,15 +243,10 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
         false,
     );
     let (input, context) = request(&[ACCOUNT], MODEL);
-    assert_eq!(
-        bundle
-            .core_provider()
-            .execute(input, context)
-            .await
-            .unwrap_err()
-            .kind(),
-        ProviderErrorKind::NoEligibleAccount
-    );
+    let Err(error) = bundle.core_provider().execute(input, context).await else {
+        panic!("expired ticket must block business scheduling")
+    };
+    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(store.account(ACCOUNT).unwrap().enabled());
 
@@ -268,15 +264,10 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
     assert!(!bucket.config.enabled);
     assert!(bucket.current.is_none());
     let (input, context) = request(&[ACCOUNT], MODEL);
-    assert_eq!(
-        bundle
-            .core_provider()
-            .execute(input, context)
-            .await
-            .unwrap_err()
-            .kind(),
-        ProviderErrorKind::NoEligibleAccount
-    );
+    let Err(error) = bundle.core_provider().execute(input, context).await else {
+        panic!("candidate must not restore business scheduling")
+    };
+    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
     // 手动安装的持久化事务由 Store 集成测试覆盖，此处验证业务读取安装后的事实。
     store.set_current_turn_state(ACCOUNT, MODEL, bucket.candidate.unwrap(), true);
     let (input, context) = request(&[ACCOUNT], MODEL);
@@ -287,22 +278,17 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
             .await
             .unwrap(),
     );
-    store.set_enabled(ACCOUNT, false);
+    store.set_enabled(&id, false).await.unwrap();
     store.request_turn_probe(ACCOUNT, MODEL);
     server.reset().await;
     task.run_cycle(cycle()).await.unwrap();
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(!store.account(ACCOUNT).unwrap().enabled());
     let (input, context) = request(&[ACCOUNT], MODEL);
-    assert_eq!(
-        bundle
-            .core_provider()
-            .execute(input, context)
-            .await
-            .unwrap_err()
-            .kind(),
-        ProviderErrorKind::NoEligibleAccount
-    );
+    let Err(error) = bundle.core_provider().execute(input, context).await else {
+        panic!("manual disable must block business scheduling")
+    };
+    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
 }
 
 #[tokio::test]

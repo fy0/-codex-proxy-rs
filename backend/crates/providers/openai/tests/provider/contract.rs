@@ -157,13 +157,15 @@ async fn expired_turn_state_blocks_reused_websocket_and_transport_retry_before_s
         AttemptTransport::Default,
         AttemptTransport::Retry(NonZeroU32::new(1).unwrap()),
     ] {
-        let error = provider
+        let Err(error) = provider
             .execute(
                 planned_request("openai", operation()),
                 context("req_ticket_expired", CancellationToken::new()).with_transport(transport),
             )
             .await
-            .unwrap_err();
+        else {
+            panic!("expired ticket must block business scheduling")
+        };
         assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
         assert_eq!(error.send_state(), UpstreamSendState::NotSent);
         assert_eq!(

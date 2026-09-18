@@ -52,20 +52,6 @@ pub(crate) struct MemoryAccountStore {
 }
 
 impl MemoryAccountStore {
-    pub(crate) fn set_enabled(&self, id: &str, enabled: bool) {
-        let mut accounts = self.accounts.lock().unwrap();
-        let stored = accounts
-            .get_mut(&ProviderAccountId::new(id).unwrap())
-            .unwrap();
-        stored.account = stored.account.clone().with_account_facts(
-            enabled,
-            stored.account.credential_state(),
-            stored.account.quota(),
-            stored.account.last_error_reason(),
-            stored.account.last_error_message().map(str::to_owned),
-        );
-    }
-
     pub(crate) fn seed_turn_proxy(&self, id: &str, proxy: gateway_core::account::OutboundProxy) {
         self.turn_proxies
             .lock()
