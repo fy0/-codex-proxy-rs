@@ -372,13 +372,12 @@ impl ProviderAdmin for OpenAiAdminProvider {
             (
                 AuthorizationMutationTarget::Create { .. },
                 CompletedCodexOAuthCredential::Create(credential),
-            ) => {
-                prepared_create(credential, Utc::now()).map(PreparedAuthorizationCredential::Create)
-            }
+            ) => prepared_create(*credential, Utc::now())
+                .map(PreparedAuthorizationCredential::Create),
             (
                 AuthorizationMutationTarget::Reauthorize { .. },
                 CompletedCodexOAuthCredential::Reauthorize(credential),
-            ) => prepared_rotation(credential, mutation.provider_kind().clone())
+            ) => prepared_rotation(*credential, mutation.provider_kind().clone())
                 .map(PreparedAuthorizationCredential::Reauthorize),
             _ => Err(provider_admin_error(ProviderAdminErrorKind::Internal)),
         };
