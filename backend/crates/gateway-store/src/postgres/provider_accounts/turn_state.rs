@@ -78,7 +78,22 @@ impl PgProviderAccountRepository {
                         .is_some_and(|parsed| parsed.issued_at == token.issued_at)
             }))
             .find(|token| token.issued_at == issued_at);
-        Ok(token.cloned())
+        if token.is_some() {
+            return Ok(token.cloned());
+        }
+        // 观测事件按签发时间留存令牌正文；上面的身份校验已对桶生效，
+        // 这里只需按签发时间取回并复核信封与有效期。
+        let value: Option<String> = sqlx::query_scalar("select e.detail->>'token' from account_turn_state_events e where e.account_id = $1 and e.model = $2 and e.event_kind = 'observation' and (e.detail->>'issuedAt')::bigint = $3 and e.detail ? 'token' order by e.id desc limit 1")
+            .bind(account.as_str()).bind(model).bind(issued_at)
+            .fetch_optional(&self.pool).await.map_err(unavailable)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let token = TurnStateToken { value, issued_at };
+        Ok((TurnStateToken::parse(&token.value)
+            .is_some_and(|parsed| parsed.issued_at == issued_at)
+            && token.is_fresh(now, state.config.ttl_seconds))
+        .then_some(token))
     }
 
     pub(super) async fn load_turn_state_buckets_for_model(
@@ -112,6 +127,9 @@ impl PgProviderAccountRepository {
     ) -> Result<Vec<TurnStateBucket>, CoreStoreError> {
         // 清理不依赖是否启用轮换，停用的桶也不能继续持有过期正文。
         sqlx::query("update account_turn_states set turn_state_override = case when current_issued_at + (config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else turn_state_override end, candidate = case when candidate_issued_at + (config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else candidate end where (turn_state_override is not null and current_issued_at + (config->>'ttlSeconds')::bigint <= extract(epoch from now())) or (candidate is not null and candidate_issued_at + (config->>'ttlSeconds')::bigint <= extract(epoch from now()))")
+            .execute(&self.pool).await.map_err(unavailable)?;
+        // 观测事件里的令牌正文与槽位正文同寿命，过期即摘除，历史只保留元数据。
+        sqlx::query("update account_turn_state_events e set detail = e.detail - 'token' from account_turn_states s where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation' and e.detail ? 'token' and (e.detail->>'issuedAt')::bigint + (s.config->>'ttlSeconds')::bigint <= extract(epoch from now())")
             .execute(&self.pool).await.map_err(unavailable)?;
         sqlx::query("select * from account_turn_states order by account_id, model")
             .fetch_all(&self.pool)
@@ -184,11 +202,12 @@ impl PgProviderAccountRepository {
                 .bind(&observation.account_id).bind(&observation.model).bind(started_at)
                 .execute(&mut *tx).await.map_err(unavailable)?;
         }
-        // 候选保存不再检查目标长度：长度未命中的合法新票也入库，
-        // 安装时仍由 install_candidate 按 targetLength 严格门控。
+        // 候选槽保持严格语义：只接收命中目标长度的票；非目标票的正文改由观测事件留存，
+        // 不再占用候选与签发水位。安装门槛仍由 install_candidate 按 targetLength 校验。
         if let Some(token) = candidate.filter(|token| {
             TurnStateToken::parse(&token.value)
                 .is_some_and(|parsed| parsed.issued_at == token.issued_at)
+                && token.value.len() == state.config.target_length
                 && token.is_fresh(Utc::now().timestamp(), state.config.ttl_seconds)
                 && token.is_newer_than(state.current_issued_at)
                 && token.is_newer_than(state.candidate.as_ref().map(|old| old.issued_at))
@@ -235,7 +254,7 @@ impl PgProviderAccountRepository {
         &self,
         account_id: Option<&str>,
     ) -> Result<Vec<TurnStateStatus>, CoreStoreError> {
-        let rows = sqlx::query("select s.*, a.name as account_name, a.email as account_email, a.enabled as account_enabled, (a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id) as identity_matches, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation'), '[]'::jsonb) as observations, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'installation'), '[]'::jsonb) as installations from account_turn_states s join provider_accounts a on a.id = s.account_id where ($1::text is null or s.account_id = $1) order by s.account_id, s.model")
+        let rows = sqlx::query("select s.*, a.name as account_name, a.email as account_email, a.enabled as account_enabled, (a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id) as identity_matches, coalesce((select jsonb_agg((e.detail - 'token') || jsonb_build_object('hasToken', e.detail ? 'token') order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation'), '[]'::jsonb) as observations, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'installation'), '[]'::jsonb) as installations from account_turn_states s join provider_accounts a on a.id = s.account_id where ($1::text is null or s.account_id = $1) order by s.account_id, s.model")
             .bind(account_id).fetch_all(&self.pool).await.map_err(unavailable)?;
         rows.into_iter()
             .map(|row| {
@@ -337,6 +356,69 @@ pub(super) async fn install_candidate(
             .map_err(unavailable)?
             .max(0) as u64,
         hunt_seconds: acquired_at.saturating_sub(started_at).max(0) as u64,
+    };
+    super::turn_state_notifications::enqueue(tx, account, model, &installation).await?;
+    append_event(
+        tx,
+        account.as_str(),
+        model,
+        "installation",
+        serde_json::to_value(installation).map_err(unavailable)?,
+    )
+    .await?;
+    Ok(true)
+}
+
+/// 观测事件按签发时间留存令牌正文，允许从任意历史行直接安装；
+/// 门槛与候选安装一致：目标长度、有效期内、签发时间严格更新、身份匹配且账号启用。
+pub(super) async fn install_observed_turn_state(
+    tx: &mut Transaction<'_, Postgres>,
+    account: &CoreProviderAccountId,
+    model: &str,
+    issued_at: i64,
+) -> Result<bool, CoreStoreError> {
+    // 先锁桶行串行化并发安装，再取事件正文；两段查询比锁 JOIN 行更直观。
+    let state = sqlx::query("select s.config, s.current_issued_at from account_turn_states s join provider_accounts a on a.id = s.account_id where s.account_id = $1 and s.model = $2 and a.enabled and a.provider_kind = 'openai' and a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id for update of s")
+        .bind(account.as_str()).bind(model)
+        .fetch_optional(&mut **tx).await.map_err(unavailable)?;
+    let Some(state) = state else {
+        return Ok(false);
+    };
+    let row = sqlx::query("select e.detail->>'token' as value, (e.detail->>'observedAt')::bigint as observed_at, e.detail->>'source' as source from account_turn_state_events e where e.account_id = $1 and e.model = $2 and e.event_kind = 'observation' and (e.detail->>'issuedAt')::bigint = $3 and e.detail ? 'token' order by e.id desc limit 1")
+        .bind(account.as_str()).bind(model).bind(issued_at)
+        .fetch_optional(&mut **tx).await.map_err(unavailable)?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let config: TurnStateConfig =
+        serde_json::from_value(state.try_get("config").map_err(unavailable)?)
+            .map_err(unavailable)?;
+    let current_issued_at: Option<i64> = state.try_get("current_issued_at").map_err(unavailable)?;
+    let token = TurnStateToken {
+        value: row.try_get("value").map_err(unavailable)?,
+        issued_at,
+    };
+    if !TurnStateToken::parse(&token.value).is_some_and(|parsed| parsed.issued_at == issued_at)
+        || token.value.len() != config.target_length
+        || !token.is_fresh(Utc::now().timestamp(), config.ttl_seconds)
+        || !token.is_newer_than(current_issued_at)
+    {
+        return Ok(false);
+    }
+    sqlx::query("update account_turn_states set turn_state_override = $3, current_issued_at = $4, current_length = length($3), manual_override = true, hunt_attempts = 0, hunt_started_at = null, next_probe_at = $4 + (config->>'refreshAfterSeconds')::bigint where account_id = $1 and model = $2")
+        .bind(account.as_str()).bind(model).bind(&token.value).bind(issued_at)
+        .execute(&mut **tx).await.map_err(unavailable)?;
+    let installation = TurnStateInstallation {
+        installed_at: Utc::now().timestamp(),
+        issued_at,
+        token_length: token.value.len(),
+        source: row
+            .try_get::<Option<String>, _>("source")
+            .map_err(unavailable)?
+            .unwrap_or_else(|| "passive".to_owned()),
+        acquired_at: row.try_get("observed_at").map_err(unavailable)?,
+        attempts: 0,
+        hunt_seconds: 0,
     };
     super::turn_state_notifications::enqueue(tx, account, model, &installation).await?;
     append_event(

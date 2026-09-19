@@ -119,6 +119,10 @@ impl TurnStateConfig {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn valid_feishu_webhook(value: &str) -> bool {
     let Ok(url) = url::Url::parse(value) else {
         return false;
@@ -219,6 +223,13 @@ pub struct TurnStateObservation {
     /// 上游在同一响应声明的实际模型；与令牌长度一样是观测事实，不代表生效模型。
     #[serde(default)]
     pub reported_model: Option<String>,
+    /// 信封合法的令牌正文随观测行持久化，状态查询剥离后只保留 hasToken 标记；
+    /// 历史记录因此可以按签发时间取回或安装任意一张仍在有效期内的票。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// 状态查询在剥离正文后回填的标记，不落进事件 detail。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_token: bool,
     pub egress: String,
     pub shape: Option<String>,
     pub effort: Option<String>,

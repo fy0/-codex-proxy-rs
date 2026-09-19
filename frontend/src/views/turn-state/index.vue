@@ -199,9 +199,9 @@ function injectionLabel(bucket: TurnStateStatus) {
     return bucket.active && !expired(bucket) ? `模型桶：${bucket.manualOverride ? '手动应用' : '自动安装'}` : '模型桶：不携带 state'
   return hasAccountOverride(bucket) ? '账号通用自定义 state' : '不强制覆盖客户端 / 会话 state'
 }
-function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
+function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined, hasToken = false) {
   return issuedAt != null && issuedAt + bucket.config.ttlSeconds > now.value
-    && ((bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt)
+    && ((bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt || hasToken)
 }
 async function removeState(bucket: TurnStateStatus) {
   if (removing.value || !bucket.hasInstalledState || bucket.issuedAt == null)
@@ -219,8 +219,8 @@ async function removeState(bucket: TurnStateStatus) {
     removing.value = false
   }
 }
-async function copyState(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
-  if (copying.value || !canCopy(bucket, issuedAt) || issuedAt == null)
+async function copyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, hasToken = false) {
+  if (copying.value || !canCopy(bucket, issuedAt, hasToken) || issuedAt == null)
     return
   copying.value = true
   try {
@@ -262,16 +262,21 @@ async function probeOnce(bucket: TurnStateStatus) {
 }
 
 function canApply(observation: TurnStateObservation) {
-  return !!selection.value && canApplyCandidate(selection.value, observation.issuedAt)
+  return !!selection.value && canApplyState(selection.value, observation.issuedAt, observation.tokenLength, observation.hasToken)
 }
-function canApplyCandidate(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
-  // 候选可能来自长度未命中的观测，能否安装以当前候选与目标长度为准，不看观测结果。
-  return bucket.accountEnabled && issuedAt != null && issuedAt === bucket.candidateIssuedAt
-    && bucket.candidateLength === bucket.config.targetLength
-    && issuedAt + bucket.config.ttlSeconds > now.value && (bucket.issuedAt === null || issuedAt > bucket.issuedAt)
+// 签发时间命中当前候选走候选安装；其余历史行要求事件里留存了正文且长度匹配目标，
+// 两条路径在后端共用同一套安装门槛。
+function canApplyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, hasToken?: boolean) {
+  if (!bucket.accountEnabled || issuedAt == null || issuedAt + bucket.config.ttlSeconds <= now.value)
+    return false
+  if (bucket.issuedAt !== null && issuedAt <= bucket.issuedAt)
+    return false
+  if (issuedAt === bucket.candidateIssuedAt)
+    return bucket.candidateLength === bucket.config.targetLength
+  return hasToken === true && tokenLength === bucket.config.targetLength
 }
-async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
-  if (!canApplyCandidate(bucket, issuedAt) || applying.value || issuedAt == null)
+async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, hasToken?: boolean) {
+  if (!canApplyState(bucket, issuedAt, tokenLength, hasToken) || applying.value || issuedAt == null)
     return
   applying.value = true
   try {
@@ -368,7 +373,7 @@ onMounted(async () => {
         <div class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}\n到期时间：${date(expiresAt(row))}`">
           <span :class="row.active && !expired(row) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ expired(row) ? `${row.tokenLength} · 已过期` : row.active ? `${row.tokenLength} · 使用中` : row.tokenLength ? `${row.tokenLength} · 未使用` : '尚未获取' }}</span>
           <span class="text-cp-xs text-cp-text-secondary">{{ expired(row) ? '改写已解除' : row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
-          <span v-if="row.candidateIssuedAt != null" class="text-cp-xs" :class="canApplyCandidate(row, row.candidateIssuedAt) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.candidateLength }} · {{ canApplyCandidate(row, row.candidateIssuedAt) ? '候选可应用' : row.candidateLength === row.config.targetLength ? '候选（不可应用）' : '候选（非目标长度）' }}</span>
+          <span v-if="row.candidateIssuedAt != null" class="text-cp-xs" :class="canApplyState(row, row.candidateIssuedAt, row.candidateLength) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.candidateLength }} · {{ canApplyState(row, row.candidateIssuedAt, row.candidateLength) ? '候选可应用' : '候选（不可应用）' }}</span>
           <span v-if="row.manualOverride && row.active && !expired(row)" class="text-cp-xs text-cp-success-text">手动应用</span>
           <div v-if="canCopy(row, row.issuedAt) || canCopy(row, row.candidateIssuedAt)" class="flex flex-wrap gap-1">
             <BaseIconButton v-if="canCopy(row, row.issuedAt)" label="复制已安装 state" :disabled="copying" @click="copyState(row, row.issuedAt)">
@@ -380,7 +385,7 @@ onMounted(async () => {
             <BaseIconButton v-if="canCopy(row, row.candidateIssuedAt)" label="复制候选 state" :disabled="copying" @click="copyState(row, row.candidateIssuedAt)">
               <Copy class="size-4" />
             </BaseIconButton>
-            <BaseIconButton v-if="canApplyCandidate(row, row.candidateIssuedAt)" label="应用候选 state" :disabled="applying" @click="applyState(row, row.candidateIssuedAt)">
+            <BaseIconButton v-if="canApplyState(row, row.candidateIssuedAt, row.candidateLength)" label="应用候选 state" :disabled="applying" @click="applyState(row, row.candidateIssuedAt, row.candidateLength)">
               <Check class="size-4" />
             </BaseIconButton>
           </div>
@@ -479,12 +484,12 @@ onMounted(async () => {
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
       <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">
         <template #actions="{ row }">
-          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(selection, row.issuedAt)">
+          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(selection, row.issuedAt, row.tokenLength, row.hasToken)">
             <Check class="size-4" />
           </BaseIconButton>
           <span v-else-if="row.issuedAt != null && row.issuedAt === selection.issuedAt" class="text-cp-xs text-cp-text-secondary">已安装</span>
           <span v-else class="text-cp-text-secondary">-</span>
-          <BaseIconButton v-if="canCopy(selection, row.issuedAt)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt)">
+          <BaseIconButton v-if="canCopy(selection, row.issuedAt, row.hasToken)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row.hasToken)">
             <Copy class="size-4" />
           </BaseIconButton>
         </template>

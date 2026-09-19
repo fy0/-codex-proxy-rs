@@ -40,6 +40,9 @@ pub(super) fn observation(
         token_length: Some(length),
         issued_at: Some(issued_at),
         reported_model: None,
+        // 与 service 一致：信封合法的票正文随观测行保存，与是否成为候选无关。
+        token: Some(token(length, issued_at).value),
+        has_token: false,
         egress: "direct".to_owned(),
         shape: Some("greeting".to_owned()),
         effort: Some("high".to_owned()),
@@ -703,7 +706,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
 }
 
 #[tokio::test]
-async fn non_target_candidate_is_retained_copyable_and_installs_after_target_change() {
+async fn non_target_token_is_kept_in_history_copyable_and_installable_after_retarget() {
     let Some(database) = TestDatabase::create("turn_state_nontarget").await else {
         return;
     };
@@ -738,21 +741,25 @@ async fn non_target_candidate_is_retained_copyable_and_installs_after_target_cha
         .observe_turn_state(miss, Some(expected.clone()))
         .await
         .unwrap();
-    // 长度未命中仍入库为候选，上报模型随观测历史保存。
+    // 非目标票不进候选也不占水位；正文随观测事件保存，状态接口只暴露 hasToken 标记。
     let status = admin
         .turn_state_status(Some(id.as_str()))
         .await
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(status.candidate_issued_at, Some(issued));
-    assert_eq!(status.candidate_length, Some(312));
+    assert!(status.candidate_issued_at.is_none());
+    assert!(status.observations[0].has_token);
     assert_eq!(
         status.observations[0].reported_model.as_deref(),
         Some("gpt-5.6-luna")
     );
-    // 长度门拒绝安装，候选保留；复制入口可以取回正文。
-    assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
+    assert!(
+        !serde_json::to_string(&status)
+            .unwrap()
+            .contains(&expected.value)
+    );
+    // 复制入口按签发时间从观测事件取回正文；目标长度不符时不能安装。
     assert_eq!(
         admin
             .turn_state_token(&id, "model-a", issued)
@@ -762,7 +769,14 @@ async fn non_target_candidate_is_retained_copyable_and_installs_after_target_cha
             .value,
         expected.value
     );
-    // 目标长度改为 312 后同一候选可安装。
+    assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued, &context)
+            .await
+            .is_err()
+    );
+    // 目标长度改为 312 后，同一张历史票可直接应用安装。
     admin
         .configure_turn_state(
             &id,
@@ -776,7 +790,10 @@ async fn non_target_candidate_is_retained_copyable_and_installs_after_target_cha
         )
         .await
         .unwrap();
-    assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
+    admin
+        .apply_turn_state(&id, "model-a", issued, &context)
+        .await
+        .unwrap();
     let status = admin
         .turn_state_status(Some(id.as_str()))
         .await
@@ -784,6 +801,8 @@ async fn non_target_candidate_is_retained_copyable_and_installs_after_target_cha
         .pop()
         .unwrap();
     assert!(status.active);
+    assert!(status.manual_override);
     assert_eq!(status.token_length, Some(312));
+    assert_eq!(status.installations[0].issued_at, issued);
     database.close().await;
 }

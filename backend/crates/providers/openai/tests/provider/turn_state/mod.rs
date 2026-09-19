@@ -138,7 +138,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         || WorkerCycleContext::new(registration.id.clone(), None, CancellationToken::new());
     let mut identities = HashSet::new();
     let id = ProviderAccountId::new("acct_turn_probe").unwrap();
-    // 非目标长度也占据签发水位，292 票必须在 312/552 之后签发才会成为候选。
+    // 非目标长度票只进观测记录不占候选；292 票正常成为候选并安装。
     let mut target = String::new();
     for (size, length) in [(233, 312), (414, 552), (217, 292)] {
         let value = token(size);
@@ -238,6 +238,8 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         vec![Some(312), Some(552), Some(292)]
     );
     assert_eq!(observations[0].outcome, "length_miss");
+    // 长度未命中的票正文仍随观测行保存，可供事后复制或改目标后安装。
+    assert!(observations[0].token.is_some());
     for phase in 0..4 {
         if phase == 2 {
             store.set_current_turn_state(
@@ -257,7 +259,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             );
         }
         if phase == 3 {
-            // 312 候选占据签发水位，新票必须严格更晚签发才可能是 candidate。
+            // 先把已安装票改旧到过期，再用新签发的 292 票重新成为候选并安装。
             tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
             let mut bytes = vec![0; 217];
             bytes[0] = 0x80;
@@ -273,7 +275,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
             .insert_header("x-codex-turn-state", match phase {
                 0 => token(233),
-                // 312 候选已占水位，阶段 3 需要更新的目标长度票才能得到 candidate。
+                // 阶段 3 用新签发的目标长度票顶替已过期的已安装票。
                 3 => token(217),
                 _ => target.clone(),
             })
@@ -340,11 +342,8 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
                 .await
                 .unwrap()
                 .unwrap();
-            // 上一轮 312 的长度未命中票仍保留为候选，但不会越过长度门安装。
-            assert_eq!(
-                bucket.candidate.as_ref().map(|token| token.value.len()),
-                Some(312)
-            );
+            // 312 的长度未命中票只留在观测记录，不占用候选槽。
+            assert!(bucket.candidate.is_none());
             assert_eq!(
                 bucket.current_issued_at,
                 gateway_core::account::TurnStateToken::parse(&target).map(|token| token.issued_at)
@@ -537,10 +536,11 @@ async fn probe_records_upstream_reported_model_from_headers_and_stream() {
 }
 
 #[tokio::test]
-async fn non_target_candidate_is_retained_and_installs_only_after_target_changes() {
+async fn non_target_token_is_recorded_in_history_without_occupying_candidate() {
     let server = MockServer::start().await;
+    let miss = token(233);
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(233)))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", miss.clone()))
         .mount(&server)
         .await;
     let store = Arc::new(MemoryAccountStore::default());
@@ -552,31 +552,26 @@ async fn non_target_candidate_is_retained_and_installs_only_after_target_changes
         .await
         .unwrap()
         .unwrap();
-    // 长度未命中仍保留合法候选，但长度门拒绝安装且候选不被清除。
-    assert_eq!(store.turn_observations()[0].outcome, "length_miss");
-    assert_eq!(
-        bucket.candidate.as_ref().map(|token| token.value.len()),
-        Some(312)
-    );
+    // 长度未命中：正文随观测行保存，候选槽保持为空、不占签发水位。
+    let observation = &store.turn_observations()[0];
+    assert_eq!(observation.outcome, "length_miss");
+    assert_eq!(observation.token.as_deref(), Some(miss.as_str()));
+    assert!(bucket.candidate.is_none());
     assert!(bucket.current.is_none());
     assert!(!store.install_turn_state(&id, "gpt-5.4").await.unwrap());
+    // 312 不占水位，随后到达的 292 票立即成为候选并安装。
+    server.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(217)))
+        .mount(&server)
+        .await;
+    cycle(Arc::clone(&store), server.uri()).await;
     let bucket = store
         .turn_state_bucket(&id, "gpt-5.4")
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        bucket.candidate.as_ref().map(|token| token.value.len()),
-        Some(312)
-    );
-    store.set_turn_state_target_length("acct_turn_probe", "gpt-5.4", 312);
-    assert!(store.install_turn_state(&id, "gpt-5.4").await.unwrap());
-    let bucket = store
-        .turn_state_bucket(&id, "gpt-5.4")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(bucket.current_length, Some(312));
+    assert_eq!(bucket.current_length, Some(292));
 }
 
 #[tokio::test]

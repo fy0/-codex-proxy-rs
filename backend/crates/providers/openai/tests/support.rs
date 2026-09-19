@@ -106,14 +106,6 @@ impl MemoryAccountStore {
         self.turn_observations.lock().unwrap().clone()
     }
 
-    pub(crate) fn set_turn_state_target_length(&self, account: &str, model: &str, target: usize) {
-        let mut states = self.turn_states.lock().unwrap();
-        let state = states
-            .get_mut(&(account.to_owned(), model.to_owned()))
-            .unwrap();
-        state.config.target_length = target;
-    }
-
     pub(crate) fn set_current_turn_state(
         &self,
         account: &str,
@@ -370,9 +362,10 @@ impl ProviderAccountStore for MemoryAccountStore {
             if observation.source == "probe" && observation.probe_id.is_some() {
                 state.hunt_attempts += 1;
             }
-            // 与生产存储一致：候选保存不查目标长度，安装时才按 target_length 门控。
+            // 与生产存储一致：候选槽只收命中目标长度的票，非目标票正文只留在观测记录里。
             if let Some(candidate) = candidate.filter(|token| {
-                token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
+                token.value.len() == state.config.target_length
+                    && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
                     && token.is_newer_than(state.current_issued_at)
                     && token.is_newer_than(state.candidate.as_ref().map(|old| old.issued_at))
             }) {

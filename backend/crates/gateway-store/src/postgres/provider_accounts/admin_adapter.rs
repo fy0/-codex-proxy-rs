@@ -480,7 +480,9 @@ impl AccountStore for PgAdminAccountStore {
                 "turn state transaction unavailable",
             )
         })?;
-        if !super::turn_state::install_candidate(
+        // 先按当前候选安装；签发时间不匹配候选时回退到观测事件里留存的历史票，
+        // 两者共用同一套目标长度、有效期与签发水位门槛。
+        let installed = super::turn_state::install_candidate(
             &mut transaction,
             account_id,
             model,
@@ -493,11 +495,25 @@ impl AccountStore for PgAdminAccountStore {
                 ENTITY,
                 "turn state installation unavailable",
             )
-        })? {
+        })? || super::turn_state::install_observed_turn_state(
+            &mut transaction,
+            account_id,
+            model,
+            issued_at,
+        )
+        .await
+        .map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "turn state installation unavailable",
+            )
+        })?;
+        if !installed {
             return Err(AdminStoreError::new(
                 AdminStoreErrorKind::Conflict,
                 ENTITY,
-                "turn state candidate expired or changed",
+                "turn state expired or changed",
             ));
         }
         let result: StoreResult<Revision> = async {
@@ -623,7 +639,7 @@ impl AccountStore for PgAdminAccountStore {
         let result: StoreResult<Revision> = async {
             let config = serde_json::to_value(config).map_err(|_| postgres_unavailable("encode turn state configuration"))?;
             // 自动探测与业务策略独立，保存配置不能撤销仍有效的已安装票。
-            sqlx::query("insert into account_turn_states(account_id, model, config, upstream_account_id, upstream_user_id) select id, $2, $3, upstream_account_id, upstream_user_id from provider_accounts where id = $1 on conflict (account_id, model) do update set config = excluded.config, next_probe_at = null, manual_override = case when length(account_turn_states.turn_state_override) = (excluded.config->>'targetLength')::integer and account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint > extract(epoch from now()) then account_turn_states.manual_override else false end, turn_state_override = case when length(account_turn_states.turn_state_override) <> (excluded.config->>'targetLength')::integer or account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.turn_state_override end, candidate = case when account_turn_states.candidate_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.candidate end")
+            sqlx::query("insert into account_turn_states(account_id, model, config, upstream_account_id, upstream_user_id) select id, $2, $3, upstream_account_id, upstream_user_id from provider_accounts where id = $1 on conflict (account_id, model) do update set config = excluded.config, next_probe_at = null, manual_override = case when length(account_turn_states.turn_state_override) = (excluded.config->>'targetLength')::integer and account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint > extract(epoch from now()) then account_turn_states.manual_override else false end, turn_state_override = case when length(account_turn_states.turn_state_override) <> (excluded.config->>'targetLength')::integer or account_turn_states.current_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.turn_state_override end, candidate = case when length(account_turn_states.candidate) <> (excluded.config->>'targetLength')::integer or account_turn_states.candidate_issued_at + (excluded.config->>'ttlSeconds')::bigint <= extract(epoch from now()) then null else account_turn_states.candidate end")
                 .bind(account_id.as_str()).bind(model).bind(config).execute(&mut *transaction).await
                 .map_err(|_| postgres_unavailable("configure turn state"))?;
             let revision = bump_config_revision_in_transaction(&mut transaction).await?;

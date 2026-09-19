@@ -62,6 +62,7 @@ export interface TurnStateObservation {
   tokenLength: number | null
   issuedAt: number | null
   reportedModel?: string | null
+  hasToken?: boolean
   egress: string
   shape: string | null
   effort: string | null

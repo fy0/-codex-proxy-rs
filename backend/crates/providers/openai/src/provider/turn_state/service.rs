@@ -124,6 +124,8 @@ impl TurnStateService {
                     token_length: None,
                     issued_at: None,
                     reported_model: None,
+                    token: None,
+                    has_token: false,
                     egress,
                     shape: None,
                     effort,
@@ -196,15 +198,12 @@ impl TurnStateService {
             "candidate"
         }
         .to_owned();
-        // 候选落库只放宽长度：信封合法、在有效期内且签发时间更新即可保存，
-        // 安装门槛仍由 store 按 target_length 校验；错误响应与重复票仍不取。
-        let candidate = matches!(observation.outcome.as_str(), "candidate" | "length_miss")
+        // 信封合法的令牌正文随观测行持久化，与是否进入候选无关；
+        // 候选槽只接收命中目标长度的票，长度未命中不再占用候选与签发水位。
+        observation.token = token.as_ref().map(|token| token.value.clone());
+        let candidate = (observation.outcome == "candidate")
             .then_some(token)
-            .flatten()
-            .filter(|token| {
-                token.is_fresh(observation.observed_at, config.ttl_seconds)
-                    && token.is_newer_than(latest_issued_at)
-            });
+            .flatten();
         self.persist(observation, candidate).await;
     }
 
@@ -262,6 +261,8 @@ impl TurnStateService {
             token_length: None,
             issued_at: None,
             reported_model: None,
+            token: None,
+            has_token: false,
             egress: "none".to_owned(),
             shape: None,
             effort: None,
