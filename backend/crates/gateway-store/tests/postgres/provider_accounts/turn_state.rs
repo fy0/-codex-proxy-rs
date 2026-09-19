@@ -39,6 +39,7 @@ pub(super) fn observation(
         http_status: Some(200),
         token_length: Some(length),
         issued_at: Some(issued_at),
+        reported_model: None,
         egress: "direct".to_owned(),
         shape: Some("greeting".to_owned()),
         effort: Some("high".to_owned()),
@@ -698,5 +699,91 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         .unwrap();
     assert!(!state.manual_override);
     assert!(state.current.is_none());
+    database.close().await;
+}
+
+#[tokio::test]
+async fn non_target_candidate_is_retained_copyable_and_installs_after_target_change() {
+    let Some(database) = TestDatabase::create("turn_state_nontarget").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_nontarget").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "nontarget-test".to_owned(),
+    };
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let issued = Utc::now().timestamp() - 5;
+    let expected = token(312, issued);
+    let mut miss = observation(id.as_str(), "model-a", 312, issued);
+    miss.reported_model = Some("gpt-5.6-luna".to_owned());
+    repository
+        .observe_turn_state(miss, Some(expected.clone()))
+        .await
+        .unwrap();
+    // 长度未命中仍入库为候选，上报模型随观测历史保存。
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.candidate_issued_at, Some(issued));
+    assert_eq!(status.candidate_length, Some(312));
+    assert_eq!(
+        status.observations[0].reported_model.as_deref(),
+        Some("gpt-5.6-luna")
+    );
+    // 长度门拒绝安装，候选保留；复制入口可以取回正文。
+    assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
+    assert_eq!(
+        admin
+            .turn_state_token(&id, "model-a", issued)
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        expected.value
+    );
+    // 目标长度改为 312 后同一候选可安装。
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                target_length: 312,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(status.active);
+    assert_eq!(status.token_length, Some(312));
     database.close().await;
 }

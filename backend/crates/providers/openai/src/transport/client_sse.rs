@@ -133,6 +133,10 @@ impl CodexBackendClient {
                 .ok()
                 .and_then(|response| response.headers().get("x-codex-turn-state"))
                 .map(|value| value.as_bytes().to_vec()),
+            reported_model: response
+                .as_ref()
+                .ok()
+                .and_then(|response| response_meta::reported_model(response.headers())),
             elapsed_ms: u64::try_from(headers_elapsed.as_millis()).unwrap_or(u64::MAX),
             transport_error: response.is_err(),
             source: "http_headers",
@@ -493,6 +497,7 @@ impl CodexBackendClient {
                         .turn_state
                         .as_ref()
                         .map(|value| value.as_bytes().to_vec()),
+                    reported_model: exchange.response_metadata.effective_model.clone(),
                     elapsed_ms: metrics.upstream_headers_ms.unwrap_or_default().max(0) as u64,
                     transport_error: false,
                     source: "websocket_start",

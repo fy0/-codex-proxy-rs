@@ -93,6 +93,7 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'probeTrigger', label: '触发方式', kind: 'text', size: 'sm', format: value => value === 'manual' ? '手动' : value === 'scheduled' ? '自动' : '-' },
   { key: 'httpStatus', label: 'HTTP', kind: 'numeric', size: 'sm' },
   { key: 'tokenLength', label: '实际长度', kind: 'numeric', size: 'sm' },
+  { key: 'reportedModel', label: '上游模型', kind: 'text', size: 'lg', format: value => value ?? '-' },
   { key: 'egress', label: '出口', kind: 'text' },
   { key: 'shape', label: 'Shape', kind: 'text', size: 'sm' },
   { key: 'effort', label: 'Effort', kind: 'text', size: 'sm' },
@@ -261,10 +262,12 @@ async function probeOnce(bucket: TurnStateStatus) {
 }
 
 function canApply(observation: TurnStateObservation) {
-  return !!selection.value && observation.outcome === 'candidate' && canApplyCandidate(selection.value, observation.issuedAt)
+  return !!selection.value && canApplyCandidate(selection.value, observation.issuedAt)
 }
 function canApplyCandidate(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
+  // 候选可能来自长度未命中的观测，能否安装以当前候选与目标长度为准，不看观测结果。
   return bucket.accountEnabled && issuedAt != null && issuedAt === bucket.candidateIssuedAt
+    && bucket.candidateLength === bucket.config.targetLength
     && issuedAt + bucket.config.ttlSeconds > now.value && (bucket.issuedAt === null || issuedAt > bucket.issuedAt)
 }
 async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined) {
@@ -365,7 +368,7 @@ onMounted(async () => {
         <div class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}\n到期时间：${date(expiresAt(row))}`">
           <span :class="row.active && !expired(row) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ expired(row) ? `${row.tokenLength} · 已过期` : row.active ? `${row.tokenLength} · 使用中` : row.tokenLength ? `${row.tokenLength} · 未使用` : '尚未获取' }}</span>
           <span class="text-cp-xs text-cp-text-secondary">{{ expired(row) ? '改写已解除' : row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
-          <span v-if="row.candidateIssuedAt != null" class="text-cp-xs text-cp-success-text">{{ row.candidateLength }} · 候选可应用</span>
+          <span v-if="row.candidateIssuedAt != null" class="text-cp-xs" :class="canApplyCandidate(row, row.candidateIssuedAt) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.candidateLength }} · {{ canApplyCandidate(row, row.candidateIssuedAt) ? '候选可应用' : row.candidateLength === row.config.targetLength ? '候选（不可应用）' : '候选（非目标长度）' }}</span>
           <span v-if="row.manualOverride && row.active && !expired(row)" class="text-cp-xs text-cp-success-text">手动应用</span>
           <div v-if="canCopy(row, row.issuedAt) || canCopy(row, row.candidateIssuedAt)" class="flex flex-wrap gap-1">
             <BaseIconButton v-if="canCopy(row, row.issuedAt)" label="复制已安装 state" :disabled="copying" @click="copyState(row, row.issuedAt)">

@@ -47,6 +47,17 @@ pub(super) fn turn_state(headers: &HeaderMap) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// 上游在响应头里声明的实际模型；只读头块，不看流内事件。
+pub(crate) fn reported_model(headers: &HeaderMap) -> Option<String> {
+    ["openai-model", "x-openai-model"]
+        .iter()
+        .filter_map(|name| headers.get(*name))
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| {
+            gateway_protocol::openai::events::observed_model_name(value).map(str::to_owned)
+        })
+}
+
 pub(super) fn set_cookie_headers(headers: &HeaderMap) -> Vec<String> {
     headers
         .get_all(SET_COOKIE)
@@ -130,7 +141,7 @@ fn observe_typed_response_header(metadata: &mut CodexResponseMetadata, name: &st
 }
 
 /// 与官方 Codex 一致，优先读取 response.headers，再读取 WS metadata 的顶层 headers。
-pub(super) fn reported_model_from_event(value: &serde_json::Value) -> Option<&str> {
+pub(crate) fn reported_model_from_event(value: &serde_json::Value) -> Option<&str> {
     [value.pointer("/response/headers"), value.get("headers")]
         .into_iter()
         .flatten()

@@ -5,6 +5,7 @@ use std::{io::Read, path::Path};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use gateway_core::account::TurnStateConfig;
+use gateway_protocol::openai::events::ResponseModelObservation;
 use gateway_protocol::openai::sse::SseEventDecoder;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
@@ -85,24 +86,44 @@ pub(super) fn load_template(path: Option<&Path>) -> Result<String, ()> {
         .ok_or(())
 }
 
-pub(super) async fn wait_for_output(response: reqwest::Response) -> &'static str {
+/// 有界读取 SSE 的停止结果：reason 维持原语义，reported_model 记录上游在
+/// 已读事件里声明的实际模型（头块声明优先于 response.model）。
+pub(super) struct ProbeOutput {
+    pub reason: &'static str,
+    pub reported_model: Option<String>,
+}
+
+pub(super) async fn wait_for_output(response: reqwest::Response) -> ProbeOutput {
     let mut stream = response.bytes_stream();
     let mut decoder = SseEventDecoder::default();
     let mut received = 0_usize;
-    while let Some(chunk) = stream.next().await {
+    // 事件头里的声明优先，response.model 兜底，与业务观测的合并规则一致。
+    let mut header_model: Option<String> = None;
+    let mut body_model = ResponseModelObservation::default();
+    let reason = 'read: loop {
+        let Some(chunk) = stream.next().await else {
+            break 'read "body_ended";
+        };
         let Ok(chunk) = chunk else {
-            return "body_transport_error";
+            break 'read "body_transport_error";
         };
         received = received.saturating_add(chunk.len());
         if received > 1024 * 1024 {
-            return "body_limit";
+            break 'read "body_limit";
         }
         for frame in decoder.push_frames(&chunk) {
             for event in frame.events() {
                 let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
                     continue;
                 };
-                match value.get("type").and_then(Value::as_str) {
+                let event_type = value.get("type").and_then(Value::as_str);
+                if header_model.is_none() {
+                    header_model =
+                        crate::transport::response_meta::reported_model_from_event(&value)
+                            .map(str::to_owned);
+                }
+                body_model.observe(event_type, &value);
+                match event_type {
                     Some(
                         "response.output_text.delta"
                         | "response.refusal.delta"
@@ -110,16 +131,19 @@ pub(super) async fn wait_for_output(response: reqwest::Response) -> &'static str
                         | "response.reasoning_summary_text.delta"
                         | "response.audio.delta"
                         | "response.output_audio.delta",
-                    ) => return "first_output",
+                    ) => break 'read "first_output",
                     Some(
                         "response.completed" | "response.failed" | "response.incomplete" | "error",
-                    ) => return "terminal",
+                    ) => break 'read "terminal",
                     _ => {}
                 }
             }
         }
+    };
+    ProbeOutput {
+        reason,
+        reported_model: header_model.or_else(|| body_model.model().map(str::to_owned)),
     }
-    "body_ended"
 }
 
 pub(super) struct ProbeRequest {

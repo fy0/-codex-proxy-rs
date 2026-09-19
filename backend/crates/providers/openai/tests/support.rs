@@ -106,6 +106,14 @@ impl MemoryAccountStore {
         self.turn_observations.lock().unwrap().clone()
     }
 
+    pub(crate) fn set_turn_state_target_length(&self, account: &str, model: &str, target: usize) {
+        let mut states = self.turn_states.lock().unwrap();
+        let state = states
+            .get_mut(&(account.to_owned(), model.to_owned()))
+            .unwrap();
+        state.config.target_length = target;
+    }
+
     pub(crate) fn set_current_turn_state(
         &self,
         account: &str,
@@ -362,10 +370,11 @@ impl ProviderAccountStore for MemoryAccountStore {
             if observation.source == "probe" && observation.probe_id.is_some() {
                 state.hunt_attempts += 1;
             }
+            // 与生产存储一致：候选保存不查目标长度，安装时才按 target_length 门控。
             if let Some(candidate) = candidate.filter(|token| {
-                token.value.len() == state.config.target_length
-                    && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
+                token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
                     && token.is_newer_than(state.current_issued_at)
+                    && token.is_newer_than(state.candidate.as_ref().map(|old| old.issued_at))
             }) {
                 state.candidate = Some(candidate);
             }
@@ -394,10 +403,13 @@ impl ProviderAccountStore for MemoryAccountStore {
         if !state.config.enabled {
             return Ok(false);
         }
-        let Some(candidate) = state.candidate.take().filter(|token| {
-            token.is_newer_than(state.current_issued_at)
+        // 长度等条件不满足时保留候选，与生产 UPDATE 未命中不动候选的行为一致。
+        let installable = state.candidate.as_ref().is_some_and(|token| {
+            token.value.len() == state.config.target_length
+                && token.is_newer_than(state.current_issued_at)
                 && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
-        }) else {
+        });
+        let Some(candidate) = installable.then(|| state.candidate.take()).flatten() else {
             return Ok(false);
         };
         state.current_issued_at = Some(candidate.issued_at);

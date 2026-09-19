@@ -216,6 +216,9 @@ pub struct TurnStateObservation {
     pub http_status: Option<u16>,
     pub token_length: Option<usize>,
     pub issued_at: Option<i64>,
+    /// 上游在同一响应声明的实际模型；与令牌长度一样是观测事实，不代表生效模型。
+    #[serde(default)]
+    pub reported_model: Option<String>,
     pub egress: String,
     pub shape: Option<String>,
     pub effort: Option<String>,

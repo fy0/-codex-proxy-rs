@@ -123,6 +123,7 @@ impl TurnStateService {
                     http_status: None,
                     token_length: None,
                     issued_at: None,
+                    reported_model: None,
                     egress,
                     shape: None,
                     effort,
@@ -156,6 +157,7 @@ impl TurnStateService {
         observation.http_status = response.status;
         observation.elapsed_ms = response.elapsed_ms;
         observation.token_length = response.value.as_ref().map(Vec::len);
+        observation.reported_model = response.reported_model.clone();
         let token = response
             .value
             .as_deref()
@@ -194,9 +196,15 @@ impl TurnStateService {
             "candidate"
         }
         .to_owned();
-        let candidate = (observation.outcome == "candidate")
+        // 候选落库只放宽长度：信封合法、在有效期内且签发时间更新即可保存，
+        // 安装门槛仍由 store 按 target_length 校验；错误响应与重复票仍不取。
+        let candidate = matches!(observation.outcome.as_str(), "candidate" | "length_miss")
             .then_some(token)
-            .flatten();
+            .flatten()
+            .filter(|token| {
+                token.is_fresh(observation.observed_at, config.ttl_seconds)
+                    && token.is_newer_than(latest_issued_at)
+            });
         self.persist(observation, candidate).await;
     }
 
@@ -253,6 +261,7 @@ impl TurnStateService {
             http_status: None,
             token_length: None,
             issued_at: None,
+            reported_model: None,
             egress: "none".to_owned(),
             shape: None,
             effort: None,
@@ -383,23 +392,40 @@ impl TurnStateService {
                 .ok()
                 .and_then(|response| response.headers().get("x-codex-turn-state"))
                 .map(|value| value.as_bytes().to_vec()),
+            reported_model: result.as_ref().ok().and_then(|response| {
+                crate::transport::response_meta::reported_model(response.headers())
+            }),
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             transport_error: result.is_err(),
             source: "http_headers",
         };
         // 只在明确选择回应策略时读取有界 SSE，任何策略都不保留响应正文。
+        // 头块未声明模型时，流内事件的模型声明补进同一份观测。
+        let mut body_model: Option<String> = None;
         observation.stop_reason = Some(
             match result {
                 Ok(upstream) if read_output && upstream.status().is_success() => {
-                    tokio::time::timeout(Duration::from_secs(30), probe::wait_for_output(upstream))
-                        .await
-                        .unwrap_or("body_timeout")
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        probe::wait_for_output(upstream),
+                    )
+                    .await
+                    {
+                        Ok(output) => {
+                            body_model = output.reported_model;
+                            output.reason
+                        }
+                        Err(_) => "body_timeout",
+                    }
                 }
                 Ok(_) => "headers",
                 Err(_) => "transport_error",
             }
             .to_owned(),
         );
+        if response.reported_model.is_none() {
+            response.reported_model = body_model;
+        }
         response.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         drop(client);
         let latest_issued_at = bucket

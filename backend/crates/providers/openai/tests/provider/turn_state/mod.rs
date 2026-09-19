@@ -138,13 +138,13 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         || WorkerCycleContext::new(registration.id.clone(), None, CancellationToken::new());
     let mut identities = HashSet::new();
     let id = ProviderAccountId::new("acct_turn_probe").unwrap();
-    let target = token(217);
+    // 非目标长度也占据签发水位，292 票必须在 312/552 之后签发才会成为候选。
+    let mut target = String::new();
     for (size, length) in [(233, 312), (414, 552), (217, 292)] {
-        let value = if length == 292 {
-            target.clone()
-        } else {
-            token(size)
-        };
+        let value = token(size);
+        if length == 292 {
+            target = value.clone();
+        }
         Mock::given(method("POST"))
             .and(path("/codex/responses"))
             .respond_with(
@@ -257,6 +257,8 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             );
         }
         if phase == 3 {
+            // 312 候选占据签发水位，新票必须严格更晚签发才可能是 candidate。
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
             let mut bytes = vec![0; 217];
             bytes[0] = 0x80;
             bytes[1..9].copy_from_slice(&((Utc::now().timestamp() - 3600) as u64).to_be_bytes());
@@ -269,7 +271,12 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         }
         Mock::given(method("POST")).and(path("/codex/responses"))
         .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
-            .insert_header("x-codex-turn-state", if phase == 0 { token(233) } else { target.clone() })
+            .insert_header("x-codex-turn-state", match phase {
+                0 => token(233),
+                // 312 候选已占水位，阶段 3 需要更新的目标长度票才能得到 candidate。
+                3 => token(217),
+                _ => target.clone(),
+            })
             .set_body_string("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_turn_test\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n"))
         .mount(&server).await;
         let payload = ProtocolPayload::json_object(
@@ -333,7 +340,11 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(bucket.candidate.is_none());
+            // 上一轮 312 的长度未命中票仍保留为候选，但不会越过长度门安装。
+            assert_eq!(
+                bucket.candidate.as_ref().map(|token| token.value.len()),
+                Some(312)
+            );
             assert_eq!(
                 bucket.current_issued_at,
                 gateway_core::account::TurnStateToken::parse(&target).map(|token| token.issued_at)
@@ -461,7 +472,111 @@ async fn probe_stop_strategies_abort_at_the_selected_boundary() {
             ),
         }
         assert_eq!(observation.outcome, "candidate");
+        assert_eq!(observation.reported_model, None);
     }
+}
+
+#[tokio::test]
+async fn probe_records_upstream_reported_model_from_headers_and_stream() {
+    use gateway_core::account::TurnStateStopStrategy;
+    // headers 策略只读到响应头，模型声明必须来自头块。
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-codex-turn-state", token(217))
+                .insert_header("openai-model", "gpt-5.6-luna")
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"type\":\"response.created\",\"response\":{\"model\":\"unread\"}}\n\n",
+                ),
+        )
+        .mount(&server)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    store.seed_turn_state(
+        "acct_turn_probe",
+        "gpt-5.4",
+        TurnStateConfig {
+            enabled: true,
+            stop_strategy: TurnStateStopStrategy::Headers,
+            ..TurnStateConfig::default()
+        },
+    );
+    cycle(Arc::clone(&store), server.uri()).await;
+    let observation = store.turn_observations().remove(0);
+    assert_eq!(observation.reported_model.as_deref(), Some("gpt-5.6-luna"));
+
+    // first_output 策略在头块无声明时取流内事件声明，事件头优先于 response.model。
+    server.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-codex-turn-state", token(217))
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"type\":\"response.created\",\"response\":{\"model\":\"body-model\",\"headers\":{\"openai-model\":\"event-model\"}}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n"),
+        )
+        .mount(&server)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    store.seed_turn_state(
+        "acct_turn_probe",
+        "gpt-5.4",
+        TurnStateConfig {
+            enabled: true,
+            stop_strategy: TurnStateStopStrategy::FirstOutput,
+            ..TurnStateConfig::default()
+        },
+    );
+    cycle(Arc::clone(&store), server.uri()).await;
+    let observation = store.turn_observations().remove(0);
+    assert_eq!(observation.stop_reason.as_deref(), Some("first_output"));
+    assert_eq!(observation.reported_model.as_deref(), Some("event-model"));
+}
+
+#[tokio::test]
+async fn non_target_candidate_is_retained_and_installs_only_after_target_changes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(233)))
+        .mount(&server)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    let id = ProviderAccountId::new("acct_turn_probe").unwrap();
+    cycle(Arc::clone(&store), server.uri()).await;
+    let bucket = store
+        .turn_state_bucket(&id, "gpt-5.4")
+        .await
+        .unwrap()
+        .unwrap();
+    // 长度未命中仍保留合法候选，但长度门拒绝安装且候选不被清除。
+    assert_eq!(store.turn_observations()[0].outcome, "length_miss");
+    assert_eq!(
+        bucket.candidate.as_ref().map(|token| token.value.len()),
+        Some(312)
+    );
+    assert!(bucket.current.is_none());
+    assert!(!store.install_turn_state(&id, "gpt-5.4").await.unwrap());
+    let bucket = store
+        .turn_state_bucket(&id, "gpt-5.4")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bucket.candidate.as_ref().map(|token| token.value.len()),
+        Some(312)
+    );
+    store.set_turn_state_target_length("acct_turn_probe", "gpt-5.4", 312);
+    assert!(store.install_turn_state(&id, "gpt-5.4").await.unwrap());
+    let bucket = store
+        .turn_state_bucket(&id, "gpt-5.4")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bucket.current_length, Some(312));
 }
 
 #[tokio::test]

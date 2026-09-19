@@ -6,6 +6,8 @@ use std::sync::Arc;
 pub(crate) struct TurnStateResponse {
     pub status: Option<u16>,
     pub value: Option<Vec<u8>>,
+    /// 上游在同一观测位置声明的实际模型；缺失不代表请求模型生效。
+    pub reported_model: Option<String>,
     pub elapsed_ms: u64,
     pub transport_error: bool,
     pub source: &'static str,
@@ -34,6 +36,7 @@ impl TurnStateResponse {
                     .headers()
                     .get("x-codex-turn-state")
                     .map(|value| value.as_bytes().to_vec()),
+                reported_model: super::response_meta::reported_model(response.headers()),
                 elapsed_ms,
                 transport_error: false,
                 source: "websocket_start",
@@ -44,6 +47,7 @@ impl TurnStateResponse {
             | Error::SendTimeout { .. } => Some(Self {
                 status: None,
                 value: None,
+                reported_model: None,
                 elapsed_ms,
                 transport_error: true,
                 source: "websocket_start",

@@ -1214,6 +1214,7 @@ async fn merge_response_metadata_updates(
             .observe_turn_state(crate::transport::TurnStateResponse {
                 status: Some(101),
                 value: Some(turn_state.as_bytes().to_vec()),
+                reported_model: reported_model.clone(),
                 elapsed_ms: 0,
                 transport_error: false,
                 source: "websocket_metadata",

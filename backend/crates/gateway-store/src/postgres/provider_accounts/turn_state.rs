@@ -73,8 +73,7 @@ impl PgProviderAccountRepository {
             .installed_token(now)
             .into_iter()
             .chain(state.candidate.as_ref().filter(|token| {
-                token.value.len() == state.config.target_length
-                    && token.is_fresh(now, state.config.ttl_seconds)
+                token.is_fresh(now, state.config.ttl_seconds)
                     && TurnStateToken::parse(&token.value)
                         .is_some_and(|parsed| parsed.issued_at == token.issued_at)
             }))
@@ -185,10 +184,11 @@ impl PgProviderAccountRepository {
                 .bind(&observation.account_id).bind(&observation.model).bind(started_at)
                 .execute(&mut *tx).await.map_err(unavailable)?;
         }
+        // 候选保存不再检查目标长度：长度未命中的合法新票也入库，
+        // 安装时仍由 install_candidate 按 targetLength 严格门控。
         if let Some(token) = candidate.filter(|token| {
-            token.value.len() == state.config.target_length
-                && TurnStateToken::parse(&token.value)
-                    .is_some_and(|parsed| parsed.issued_at == token.issued_at)
+            TurnStateToken::parse(&token.value)
+                .is_some_and(|parsed| parsed.issued_at == token.issued_at)
                 && token.is_fresh(Utc::now().timestamp(), state.config.ttl_seconds)
                 && token.is_newer_than(state.current_issued_at)
                 && token.is_newer_than(state.candidate.as_ref().map(|old| old.issued_at))
