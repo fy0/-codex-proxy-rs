@@ -129,12 +129,21 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
             .unwrap()
             .active
     );
-    assert!(
+    // 移除只卸载已安装槽位；观测事件留存的正文仍可按签发时间复制，
+    // 但保留的签发水位阻止同一张票被重新安装。
+    assert_eq!(
         admin
             .turn_state_token(&id, "model-a", issued)
             .await
             .unwrap()
-            .is_none()
+            .map(|state| state.value.len()),
+        Some(292)
+    );
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued, &context)
+            .await
+            .is_err()
     );
     let bucket = repository
         .turn_state_bucket(&id, "model-a")
