@@ -20,6 +20,10 @@ pub(super) fn observation(
     issued_at: i64,
 ) -> TurnStateObservation {
     TurnStateObservation {
+        observation_id: None,
+        is_installed: false,
+        hunt_attempts: None,
+        hunt_seconds: None,
         account_id: account.to_owned(),
         upstream_account_id: None,
         upstream_user_id: Some(account.to_owned()),
@@ -40,7 +44,7 @@ pub(super) fn observation(
         token_length: Some(length),
         issued_at: Some(issued_at),
         reported_model: None,
-        // 与 service 一致：信封合法的票正文随观测行保存，与是否成为候选无关。
+        // 使用合成正文验证存储边界，失效票应在持久化时被剥离。
         token: Some(token(length, issued_at).value),
         has_token: false,
         egress: "direct".to_owned(),
@@ -133,7 +137,7 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
     // 但保留的签发水位阻止同一张票被重新安装。
     assert_eq!(
         admin
-            .turn_state_token(&id, "model-a", issued)
+            .turn_state_token(&id, "model-a", issued, None)
             .await
             .unwrap()
             .map(|state| state.value.len()),
@@ -141,7 +145,7 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
     );
     assert!(
         admin
-            .apply_turn_state(&id, "model-a", issued, &context)
+            .apply_turn_state(&id, "model-a", issued, None, &context)
             .await
             .is_err()
     );
@@ -222,7 +226,7 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
     assert_eq!(status.candidate_issued_at, Some(issued));
     assert_eq!(
         admin
-            .turn_state_token(&id, "model-a", issued)
+            .turn_state_token(&id, "model-a", issued, None)
             .await
             .unwrap()
             .unwrap()
@@ -231,14 +235,14 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
     );
     assert!(
         admin
-            .turn_state_token(&id, "model-b", issued)
+            .turn_state_token(&id, "model-b", issued, None)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         admin
-            .turn_state_token(&id, "model-a", issued - 1)
+            .turn_state_token(&id, "model-a", issued - 1, None)
             .await
             .unwrap()
             .is_none()
@@ -248,7 +252,8 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
             .turn_state_token(
                 &ProviderAccountId::new("acct_other").unwrap(),
                 "model-a",
-                issued
+                issued,
+                None
             )
             .await
             .unwrap()
@@ -271,12 +276,12 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
         request_id: "copy-test".to_owned(),
     };
     admin
-        .apply_turn_state(&id, "model-a", issued, &context)
+        .apply_turn_state(&id, "model-a", issued, None, &context)
         .await
         .unwrap();
     assert!(
         admin
-            .turn_state_token(&id, "model-a", issued)
+            .turn_state_token(&id, "model-a", issued, None)
             .await
             .unwrap()
             .is_some()
@@ -302,7 +307,7 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
     .unwrap();
     assert!(
         admin
-            .turn_state_token(&id, "model-a", issued)
+            .turn_state_token(&id, "model-a", issued, None)
             .await
             .unwrap()
             .is_none()
@@ -312,7 +317,7 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
         .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
     assert!(
         admin
-            .turn_state_token(&id, "model-a", expired)
+            .turn_state_token(&id, "model-a", expired, None)
             .await
             .unwrap()
             .is_none()
@@ -583,19 +588,19 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
     );
     assert!(
         admin
-            .apply_turn_state(&id, "model-b", issued, &context)
+            .apply_turn_state(&id, "model-b", issued, None, &context)
             .await
             .is_err()
     );
     assert!(
         admin
-            .apply_turn_state(&id, "model-a", issued - 1, &context)
+            .apply_turn_state(&id, "model-a", issued - 1, None, &context)
             .await
             .is_err()
     );
     let (first, second) = tokio::join!(
-        admin.apply_turn_state(&id, "model-a", issued, &context),
-        admin.apply_turn_state(&id, "model-a", issued, &context),
+        admin.apply_turn_state(&id, "model-a", issued, None, &context),
+        admin.apply_turn_state(&id, "model-a", issued, None, &context),
     );
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
     let status = admin
@@ -674,7 +679,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         .unwrap();
     assert!(
         admin
-            .apply_turn_state(&id, "model-a", issued, &context)
+            .apply_turn_state(&id, "model-a", issued, None, &context)
             .await
             .is_err()
     );
@@ -696,7 +701,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
     assert!(
         admin
-            .apply_turn_state(&id, "model-a", expired, &context)
+            .apply_turn_state(&id, "model-a", expired, None, &context)
             .await
             .is_err()
     );
@@ -771,7 +776,7 @@ async fn non_target_token_is_kept_in_history_copyable_and_installable_after_reta
     // 复制入口按签发时间从观测事件取回正文；目标长度不符时不能安装。
     assert_eq!(
         admin
-            .turn_state_token(&id, "model-a", issued)
+            .turn_state_token(&id, "model-a", issued, None)
             .await
             .unwrap()
             .unwrap()
@@ -781,7 +786,7 @@ async fn non_target_token_is_kept_in_history_copyable_and_installable_after_reta
     assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
     assert!(
         admin
-            .apply_turn_state(&id, "model-a", issued, &context)
+            .apply_turn_state(&id, "model-a", issued, None, &context)
             .await
             .is_err()
     );
@@ -800,7 +805,7 @@ async fn non_target_token_is_kept_in_history_copyable_and_installable_after_reta
         .await
         .unwrap();
     admin
-        .apply_turn_state(&id, "model-a", issued, &context)
+        .apply_turn_state(&id, "model-a", issued, None, &context)
         .await
         .unwrap();
     let status = admin
@@ -813,5 +818,235 @@ async fn non_target_token_is_kept_in_history_copyable_and_installable_after_reta
     assert!(status.manual_override);
     assert_eq!(status.token_length, Some(312));
     assert_eq!(status.installations[0].issued_at, issued);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn history_selection_is_exact_even_when_tokens_share_timestamp_and_length() {
+    let Some(database) = TestDatabase::create("turn_state_exact_history").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_exact_history").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "exact-history".to_owned(),
+    };
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let issued = Utc::now().timestamp() - 5;
+    let first = token(292, issued);
+    let mut bytes = URL_SAFE.decode(&first.value).unwrap();
+    bytes[10] = 1;
+    let second = TurnStateToken::parse(&URL_SAFE.encode(bytes)).unwrap();
+    let miss = token(312, issued);
+    for value in [&first, &second, &miss] {
+        let mut observed = observation(id.as_str(), "model-a", value.value.len(), issued);
+        observed.started_at = Some(Utc::now().timestamp() - 61);
+        observed.token = Some(value.value.clone());
+        repository
+            .observe_turn_state(observed, Some(value.clone()))
+            .await
+            .unwrap();
+    }
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .remove(0);
+    let ids: Vec<i64> = status
+        .observations
+        .iter()
+        .rev()
+        .map(|row| row.observation_id.as_ref().unwrap().parse().unwrap())
+        .collect();
+    for (observation_id, value) in ids.iter().zip([&first, &second, &miss]) {
+        assert_eq!(
+            admin
+                .turn_state_token(&id, "model-a", issued, Some(*observation_id))
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            value.value
+        );
+    }
+    assert!(
+        admin
+            .turn_state_token(&id, "model-b", issued, Some(ids[1]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        admin
+            .turn_state_token(&id, "model-a", issued - 1, Some(ids[1]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        admin
+            .turn_state_token(&id, "model-a", issued, Some(i64::MAX))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // 312 历史行不得借用同秒的 292 候选安装。
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued, Some(ids[2]), &context)
+            .await
+            .is_err()
+    );
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued, Some(i64::MAX), &context)
+            .await
+            .is_err()
+    );
+    admin
+        .apply_turn_state(&id, "model-a", issued, Some(ids[1]), &context)
+        .await
+        .unwrap();
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(status.has_installed_state);
+    assert!(status.candidate_issued_at.is_none());
+    assert!(!status.observations[0].is_installed);
+    assert!(status.observations[1].is_installed);
+    assert!(!status.observations[2].is_installed);
+    assert_eq!(status.installations[0].attempts, 2);
+    assert!(status.installations[0].hunt_seconds >= 61);
+    assert_eq!(
+        admin
+            .turn_state_token(&id, "model-a", issued, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        second.value
+    );
+    admin
+        .remove_turn_state(&id, "model-a", issued, &context)
+        .await
+        .unwrap();
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(status.observations.iter().all(|row| !row.is_installed));
+    // 无 ID 的旧调用不能在多个不同正文之间任意挑选。
+    assert!(
+        admin
+            .turn_state_token(&id, "model-a", issued, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        admin
+            .turn_state_token(&id, "model-a", issued, Some(ids[0]))
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        first.value
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn invalid_history_bodies_are_rejected_and_legacy_extreme_dates_do_not_break_cleanup() {
+    let Some(database) = TestDatabase::create("turn_state_invalid_history").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_invalid_history").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "invalid-history".to_owned(),
+    };
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let now = Utc::now().timestamp();
+    for issued in [0, now - 3601, now + 3600, i64::MAX] {
+        let observed = observation(id.as_str(), "model-a", 312, issued);
+        assert!(!format!("{observed:?}").contains(observed.token.as_ref().unwrap()));
+        repository
+            .observe_turn_state(observed.clone(), None)
+            .await
+            .unwrap();
+        let status = admin
+            .turn_state_status(Some(id.as_str()))
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(!status.observations[0].has_token);
+        // 模拟旧版本已经留存了未来/过期正文的数据库。
+        sqlx::query("insert into account_turn_state_events(account_id, model, event_kind, detail) values ($1, 'model-a', 'observation', $2)")
+            .bind(id.as_str()).bind(serde_json::to_value(observed).unwrap()).execute(&database.pool).await.unwrap();
+    }
+    let fresh = token(292, now - 1);
+    repository
+        .observe_turn_state(
+            observation(id.as_str(), "model-a", 292, fresh.issued_at),
+            Some(fresh.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
+    repository.turn_state_buckets().await.unwrap();
+    let remaining: i64 = sqlx::query_scalar(
+        "select count(*) from account_turn_state_events where account_id = $1 and detail ? 'token'",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 1);
+    assert_eq!(
+        admin
+            .turn_state_token(&id, "model-a", fresh.issued_at, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        fresh.value
+    );
     database.close().await;
 }

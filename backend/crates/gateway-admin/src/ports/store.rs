@@ -94,6 +94,7 @@ pub trait AccountStore: Send + Sync {
         _account_id: &gateway_core::account::ProviderAccountId,
         _model: &str,
         _issued_at: i64,
+        _observation_id: Option<i64>,
     ) -> AdminStoreResult<Option<gateway_core::account::TurnStateToken>> {
         Ok(None)
     }
@@ -117,6 +118,7 @@ pub trait AccountStore: Send + Sync {
         _account_id: &gateway_core::account::ProviderAccountId,
         _model: &str,
         _issued_at: i64,
+        _observation_id: Option<i64>,
         _context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
         Err(AdminStoreError::new(

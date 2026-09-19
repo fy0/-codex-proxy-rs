@@ -49,6 +49,30 @@ struct ApplyRequest {
     account_id: String,
     model: String,
     issued_at: i64,
+    observation_id: Option<String>,
+}
+
+impl ApplyRequest {
+    fn observation_id(&self) -> Result<Option<i64>, AdminError> {
+        self.observation_id
+            .as_deref()
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| map_wire_error(WireValidationError::new("observationId")))
+            })
+            .transpose()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoveRequest {
+    account_id: String,
+    model: String,
+    issued_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -72,13 +96,14 @@ async fn copy<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let observation_id = request.observation_id()?;
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let account_id = ProviderAccountId::new(request.account_id)
         .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
     let token = state
         .admin_services()
         .accounts()
-        .turn_state_token(account_id, request.model, request.issued_at)
+        .turn_state_token(account_id, request.model, request.issued_at, observation_id)
         .await
         .map_err(map_service_error)?;
     let mut response = AdminResponse::new(
@@ -122,6 +147,7 @@ async fn apply<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let observation_id = request.observation_id()?;
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let account_id = ProviderAccountId::new(request.account_id)
         .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
@@ -133,6 +159,7 @@ where
             account_id,
             request.model,
             request.issued_at,
+            observation_id,
         )
         .await
         .map_err(map_service_error)?;
@@ -145,7 +172,7 @@ where
 async fn remove<S>(
     auth: AdminAuth,
     State(state): State<S>,
-    AdminJson(request): AdminJson<ApplyRequest>,
+    AdminJson(request): AdminJson<RemoveRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
     S: SessionState + Send + Sync,

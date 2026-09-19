@@ -399,9 +399,10 @@ impl AccountStore for PgAdminAccountStore {
         account_id: &CoreProviderAccountId,
         model: &str,
         issued_at: i64,
+        observation_id: Option<i64>,
     ) -> AdminStoreResult<Option<gateway_core::account::TurnStateToken>> {
         self.accounts
-            .copyable_turn_state(account_id, model, issued_at)
+            .copyable_turn_state(account_id, model, issued_at, observation_id)
             .await
             .map_err(|_| {
                 AdminStoreError::new(
@@ -471,6 +472,7 @@ impl AccountStore for PgAdminAccountStore {
         account_id: &CoreProviderAccountId,
         model: &str,
         issued_at: i64,
+        observation_id: Option<i64>,
         context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
         let mut transaction = self.pool.begin().await.map_err(|_| {
@@ -480,35 +482,37 @@ impl AccountStore for PgAdminAccountStore {
                 "turn state transaction unavailable",
             )
         })?;
-        // 先按当前候选安装；签发时间不匹配候选时回退到观测事件里留存的历史票，
-        // 两者共用同一套目标长度、有效期与签发水位门槛。
-        let installed = super::turn_state::install_candidate(
-            &mut transaction,
-            account_id,
-            model,
-            Some(issued_at),
-        )
-        .await
-        .map_err(|_| {
-            AdminStoreError::new(
-                AdminStoreErrorKind::Unavailable,
-                ENTITY,
-                "turn state installation unavailable",
+        // 指定观测 ID 时只操作该行，不能被同秒签发的当前候选替代。
+        let installed = observation_id.is_none()
+            && super::turn_state::install_candidate(
+                &mut transaction,
+                account_id,
+                model,
+                Some(issued_at),
             )
-        })? || super::turn_state::install_observed_turn_state(
-            &mut transaction,
-            account_id,
-            model,
-            issued_at,
-        )
-        .await
-        .map_err(|_| {
-            AdminStoreError::new(
-                AdminStoreErrorKind::Unavailable,
-                ENTITY,
-                "turn state installation unavailable",
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "turn state installation unavailable",
+                )
+            })?
+            || super::turn_state::install_observed_turn_state(
+                &mut transaction,
+                account_id,
+                model,
+                issued_at,
+                observation_id,
             )
-        })?;
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "turn state installation unavailable",
+                )
+            })?;
         if !installed {
             return Err(AdminStoreError::new(
                 AdminStoreErrorKind::Conflict,

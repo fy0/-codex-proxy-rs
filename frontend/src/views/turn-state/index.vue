@@ -108,8 +108,8 @@ const historyColumns = defineTableColumns<TurnStateInstallation>([
   { key: 'issuedAt', label: '签发时间', kind: 'datetime', format: value => date(value as number) },
   { key: 'tokenLength', label: '长度', kind: 'numeric' },
   { key: 'acquiredAt', label: '获取时间', kind: 'datetime', format: value => date(value as number) },
-  { key: 'attempts', label: '尝试次数', kind: 'numeric' },
-  { key: 'huntSeconds', label: '获取耗时（秒）', kind: 'numeric' },
+  { key: 'attempts', label: '尝试次数', kind: 'numeric', format: (value, row) => row.source === 'probe' && row.attempts === 0 ? '未记录' : value },
+  { key: 'huntSeconds', label: '获取耗时（秒）', kind: 'numeric', format: (value, row) => row.source === 'probe' && row.attempts === 0 ? '未记录' : value },
   { key: 'source', label: '来源', kind: 'text', format: value => value === 'probe' ? '主动探测' : '被动采集' },
 ])
 
@@ -152,7 +152,7 @@ function responseSource(value: string | null) {
   return value ? labels[value] ?? value : '未记录'
 }
 function averageRetries(bucket: TurnStateStatus) {
-  const samples = bucket.installations.filter(item => item.source === 'probe')
+  const samples = bucket.installations.filter(item => item.source === 'probe' && item.attempts > 0)
   return samples.length ? (samples.reduce((sum, item) => sum + Math.max(0, item.attempts - 1), 0) / samples.length).toFixed(1) : '-'
 }
 function outcome(value: string) {
@@ -199,9 +199,9 @@ function injectionLabel(bucket: TurnStateStatus) {
     return bucket.active && !expired(bucket) ? `模型桶：${bucket.manualOverride ? '手动应用' : '自动安装'}` : '模型桶：不携带 state'
   return hasAccountOverride(bucket) ? '账号通用自定义 state' : '不强制覆盖客户端 / 会话 state'
 }
-function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined, hasToken = false) {
-  return issuedAt != null && issuedAt + bucket.config.ttlSeconds > now.value
-    && ((bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt || hasToken)
+function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined, observation?: TurnStateObservation) {
+  return issuedAt != null && issuedAt > 0 && issuedAt <= now.value && issuedAt + bucket.config.ttlSeconds > now.value
+    && (observation ? !!observation.observationId && observation.hasToken === true : (bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt)
 }
 async function removeState(bucket: TurnStateStatus) {
   if (removing.value || !bucket.hasInstalledState || bucket.issuedAt == null)
@@ -219,12 +219,12 @@ async function removeState(bucket: TurnStateStatus) {
     removing.value = false
   }
 }
-async function copyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, hasToken = false) {
-  if (copying.value || !canCopy(bucket, issuedAt, hasToken) || issuedAt == null)
+async function copyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, observation?: TurnStateObservation) {
+  if (copying.value || !canCopy(bucket, issuedAt, observation) || issuedAt == null)
     return
   copying.value = true
   try {
-    const token = await copyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt })
+    const token = await copyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt, observationId: observation?.observationId })
     await copyText(token.value, { successText: 'state 已复制' })
   }
   catch {
@@ -262,25 +262,24 @@ async function probeOnce(bucket: TurnStateStatus) {
 }
 
 function canApply(observation: TurnStateObservation) {
-  return !!selection.value && canApplyState(selection.value, observation.issuedAt, observation.tokenLength, observation.hasToken)
+  return !!selection.value && canApplyState(selection.value, observation.issuedAt, observation.tokenLength, observation)
 }
-// 签发时间命中当前候选走候选安装；其余历史行要求事件里留存了正文且长度匹配目标，
-// 两条路径在后端共用同一套安装门槛。
-function canApplyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, hasToken?: boolean) {
-  if (!bucket.accountEnabled || issuedAt == null || issuedAt + bucket.config.ttlSeconds <= now.value)
+// 历史行必须按自身正文和长度判断，不能借用同秒候选的状态。
+function canApplyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, observation?: TurnStateObservation) {
+  if (!bucket.accountEnabled || issuedAt == null || issuedAt <= 0 || issuedAt > now.value || issuedAt + bucket.config.ttlSeconds <= now.value)
     return false
   if (bucket.issuedAt !== null && issuedAt <= bucket.issuedAt)
     return false
-  if (issuedAt === bucket.candidateIssuedAt)
-    return bucket.candidateLength === bucket.config.targetLength
-  return hasToken === true && tokenLength === bucket.config.targetLength
+  if (observation)
+    return !!observation.observationId && observation.hasToken === true && tokenLength === bucket.config.targetLength
+  return issuedAt === bucket.candidateIssuedAt && bucket.candidateLength === bucket.config.targetLength
 }
-async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, hasToken?: boolean) {
-  if (!canApplyState(bucket, issuedAt, tokenLength, hasToken) || applying.value || issuedAt == null)
+async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, observation?: TurnStateObservation) {
+  if (!canApplyState(bucket, issuedAt, tokenLength, observation) || applying.value || issuedAt == null)
     return
   applying.value = true
   try {
-    await applyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt })
+    await applyTurnState({ accountId: bucket.accountId, model: bucket.model, issuedAt, observationId: observation?.observationId })
     toast.success('state 已应用，自动探测设置未变更')
     await load()
   }
@@ -431,7 +430,7 @@ onMounted(async () => {
           <dt class="text-cp-text-secondary">
             本次重试 / 近期平均重试
           </dt><dd class="m-0 mt-1">
-            {{ selection.installations[0] ? Math.max(0, selection.installations[0].attempts - 1) : '-' }} / {{ averageRetries(selection) }}
+            {{ selection.installations[0]?.attempts ? Math.max(0, selection.installations[0].attempts - 1) : '-' }} / {{ averageRetries(selection) }}
           </dd>
         </div>
         <div>
@@ -484,12 +483,12 @@ onMounted(async () => {
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
       <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">
         <template #actions="{ row }">
-          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(selection, row.issuedAt, row.tokenLength, row.hasToken)">
+          <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(selection, row.issuedAt, row.tokenLength, row)">
             <Check class="size-4" />
           </BaseIconButton>
-          <span v-else-if="row.issuedAt != null && row.issuedAt === selection.issuedAt" class="text-cp-xs text-cp-text-secondary">已安装</span>
+          <span v-else-if="row.isInstalled && selection.hasInstalledState && !expired(selection)" class="text-cp-xs text-cp-text-secondary">已安装</span>
           <span v-else class="text-cp-text-secondary">-</span>
-          <BaseIconButton v-if="canCopy(selection, row.issuedAt, row.hasToken)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row.hasToken)">
+          <BaseIconButton v-if="canCopy(selection, row.issuedAt, row)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row)">
             <Copy class="size-4" />
           </BaseIconButton>
         </template>

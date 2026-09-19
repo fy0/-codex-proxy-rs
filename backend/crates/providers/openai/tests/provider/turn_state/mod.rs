@@ -587,6 +587,7 @@ async fn non_target_token_is_recorded_in_history_without_occupying_candidate() {
     let observation = &store.turn_observations()[0];
     assert_eq!(observation.outcome, "length_miss");
     assert_eq!(observation.token.as_deref(), Some(miss.as_str()));
+    assert!(!format!("{observation:?}").contains(&miss));
     assert!(bucket.candidate.is_none());
     assert!(bucket.current.is_none());
     assert!(!store.install_turn_state(&id, "gpt-5.4").await.unwrap());
@@ -645,6 +646,35 @@ async fn missing_header_invalid_token_and_transport_error_remain_distinct() {
         .unwrap();
     assert!(bucket.current.is_none());
     assert!(bucket.candidate.is_none());
+}
+
+#[tokio::test]
+async fn future_and_expired_envelopes_never_retain_history_bodies() {
+    let server = MockServer::start().await;
+    for issued in [
+        Utc::now().timestamp() - 3601,
+        Utc::now().timestamp() + 3600,
+        i64::MAX,
+    ] {
+        for size in [217, 233] {
+            let value = token_at(size, issued);
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).insert_header("x-codex-turn-state", value.clone()),
+                )
+                .mount(&server)
+                .await;
+            let store = Arc::new(MemoryAccountStore::default());
+            seed(&store, false).await;
+            cycle(Arc::clone(&store), server.uri()).await;
+            let observed = store.turn_observations().remove(0);
+            assert_eq!(observed.outcome, "expired_or_future");
+            assert_eq!(observed.issued_at, Some(issued));
+            assert!(observed.token.is_none());
+            assert!(!format!("{observed:?}").contains(&value));
+            server.reset().await;
+        }
+    }
 }
 
 #[tokio::test]

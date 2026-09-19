@@ -55,6 +55,24 @@ async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
         (
+            "copy",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"observationId":"9223372036854775808"}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "apply",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"observationId":"0"}"#,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "remove",
+            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"observationId":"1"}"#,
+            true,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
             "preview",
             r#"{"config":{"timezone":"not-a-timezone"}}"#,
             true,

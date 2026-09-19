@@ -48,7 +48,7 @@ async fn notifications_follow_committed_installations_and_bound_retries_without_
             .is_empty()
     );
     admin
-        .apply_turn_state(&id, "model-a", issued, &context)
+        .apply_turn_state(&id, "model-a", issued, None, &context)
         .await
         .unwrap();
     let (left, right) = tokio::join!(
@@ -116,7 +116,7 @@ async fn notifications_follow_committed_installations_and_bound_retries_without_
         .await
         .unwrap();
     admin
-        .apply_turn_state(&id, "model-a", renewed, &context)
+        .apply_turn_state(&id, "model-a", renewed, None, &context)
         .await
         .unwrap();
     // 旧通知的晚到确认不能误确认新安装的通知。
@@ -152,7 +152,7 @@ async fn notifications_follow_committed_installations_and_bound_retries_without_
         .await
         .unwrap();
     admin
-        .apply_turn_state(&id, "model-a", latest, &context)
+        .apply_turn_state(&id, "model-a", latest, None, &context)
         .await
         .unwrap();
     sqlx::query("update provider_accounts set enabled = false where id = $1")

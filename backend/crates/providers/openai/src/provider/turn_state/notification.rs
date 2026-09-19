@@ -83,6 +83,8 @@ async fn send(client: &reqwest::Client, notice: &TurnStateNotification) -> bool 
         || "首次安装".to_owned(),
         |previous| duration(installation.installed_at.saturating_sub(previous).max(0) as u64),
     );
+    // 旧历史没有获取统计，不能把缺失值描述成零次探测成功。
+    let unknown_hunt = installation.source == "probe" && installation.attempts == 0;
     let text = format!(
         "state 安装成功\n账号：{} ({})\n模型：{}\n安装方式：{}\n获取来源：{}\n距上次安装：{}\n本次获取耗时：{}\n尝试次数：{}\n签发时间：{}\n长度：{}\n完整 state：\n{}",
         notice.account_name,
@@ -99,8 +101,16 @@ async fn send(client: &reqwest::Client, notice: &TurnStateNotification) -> bool 
             "被动采集"
         },
         interval,
-        duration(installation.hunt_seconds),
-        installation.attempts,
+        if unknown_hunt {
+            "历史未记录".to_owned()
+        } else {
+            duration(installation.hunt_seconds)
+        },
+        if unknown_hunt {
+            "历史未记录".to_owned()
+        } else {
+            installation.attempts.to_string()
+        },
         chrono::DateTime::from_timestamp(notice.token.issued_at, 0).map_or_else(
             || notice.token.issued_at.to_string(),
             |date| date.to_rfc3339()

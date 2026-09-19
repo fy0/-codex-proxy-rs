@@ -203,9 +203,11 @@ impl TurnStateToken {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStateObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
     pub account_id: String,
     #[serde(skip)]
     pub upstream_account_id: Option<String>,
@@ -229,13 +231,18 @@ pub struct TurnStateObservation {
     /// 上游在同一响应声明的实际模型；与令牌长度一样是观测事实，不代表生效模型。
     #[serde(default)]
     pub reported_model: Option<String>,
-    /// 信封合法的令牌正文随观测行持久化，状态查询剥离后只保留 hasToken 标记；
-    /// 历史记录因此可以按签发时间取回或安装任意一张仍在有效期内的票。
+    /// 有效信封正文随观测行持久化；状态查询剥离正文，操作使用观测 ID 精确定位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     /// 状态查询在剥离正文后回填的标记，不落进事件 detail。
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_token: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunt_attempts: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunt_seconds: Option<u64>,
     pub egress: String,
     pub shape: Option<String>,
     pub effort: Option<String>,
@@ -245,6 +252,18 @@ pub struct TurnStateObservation {
     pub stop_mode: Option<String>,
     #[serde(default)]
     pub stop_reason: Option<String>,
+}
+
+impl std::fmt::Debug for TurnStateObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnStateObservation")
+            .field("observation_id", &self.observation_id)
+            .field("source", &self.source)
+            .field("outcome", &self.outcome)
+            .field("token_length", &self.token_length)
+            .field("issued_at", &self.issued_at)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

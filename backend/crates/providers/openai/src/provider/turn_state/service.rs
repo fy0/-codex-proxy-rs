@@ -109,6 +109,10 @@ impl TurnStateService {
                 });
                 let config = bucket.map(|bucket| bucket.config).unwrap_or_default();
                 let observation = TurnStateObservation {
+                    observation_id: None,
+                    is_installed: false,
+                    hunt_attempts: None,
+                    hunt_seconds: None,
                     account_id: account_id.as_str().to_owned(),
                     upstream_account_id,
                     upstream_user_id,
@@ -177,13 +181,13 @@ impl TurnStateService {
             .is_some_and(|status| !(200..300).contains(&status) && status != 101)
         {
             "http_error"
-        } else if observation.token_length != Some(config.target_length) {
-            "length_miss"
         } else if token
             .as_ref()
             .is_some_and(|token| !token.is_fresh(observation.observed_at, config.ttl_seconds))
         {
             "expired_or_future"
+        } else if observation.token_length != Some(config.target_length) {
+            "length_miss"
         } else if token
             .as_ref()
             .is_some_and(|token| Some(token.value.as_str()) == request_state)
@@ -198,9 +202,11 @@ impl TurnStateService {
             "candidate"
         }
         .to_owned();
-        // 信封合法的令牌正文随观测行持久化，与是否进入候选无关；
-        // 候选槽只接收命中目标长度的票，长度未命中不再占用候选与签发水位。
-        observation.token = token.as_ref().map(|token| token.value.clone());
+        // 非目标票可以留存，但过期或未来签发的票只能保留诊断元数据。
+        observation.token = token
+            .as_ref()
+            .filter(|token| token.is_fresh(observation.observed_at, config.ttl_seconds))
+            .map(|token| token.value.clone());
         let candidate = (observation.outcome == "candidate")
             .then_some(token)
             .flatten();
@@ -246,6 +252,10 @@ impl TurnStateService {
         manual: bool,
     ) -> ProbeOutcome {
         let mut observation = TurnStateObservation {
+            observation_id: None,
+            is_installed: false,
+            hunt_attempts: None,
+            hunt_seconds: None,
             account_id: bucket.account_id.clone(),
             upstream_account_id: bucket.upstream_account_id.clone(),
             upstream_user_id: bucket.upstream_user_id.clone(),

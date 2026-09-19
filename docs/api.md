@@ -369,9 +369,9 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `GET` | `/api/admin/accounts/turn-state` | 可选 `accountId` | 按账号、上游模型返回轮换配置、令牌元数据、观测和安装历史，不返回令牌正文 |
 | `POST` | `/api/admin/accounts/turn-state/configure` | `{ accountId, model, config }` | 配置 OpenAI OAuth 账号的一个模型桶，返回账号 ID 与配置版本 |
 | `POST` | `/api/admin/accounts/turn-state/probe` | `{ accountId, model }` | 排队一次探测，返回 202 和账号配置版本；账号须启用，不要求桶启用轮换 |
-| `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt }` | 应用指定签发时间的当前候选或观测历史中留存的票，不改变自动轮换开关；票已变更、过期或不再可安装时返回 409 |
+| `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt, observationId? }` | 应用当前候选或指定观测记录的票，不改变自动轮换开关；票已变更、过期或不再可安装时返回 409 |
 | `POST` | `/api/admin/accounts/turn-state/remove` | `{ accountId, model, issuedAt }` | 移除该桶已安装票，预期签发时间不匹配或已移除时返回 409，不改变账号或探测开关 |
-| `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt }` | 按需读取仍有效的已安装票、当前候选或观测历史中留存的票，返回正文和签发时间，响应禁止缓存 |
+| `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt, observationId? }` | 按需读取仍有效的已安装票、当前候选或指定观测记录的票，返回正文和签发时间，响应禁止缓存 |
 | `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、CLI 版本和时区日期，不发送上游请求 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
@@ -426,11 +426,11 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 `POST /api/admin/accounts/turn-state/preview` 接收 `{ "config": { ... } }`，返回实际生成的 `userAgent`、CLI `version`、IANA `timezone` 和该时区的 `currentDate`，不发送上游请求。自定义 UA 不改变独立的 `version` 请求头；留空时使用桶内 `clientVersion` 与部署环境画像，预览与真实探测共用生成逻辑。探测版本不继承 Desktop 内嵌 Core 的预发布版本。
 
-`POST /api/admin/accounts/turn-state/copy` 仅供管理员主动复制，接收 `accountId`、实际上游 `model` 和预期 `issuedAt`，返回 `{ "value": "...", "issuedAt": ... }`。按签发时间依次在已安装票、当前候选和观测历史留存的正文中查找，只读取身份匹配且尚未过期的票。响应为 `Cache-Control: no-store`；令牌正文不会加入列表或审计日志。
+`POST /api/admin/accounts/turn-state/copy` 仅供管理员主动复制，接收 `accountId`、实际上游 `model`、预期 `issuedAt` 和可选的 `observationId`，返回 `{ "value": "...", "issuedAt": ... }`。历史行复制和应用必须传该行的 `observationId`（正整数的十进制字符串），并同时匹配账号、模型和签发时间；记录不存在时不回退到同秒的其他票。未传 ID 的旧调用依次匹配已安装票（仅复制）、当前候选和没有正文歧义的历史票。只允许身份匹配且尚未过期的票。响应为 `Cache-Control: no-store`；令牌正文不会加入列表或审计日志。
 
 `POST /api/admin/accounts/turn-state/remove` 移除匹配 `accountId`、`model`、`issuedAt` 的已安装票，保留签发水位、候选、历史和配置。并发续票后旧签发时间不能移除新票；同一张旧票不能重新安装，更新候选仍可按原配置安装。手动停用的账号也可移除；操作不修改任何开关，严格策略下后续业务等待新票。移除与审计、配置版本同事务提交，并失效旧 WS 连接。
 
-账号停用或模型禁用时不产生周期性跳过日志；账号停用后到达的观测不落库。关闭自动探测后不追加后台观测日志，仍可保留业务响应产生的有效候选；管理员手动探测的结果照常记录。既有历史保留；信封合法的令牌正文随观测行留存，可按签发时间复制或在命中目标长度时直接应用。
+账号停用或模型禁用时不产生周期性跳过日志；账号停用后到达的观测不落库。关闭自动探测后不追加后台观测日志，仍可保留业务响应产生的有效候选；管理员手动探测的结果照常记录。既有历史保留；有效信封正文随观测行留存，可按记录 ID 复制或在命中目标长度时直接应用。未来签发、过期或无效信封只保留诊断元数据，不留存正文。
 
 | 配置字段 | 默认值 | 范围或语义 |
 | --- | --- | --- |
@@ -457,7 +457,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 手动探测复用上述配置、身份更新与凭据有效性检查，跳过轮换龄和等待时间，一次最多发出一个上游请求；不会启用自动轮换。未配置的桶使用默认配置创建；未启用自动轮换时保留候选，可通过 `apply` 单独应用，或启用自动轮换后安装。重复排队合并成一个待执行任务；worker 原子领取后不因进程中断而自动重放。`manualProbeRequestedAt` 为待执行请求时间，领取后清空；结果通过 `observations` 查询，`probeTrigger` 区分 `manual` 和 `scheduled`。
 
-`candidateIssuedAt` / `candidateLength` 仅返回仍有效候选的签发时间与长度，候选始终命中 `targetLength` 可直接安装。手动应用按签发时间匹配当前候选或观测历史中留存的票，要求账号、模型、上游身份匹配，签发时间比已安装值新且长度命中 `targetLength`；不会返回或接受令牌正文。`manualOverride=true` 标记手动安装，自动轮换关闭时仍在有效期内注入，但不会启动后台探测；到期停止注入。保存配置保留仍符合目标长度与有效期的已安装票及来源标识，清除长度不再匹配或过期的候选。候选池每桶只保留最新候选。
+`candidateIssuedAt` / `candidateLength` 仅返回仍有效候选的签发时间与长度，候选始终命中 `targetLength` 可直接安装。手动应用按签发时间匹配当前候选，或按 `observationId` 精确选择历史票，要求账号、模型、上游身份匹配，签发时间比已安装值新且长度命中 `targetLength`；不会返回或接受令牌正文。`manualOverride=true` 标记手动安装，自动轮换关闭时仍在有效期内注入，但不会启动后台探测；到期停止注入。保存配置保留仍符合目标长度与有效期的已安装票及来源标识，清除长度不再匹配或过期的候选。候选池每桶只保留最新候选。
 
 `pause` 的有票条件只认可同账号、同上游模型、上游身份匹配、目标长度正确、内嵌签发时间有效且已安装的 state；候选、客户端 state 和账号级通用覆盖均不能解除限制。安装提交后后续业务选号即可恢复，到期后后续选号立即跳过，无须等待清理 worker；已经发出的请求继续完成。312、其他非目标长度、无响应头及传输错误不会撤销仍有效的旧票。账号权限、模型权限、凭据、额度、限流与并发限制仍按原条件执行；所有候选不可用时保持 `503 / no_available_provider` 合同，因缺票拒绝时安全消息包含等待已安装 state 的原因，诊断码为 `missing_turn_state`，不进入并发等待队列。自动探测关闭时可手动探测取得候选，再调用 `apply` 恢复业务；任何过程都不自动修改账号 `enabled`。
 
@@ -467,7 +467,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 状态项包含 `accountId`、`accountName`、`model`、`config`、`tokenLength`、`issuedAt`、`ageSeconds`、`active`、`accountEnabled`、`businessStatus`、`huntAttempts`、`nextProbeAt`、`observations`、`installations`。签发和观察时间均为 Unix 秒；尚未安装时令牌元数据为 `null`。过期后保留最后安装的长度和签发水位供诊断，`active=false`，令牌正文清除。`active` 表示账号启用且同桶已安装令牌满足身份、长度及有效期检查，不保证上游接受。`businessStatus` 为 `ready`、`manual_disabled`、`waiting_for_state`、`model_denied`、`quota_exhausted`、`rate_limited` 或 `account_error`；这是当前桶的资格投影，不承诺具体 Client Key 权限或瞬时并发容量。`accountEnabled` 是手动账号开关，`config.enabled` 是自动探测开关，均不能从缺票状态推断。`huntAttempts` 为当前寻获周期的累计尝试数，跨预算轮次累计；`nextProbeAt` 为预计下次开始时间，调度周期和并发限制可能使实际开始稍晚，账号或自动探测停用时为 `null`。
 
-`observations` 分别保留最近 100 条主动探测和 100 条被动采集；包含 `source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、上游在同一响应中声明的 `reportedModel`、表示该观测行留存了令牌正文的 `hasToken`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode` 和 `stopReason`。`reportedModel` 来自上游响应头 `openai-model` / `x-openai-model`、WS 元数据或回应策略窗口内流内事件的模型声明，是上游自报的实际服务模型，与请求模型、桶模型是三个不同字段；缺失为 `null`，不能据此推断请求模型生效，令牌长度本身也不能证明路由。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`invalid_token`、`expired_or_future` 不会安装；`length_miss` 同样不能直接安装，但其正文随观测行留存（`hasToken`），可在改目标长度后直接应用或随时复制；事件正文与槽位正文同寿命，过期即摘除。回应策略最多读取 1 MiB、30 秒，不保存正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。响应不含令牌正文、Bearer 或代理认证，正文只经 `copy` 接口按需取回。
+`observations` 分别保留最近 100 条主动探测和 100 条被动采集；包含十进制字符串 `observationId`、`source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、上游在同一响应中声明的 `reportedModel`、表示该观测行仍有有效正文的 `hasToken`、表示正文与当前有效已安装票相同的 `isInstalled`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode` 和 `stopReason`。`reportedModel` 来自上游响应头 `openai-model` / `x-openai-model`、WS 元数据或回应策略窗口内流内事件的模型声明，是上游自报的实际服务模型，与请求模型、桶模型是三个不同字段；缺失为 `null`，不能据此推断请求模型生效，令牌长度本身也不能证明路由。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`invalid_token`、`expired_or_future` 不会安装或保存正文；`length_miss` 同样不能直接安装，但其正文随观测行留存（`hasToken`），可在改目标长度后直接应用或随时复制；事件正文与槽位正文同寿命，过期即摘除。回应策略最多读取 1 MiB、30 秒，不保存正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；旧版历史若未保存获取统计，主动票的 attempts 为 0 表示未知，飞书显示“历史未记录”；新观测保存 `huntAttempts` 和 `huntSeconds`，手动应用沿用该行的统计；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。响应不含令牌正文、Bearer 或代理认证，正文只经 `copy` 接口按需取回。
 
 `hasInstalledState` 表示当前存在身份、长度、有效期均匹配的已安装票，不依赖账号开关；因此手动停用时仍可复制有效票。移除后为 false，保留的 `issuedAt` 仅是历史水位，不能用于判断有票。模型票与通用覆盖使用相同的强制注入路径，同时覆盖请求头及会话元数据；切换会话后继续按本次选中账号与实际上游模型应用。
 

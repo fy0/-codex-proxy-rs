@@ -42,7 +42,7 @@ export function previewTurnState(config: TurnStateConfig) {
   })
 }
 
-export function copyTurnState(data: { accountId: string, model: string, issuedAt: number }) {
+export function copyTurnState(data: { accountId: string, model: string, issuedAt: number, observationId?: string }) {
   return request<{ value: string, issuedAt: number }>({
     url: '/api/admin/accounts/turn-state/copy',
     method: 'POST',
@@ -51,6 +51,8 @@ export function copyTurnState(data: { accountId: string, model: string, issuedAt
 }
 
 export interface TurnStateObservation {
+  observationId?: string
+  isInstalled?: boolean
   accountId: string
   model: string
   observedAt: number
@@ -132,7 +134,7 @@ export function probeTurnState(data: { accountId: string, model: string }) {
   })
 }
 
-export function applyTurnState(data: { accountId: string, model: string, issuedAt: number }) {
+export function applyTurnState(data: { accountId: string, model: string, issuedAt: number, observationId?: string }) {
   return request<{ accountId: string, configRevision: number }>({
     url: '/api/admin/accounts/turn-state/apply',
     method: 'POST',

@@ -59,6 +59,7 @@ pub trait AccountsService: Send + Sync {
         _account_id: ProviderAccountId,
         _model: String,
         _issued_at: i64,
+        _observation_id: Option<i64>,
     ) -> Result<gateway_core::account::TurnStateToken, AdminError> {
         Err(AdminError::invalid("当前服务不支持复制 state"))
     }
@@ -79,6 +80,7 @@ pub trait AccountsService: Send + Sync {
         _account_id: ProviderAccountId,
         _model: String,
         _issued_at: i64,
+        _observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         Err(AdminError::invalid("当前服务不支持应用 turn state"))
     }
@@ -445,12 +447,13 @@ impl AccountsService for DefaultAccountsService {
         account_id: ProviderAccountId,
         model: String,
         issued_at: i64,
+        observation_id: Option<i64>,
     ) -> Result<gateway_core::account::TurnStateToken, AdminError> {
         if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
             return Err(AdminError::invalid("模型 ID 不合法"));
         }
         self.accounts
-            .turn_state_token(&account_id, &model, issued_at)
+            .turn_state_token(&account_id, &model, issued_at, observation_id)
             .await
             .map_err(|error| map_store_error(error, "turn state token"))?
             .ok_or_else(|| AdminError::invalid("state 已过期、已被替换或身份不匹配，请刷新后重试"))
@@ -462,6 +465,7 @@ impl AccountsService for DefaultAccountsService {
         account_id: ProviderAccountId,
         model: String,
         issued_at: i64,
+        observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         if model.is_empty()
             || model.len() > 256
@@ -482,7 +486,7 @@ impl AccountsService for DefaultAccountsService {
         }
         let result = self
             .accounts
-            .apply_turn_state(&account_id, &model, issued_at, context)
+            .apply_turn_state(&account_id, &model, issued_at, observation_id, context)
             .await
             .map_err(|error| map_store_error(error, "turn state apply"))?;
         provider.account_unavailable(&account_id).await;

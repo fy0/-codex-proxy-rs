@@ -33,7 +33,12 @@ async fn notification_sends_installation_details_and_checks_feishu_business_stat
     };
     let issued = Utc::now().timestamp() - 5;
     let value = token_at(217, issued);
-    for (status, code, delivered) in [(200, 0, true), (200, 19024, false), (503, 0, false)] {
+    for (status, code, delivered, attempts) in [
+        (200, 0, true, 12),
+        (200, 19024, false, 12),
+        (503, 0, false, 12),
+        (200, 0, true, 0),
+    ] {
         Mock::given(method("POST"))
             .and(path("/feishu"))
             .respond_with(ResponseTemplate::new(status).set_body_json(json!({"code": code})))
@@ -51,7 +56,7 @@ async fn notification_sends_installation_details_and_checks_feishu_business_stat
                 token_length: 292,
                 source: "probe".to_owned(),
                 acquired_at: issued + 4,
-                attempts: 12,
+                attempts,
                 hunt_seconds: 125,
             },
             previous_installed_at: Some(issued + 5 - 2100),
@@ -76,10 +81,15 @@ async fn notification_sends_installation_details_and_checks_feishu_business_stat
             "gpt-5.4",
             "手动应用",
             "0小时35分0秒",
-            "0小时2分5秒",
-            "尝试次数：12",
         ] {
             assert!(text.contains(expected));
+        }
+        if attempts == 0 {
+            assert!(text.contains("本次获取耗时：历史未记录"));
+            assert!(text.contains("尝试次数：历史未记录"));
+        } else {
+            assert!(text.contains("0小时2分5秒"));
+            assert!(text.contains("尝试次数：12"));
         }
         task.run_cycle(WorkerCycleContext::new(
             registration.id.clone(),
