@@ -301,12 +301,16 @@ async fn openai_admin_provider_exposes_live_wire_profile_and_validated_billing()
         ..Default::default()
     };
     let preview = admin.turn_state_probe_preview(&probe_config).unwrap();
-    assert_eq!(preview.version, profile.version);
+    assert_eq!(preview.version, "0.154.0");
     assert_eq!(preview.timezone, "Asia/Taipei");
     assert_eq!(
         preview.user_agent,
-        "codex-tui/0.102.0 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.102.0)"
+        "codex-tui/0.154.0 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.154.0)"
     );
+    probe_config.client_version = "0.153.0".to_owned();
+    let preview = admin.turn_state_probe_preview(&probe_config).unwrap();
+    assert_eq!(preview.version, "0.153.0");
+    assert!(preview.user_agent.starts_with("codex-tui/0.153.0 "));
     probe_config.user_agent = "Custom Probe/1.0".to_owned();
     assert_eq!(
         admin

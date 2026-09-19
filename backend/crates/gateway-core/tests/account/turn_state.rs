@@ -116,7 +116,20 @@ fn rotation_config_bounds_ttl_budget_and_proxy_selection() {
 fn probe_persona_defaults_are_compatible_and_reject_header_injection() {
     let mut config: TurnStateConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(config.originator, "codex-tui");
+    assert_eq!(config.client_version, "0.154.0");
     assert!(config.user_agent.is_empty());
+    for version in [
+        "0.154.0-alpha.1",
+        "0.154.0-beta.1",
+        "0.154.0-rc.1",
+        "0.154.0+local",
+        "v0.154.0",
+        "",
+    ] {
+        config.client_version = version.to_owned();
+        assert!(!config.is_valid());
+    }
+    config.client_version = "0.153.0".to_owned();
     config.originator = "Custom Probe".to_owned();
     config.user_agent = "Custom Probe/1.0".to_owned();
     assert!(config.is_valid());

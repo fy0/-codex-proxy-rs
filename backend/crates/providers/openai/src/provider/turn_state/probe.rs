@@ -178,11 +178,7 @@ pub(super) fn request(
     let effort = ["medium", "high", "xhigh"][random_index(3)];
     let profile = profile.snapshot();
     let originator = &config.originator;
-    let ua = if config.user_agent.is_empty() {
-        profile.turn_state_user_agent(originator)
-    } else {
-        config.user_agent.clone()
-    };
+    let ua = profile.turn_state_user_agent(config);
     let mut headers = HeaderMap::new();
     for (name, value) in [
         ("session-id", session.as_str()),
@@ -191,7 +187,7 @@ pub(super) fn request(
         ("x-codex-window-id", window.as_str()),
         ("x-codex-turn-metadata", metadata.as_str()),
         ("originator", originator.as_str()),
-        ("version", profile.codex_version.as_str()),
+        ("version", config.client_version.as_str()),
         ("user-agent", ua.as_str()),
         ("accept", "text/event-stream"),
         ("content-type", "application/json"),

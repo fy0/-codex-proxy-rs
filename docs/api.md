@@ -372,7 +372,7 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt }` | 应用指定签发时间的当前候选或观测历史中留存的票，不改变自动轮换开关；票已变更、过期或不再可安装时返回 409 |
 | `POST` | `/api/admin/accounts/turn-state/remove` | `{ accountId, model, issuedAt }` | 移除该桶已安装票，预期签发时间不匹配或已移除时返回 409，不改变账号或探测开关 |
 | `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt }` | 按需读取仍有效的已安装票、当前候选或观测历史中留存的票，返回正文和签发时间，响应禁止缓存 |
-| `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、Core 版本和时区日期，不发送上游请求 |
+| `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、CLI 版本和时区日期，不发送上游请求 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
@@ -424,7 +424,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 桶键为账号 ID 与实际发送的上游模型 ID，不能用模型别名代替。配置写入需要管理员身份，复用账号变更的审计和配置发布；`config` 按完整配置替换，省略的字段使用下列默认值，未知字段会拒绝。
 
-`POST /api/admin/accounts/turn-state/preview` 接收 `{ "config": { ... } }`，返回当前部署实际生成的 `userAgent`、Core `version`、IANA `timezone` 和该时区的 `currentDate`，不发送上游请求。自定义 UA 不改变独立的 `version` 请求头；留空时使用运行时已核验的 Core 画像，预览与真实探测共用生成逻辑。
+`POST /api/admin/accounts/turn-state/preview` 接收 `{ "config": { ... } }`，返回实际生成的 `userAgent`、CLI `version`、IANA `timezone` 和该时区的 `currentDate`，不发送上游请求。自定义 UA 不改变独立的 `version` 请求头；留空时使用桶内 `clientVersion` 与部署环境画像，预览与真实探测共用生成逻辑。探测版本不继承 Desktop 内嵌 Core 的预发布版本。
 
 `POST /api/admin/accounts/turn-state/copy` 仅供管理员主动复制，接收 `accountId`、实际上游 `model` 和预期 `issuedAt`，返回 `{ "value": "...", "issuedAt": ... }`。按签发时间依次在已安装票、当前候选和观测历史留存的正文中查找，只读取身份匹配且尚未过期的票。响应为 `Cache-Control: no-store`；令牌正文不会加入列表或审计日志。
 
@@ -443,7 +443,8 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 | `budget` / `idleSeconds` | `40` / `300` | 每轮最多 1–100 次尝试，之后休息 10–86400 秒 |
 | `timezone` | `UTC` | 探测专用 IANA 时区，决定环境日期；不跟随或修改业务出口时区 |
 | `originator` | `codex-tui` | 仅影响探测，非空可见 ASCII 字符，最多 128 字节 |
-| `userAgent` | 空字符串 | 仅影响探测，最多 1024 字节可见 ASCII；空值按 originator 与部署画像自动生成 UA |
+| `clientVersion` | `0.154.0` | 探测 CLI 正式版本号，最多 64 字节，无预发布或构建后缀的 SemVer；同时用于自动 UA 与 version 请求头，旧配置缺省时使用该默认值 |
+| `userAgent` | 空字符串 | 仅影响探测，最多 1024 字节可见 ASCII；空值按 originator、clientVersion 与部署环境画像自动生成 UA |
 | `includeAccountProxy` | `true` | 默认使用账号当前代理；账号无代理时为直连 |
 | `includeDirect` | `false` | 显式额外加入直连 |
 | `proxyIds` | `[]` | 最多 32 个托管代理 ID，可多选；支持 HTTP、HTTPS、SOCKS5、SOCKS5H |

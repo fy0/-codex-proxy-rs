@@ -13,6 +13,7 @@ export interface TurnStateConfig {
   idleSeconds: number
   timezone: string
   originator: string
+  clientVersion: string
   userAgent: string
   includeAccountProxy: boolean
   includeDirect: boolean
@@ -22,7 +23,7 @@ export interface TurnStateConfig {
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, missingStatePolicy: 'allow', targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
+  return { enabled, missingStatePolicy: 'allow', targetLength: 292, ttlSeconds: 3600, refreshAfterSeconds: 2100, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
 }
 
 export interface TurnStateProbePreview {

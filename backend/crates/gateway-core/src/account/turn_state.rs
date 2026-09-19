@@ -20,6 +20,7 @@ pub struct TurnStateConfig {
     pub idle_seconds: u64,
     pub timezone: chrono_tz::Tz,
     pub originator: String,
+    pub client_version: String,
     pub user_agent: String,
     pub include_account_proxy: bool,
     pub include_direct: bool,
@@ -78,6 +79,8 @@ impl Default for TurnStateConfig {
             idle_seconds: 300,
             timezone: chrono_tz::UTC,
             originator: "codex-tui".to_owned(),
+            // 探测固定使用已发布的 CLI 版本，不继承 Desktop 内嵌的预发布 Core。
+            client_version: "0.154.0".to_owned(),
             user_agent: String::new(),
             include_account_proxy: true,
             include_direct: false,
@@ -97,6 +100,9 @@ impl TurnStateConfig {
             && self.jitter_seconds <= 3600
             && (1..=100).contains(&self.budget)
             && (10..=86400).contains(&self.idle_seconds)
+            && self.client_version.len() <= 64
+            && semver::Version::parse(&self.client_version)
+                .is_ok_and(|version| version.pre.is_empty() && version.build.is_empty())
             && !self.originator.trim().is_empty()
             && self.originator.len() <= 128
             && self

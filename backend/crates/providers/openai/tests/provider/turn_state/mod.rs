@@ -161,6 +161,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         assert_eq!(request.headers["chatgpt-account-id"], "upstream-probe");
         assert_eq!(request.headers["originator"], "test-probe-persona");
         assert_eq!(request.headers["user-agent"], "test-probe-agent/1.0");
+        assert_eq!(request.headers["version"], "0.154.0");
         let bytes = zstd::stream::decode_all(std::io::Cursor::new(&request.body)).unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         for key in [
@@ -427,6 +428,36 @@ async fn cycle(store: Arc<MemoryAccountStore>, endpoint: String) {
             .await
             .unwrap();
         }
+    }
+}
+
+#[tokio::test]
+async fn probe_uses_the_configured_stable_cli_version_for_both_identity_headers() {
+    for version in ["0.154.0", "0.153.0"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let store = Arc::new(MemoryAccountStore::default());
+        seed(&store, false).await;
+        store.seed_turn_state(
+            "acct_turn_probe",
+            "gpt-5.4",
+            TurnStateConfig {
+                enabled: true,
+                client_version: version.to_owned(),
+                ..TurnStateConfig::default()
+            },
+        );
+        cycle(store, server.uri()).await;
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers["version"], version);
+        let ua = requests[0].headers["user-agent"].to_str().unwrap();
+        assert!(ua.starts_with(&format!("codex-tui/{version} ")));
+        assert!(ua.ends_with(&format!("(codex-tui; {version})")));
+        assert!(!ua.contains("alpha"));
     }
 }
 

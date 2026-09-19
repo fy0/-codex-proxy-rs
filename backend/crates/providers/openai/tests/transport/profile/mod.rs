@@ -151,6 +151,10 @@ fn wire_profile_should_generate_bundled_core_app_server_user_agent() {
         profile.user_agent(),
         "Codex Desktop/0.147.0-alpha.6.6 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.803.81509)"
     );
+    assert_eq!(
+        profile.turn_state_user_agent(&gateway_core::account::TurnStateConfig::default()),
+        "codex-tui/0.154.0 (Mac OS 15.7.1; arm64) unknown (codex-tui; 0.154.0)"
+    );
 }
 
 #[test]

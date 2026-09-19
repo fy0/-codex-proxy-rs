@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { getAccounts, TurnStateConfig, TurnStateProbePreview, TurnStateStatus } from '@/api'
-import { Copy, Save } from '@lucide/vue'
+import { Copy, Eye, EyeOff, Save } from '@lucide/vue'
 import { watchDebounced } from '@vueuse/core'
 import { computed, ref, useId, watch } from 'vue'
 import { configureTurnState, defaultTurnStateConfig, previewTurnState } from '@/api'
@@ -12,6 +12,7 @@ import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseNumberInput from '@/components/base/BaseNumberInput.vue'
+import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseSwitch from '@/components/base/BaseSwitch.vue'
 import { toast } from '@/components/base/BaseToast'
@@ -34,6 +35,8 @@ const { loading: saving, run } = useAsyncAction()
 const preview = ref<TurnStateProbePreview | null>(null)
 const previewError = ref('')
 const previewLoading = ref(false)
+const userAgentMode = ref('auto')
+const showWebhook = ref(false)
 const copyText = useCopyText()
 const timezoneListId = useId()
 const timezones = ['UTC', 'Asia/Shanghai', 'Asia/Taipei', 'Asia/Hong_Kong', 'Asia/Tokyo', 'Asia/Singapore', 'America/Los_Angeles', 'America/New_York', 'Europe/London', 'Europe/Berlin']
@@ -49,10 +52,17 @@ watch(open, (value) => {
   accountId.value = props.bucket?.accountId ?? ''
   model.value = props.bucket?.model ?? 'gpt-6-astra'
   config.value = props.bucket ? { ...defaultTurnStateConfig(), ...props.bucket.config, proxyIds: [...props.bucket.config.proxyIds] } : defaultTurnStateConfig(true)
+  userAgentMode.value = config.value.userAgent ? 'custom' : 'auto'
+  showWebhook.value = false
   proxySearch.value = ''
 })
 
-watchDebounced(() => [open.value, config.value.originator, config.value.userAgent, config.value.timezone], async () => {
+watch(userAgentMode, (mode) => {
+  if (mode === 'auto')
+    config.value.userAgent = ''
+})
+
+watchDebounced(() => [open.value, config.value.originator, config.value.clientVersion, config.value.userAgent, config.value.timezone], async () => {
   const version = ++previewVersion
   preview.value = null
   previewError.value = ''
@@ -60,13 +70,13 @@ watchDebounced(() => [open.value, config.value.originator, config.value.userAgen
     return
   previewLoading.value = true
   try {
-    const value = await previewTurnState({ ...defaultTurnStateConfig(), originator: config.value.originator, userAgent: config.value.userAgent, timezone: config.value.timezone })
+    const value = await previewTurnState({ ...defaultTurnStateConfig(), originator: config.value.originator, clientVersion: config.value.clientVersion, userAgent: config.value.userAgent, timezone: config.value.timezone })
     if (version === previewVersion)
       preview.value = value
   }
   catch {
     if (version === previewVersion)
-      previewError.value = '预览失败，请检查 IANA 时区、originator 和 User-Agent'
+      previewError.value = '预览失败，请检查正式版本号、IANA 时区、originator 和 User-Agent'
   }
   finally {
     if (version === previewVersion)
@@ -91,6 +101,14 @@ async function save() {
     toast.warning('请填写探测 originator 和时区')
     return
   }
+  if (userAgentMode.value === 'custom' && !config.value.userAgent.trim()) {
+    toast.warning('请填写自定义 User-Agent，或切换为自动')
+    return
+  }
+  if (previewLoading.value || !preview.value || previewError.value) {
+    toast.warning('请等待探测画像校验通过')
+    return
+  }
   if (!config.value.includeAccountProxy && !config.value.includeDirect && !config.value.proxyIds.length) {
     toast.warning('请至少选择一个探测出口')
     return
@@ -106,7 +124,7 @@ async function save() {
 
 <template>
   <BaseModal v-model="open" title="轮换配置" size="lg" :dismissible="!saving">
-    <BaseForm class="grid gap-5">
+    <BaseForm class="grid gap-5" autocomplete="off">
       <div class="grid gap-4 sm:grid-cols-2">
         <BaseFormItem label="账号" required>
           <BaseSelect v-model="accountId" :options="accountOptions" :disabled="saving || existing" aria-label="账号" />
@@ -160,8 +178,12 @@ async function save() {
           <span class="text-cp-xs text-cp-text-secondary">IANA 时区，如 Asia/Shanghai、Asia/Taipei、UTC；用于探测环境中的日期。</span>
         </BaseFormItem>
         <BaseFormItem label="探测 User-Agent" class="sm:col-span-2">
-          <BaseInput v-model="config.userAgent" aria-label="探测 User-Agent" placeholder="留空使用运行时 Codex Core 画像" maxlength="1024" :disabled="saving" />
-          <span class="text-cp-xs text-cp-text-secondary">自动值由运行中的 Core 版本、部署系统画像和此处 originator 生成，随已核验的运行时版本更新。</span>
+          <BaseSegmented v-model="userAgentMode" label="User-Agent 模式" :options="[{ label: '自动', value: 'auto' }, { label: '自定义', value: 'custom' }]" :disabled="saving" />
+          <BaseInput v-if="userAgentMode === 'custom'" v-model="config.userAgent" name="turn-state-http-agent" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore aria-label="探测 User-Agent" placeholder="自定义完整 User-Agent" maxlength="1024" :disabled="saving" />
+        </BaseFormItem>
+        <BaseFormItem label="探测 CLI 版本" class="sm:col-span-2" required>
+          <BaseInput v-model="config.clientVersion" name="turn-state-client-release" autocomplete="off" aria-label="探测 CLI 版本" placeholder="0.154.0" maxlength="64" :disabled="saving" />
+          <span class="text-cp-xs text-cp-text-secondary">默认固定为正式版 0.154.0，可填写其他正式版本；不接受 alpha、beta 或 rc。自动 UA 和 version 请求头共同使用此版本，不跟随 Desktop 更新。</span>
         </BaseFormItem>
         <div class="grid min-w-0 gap-2 sm:col-span-2" aria-live="polite">
           <div class="flex items-center justify-between gap-2 text-cp-sm">
@@ -171,12 +193,20 @@ async function save() {
             </BaseIconButton>
           </div>
           <code v-if="preview" class="whitespace-pre-wrap break-all text-cp-sm">{{ preview.userAgent }}</code>
-          <span v-else :class="previewError ? 'text-cp-error-text' : 'text-cp-text-secondary'">{{ previewError || '正在读取运行时画像' }}</span>
+          <span v-else :class="previewError ? 'text-cp-error-text' : 'text-cp-text-secondary'">{{ previewError || '正在生成探测画像' }}</span>
           <span v-if="preview" class="text-cp-xs text-cp-text-secondary">version 请求头：{{ preview.version }} · 探测日期：{{ preview.currentDate }}（{{ preview.timezone }}）</span>
         </div>
       </div>
       <BaseFormItem label="飞书机器人 Webhook">
-        <BaseInput v-model="config.feishuWebhookUrl" type="password" autocomplete="off" aria-label="飞书机器人 Webhook" placeholder="留空关闭通知" maxlength="512" :disabled="saving" />
+        <!-- URL 保持遮罩，但不用 password 类型，避免浏览器把前面的 UA 识别为登录账号。 -->
+        <BaseInput v-model="config.feishuWebhookUrl" type="url" name="turn-state-notification-endpoint" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore :spellcheck="false" :class="{ '[&_input]:[-webkit-text-security:disc]': !showWebhook }" aria-label="飞书机器人 Webhook" placeholder="留空关闭通知" maxlength="512" :disabled="saving">
+          <template #suffix>
+            <BaseIconButton :label="showWebhook ? '隐藏 Webhook' : '显示 Webhook'" :disabled="saving" @click="showWebhook = !showWebhook">
+              <EyeOff v-if="showWebhook" class="size-4" />
+              <Eye v-else class="size-4" />
+            </BaseIconButton>
+          </template>
+        </BaseInput>
         <span class="text-cp-xs text-cp-text-secondary">支持飞书 / Lark 自定义机器人。安装新票后推送完整 state、距上次安装时间、获取耗时和尝试次数。关键词可设为 state；不使用签名校验。</span>
       </BaseFormItem>
       <fieldset class="m-0 min-w-0 border-0 p-0">

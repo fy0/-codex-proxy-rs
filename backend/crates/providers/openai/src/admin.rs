@@ -223,12 +223,8 @@ impl ProviderAdmin for OpenAiAdminProvider {
     ) -> Option<gateway_admin::model::accounts::TurnStateProbePreview> {
         let profile = self.profile.snapshot();
         Some(gateway_admin::model::accounts::TurnStateProbePreview {
-            user_agent: if config.user_agent.is_empty() {
-                profile.turn_state_user_agent(&config.originator)
-            } else {
-                config.user_agent.clone()
-            },
-            version: profile.codex_version,
+            user_agent: profile.turn_state_user_agent(config),
+            version: config.client_version.clone(),
             timezone: config.timezone.to_string(),
             current_date: chrono::Utc::now()
                 .with_timezone(&config.timezone)

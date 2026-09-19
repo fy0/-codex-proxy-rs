@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::{StreamExt as _, future::BoxFuture};
-use gateway_core::account::OpaqueProviderData;
+use gateway_core::account::{OpaqueProviderData, TurnStateConfig};
 use gateway_core::provider_ports::{
     ProviderArtifactProfile, ProviderArtifactProfileCachePort, ProviderStoreError,
 };
@@ -71,16 +71,20 @@ pub struct CodexWireProfile {
 }
 
 impl CodexWireProfile {
-    /// 探测使用桶内 originator，版本与运行中的 Core 画像保持一致。
-    pub fn turn_state_user_agent(&self, originator: &str) -> String {
+    /// 探测的正式 CLI 版本与 Desktop 制品独立，只继承部署环境画像。
+    pub fn turn_state_user_agent(&self, config: &TurnStateConfig) -> String {
+        if !config.user_agent.is_empty() {
+            return config.user_agent.clone();
+        }
+        let originator = &config.originator;
         format!(
             "{originator}/{} ({} {}; {}) {} ({originator}; {})",
-            self.codex_version,
+            config.client_version,
             self.os_type,
             self.os_version,
             self.arch,
             self.terminal,
-            self.codex_version
+            config.client_version
         )
     }
 
