@@ -160,7 +160,7 @@ function outcome(value: string) {
   if (value === 'reused_state')
     return '相同 state（未续期）'
   if (value === 'not_newer')
-    return '非更新 state（未安装）'
+    return '签发时间未更新'
   return labels[value] ?? value
 }
 
