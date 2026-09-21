@@ -140,6 +140,10 @@ async function save() {
       <p v-if="config.missingStatePolicy === 'pause' && !config.enabled" role="status" class="m-0 text-cp-sm text-cp-warning-text">
         自动探测已关闭，缺票时需要手动探测并应用 state 才能恢复业务调度。
       </p>
+      <BaseSwitch v-model="config.detectActualModel" label="实际模型检测" show-label :disabled="saving" />
+      <p v-if="config.detectActualModel" class="m-0 text-cp-sm text-cp-text-secondary">
+        同时选择暂停业务调度时，本票已附着的实际模型如果突然变成另一个模型，当前票立即作废，后续业务等待新票。
+      </p>
       <BaseFormItem label="探测中断策略">
         <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }]" aria-label="探测中断策略" :disabled="saving" />
       </BaseFormItem>

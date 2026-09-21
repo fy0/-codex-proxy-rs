@@ -100,6 +100,12 @@ fn rotation_config_bounds_ttl_budget_and_proxy_selection() {
     assert!(config.is_valid());
     assert_eq!(config.ttl_seconds, 240);
     assert_eq!(config.refresh_after_seconds, 120);
+    assert!(!config.detect_actual_model);
+    assert!(!config.revokes_ticket_when_model_detaches());
+    config.detect_actual_model = true;
+    assert!(!config.revokes_ticket_when_model_detaches());
+    config.missing_state_policy = gateway_core::account::MissingTurnStatePolicy::Pause;
+    assert!(config.revokes_ticket_when_model_detaches());
     assert!(config.include_account_proxy);
     assert!(!config.include_direct);
     config.refresh_after_seconds = config.ttl_seconds;
@@ -168,6 +174,7 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
         next_probe_at: None,
         manual_probe_requested_at: None,
         manual_override: false,
+        attached_model: None,
     };
     let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now as u64);
     assert_eq!(

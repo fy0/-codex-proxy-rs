@@ -114,6 +114,18 @@ impl ProviderAccountStore for PgProviderAccountRepository {
         self.install_turn_state_candidate(account, model).await
     }
 
+    async fn observe_installed_model(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+        sent_state: &str,
+        reported_model: &str,
+        revoke_on_change: bool,
+    ) -> Result<bool, CoreStoreError> {
+        self.note_installed_model(account, model, sent_state, reported_model, revoke_on_change)
+            .await
+    }
+
     async fn create_account(&self, account: CoreNewProviderAccount) -> Result<(), CoreStoreError> {
         if account.account.revision().get() != 1 {
             return Err(CoreStoreError::new(CoreStoreErrorKind::InvalidData));

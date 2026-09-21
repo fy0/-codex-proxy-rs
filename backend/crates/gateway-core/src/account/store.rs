@@ -90,6 +90,18 @@ pub trait ProviderAccountStore: Send + Sync {
         Ok(false)
     }
 
+    /// 记录本张已安装票的实际模型。`revoke_on_change` 时，相对已附着模型的变化会清除票正文并保留签发水位。
+    async fn observe_installed_model(
+        &self,
+        _account: &ProviderAccountId,
+        _model: &str,
+        _sent_state: &str,
+        _reported_model: &str,
+        _revoke_on_change: bool,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
     async fn schedule_turn_state(
         &self,
         _account: &ProviderAccountId,

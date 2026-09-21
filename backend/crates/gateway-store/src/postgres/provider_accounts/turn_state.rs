@@ -52,6 +52,7 @@ fn bucket(row: sqlx::postgres::PgRow) -> Result<TurnStateBucket, CoreStoreError>
             .try_get("manual_probe_requested_at")
             .map_err(unavailable)?,
         manual_override: row.try_get("manual_override").map_err(unavailable)?,
+        attached_model: row.try_get("attached_model").map_err(unavailable)?,
         config,
     })
 }
@@ -127,7 +128,7 @@ impl PgProviderAccountRepository {
         &self,
     ) -> Result<Vec<TurnStateBucket>, CoreStoreError> {
         // 清理不依赖是否启用轮换，停用的桶也不能继续持有过期正文。
-        sqlx::query("update account_turn_states set turn_state_override = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then turn_state_override else null end, candidate = case when candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then candidate else null end where (turn_state_override is not null and (current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true) or (candidate is not null and (candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true)")
+        sqlx::query("update account_turn_states set turn_state_override = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then turn_state_override else null end, attached_model = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then attached_model else null end, candidate = case when candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then candidate else null end where (turn_state_override is not null and (current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true) or (candidate is not null and (candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true)")
             .execute(&self.pool).await.map_err(unavailable)?;
         // 观测事件里的令牌正文与槽位正文同寿命，过期即摘除，历史只保留元数据。
         sqlx::query("update account_turn_state_events e set detail = e.detail - 'token' from account_turn_states s where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation' and e.detail ? 'token' and ((e.detail->>'issuedAt')::numeric > 0 and (e.detail->>'issuedAt')::numeric <= extract(epoch from now()) and (e.detail->>'issuedAt')::numeric + (s.config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true")
@@ -275,6 +276,24 @@ impl PgProviderAccountRepository {
         Ok(installed)
     }
 
+    pub(super) async fn note_installed_model(
+        &self,
+        account: &CoreProviderAccountId,
+        model: &str,
+        sent_state: &str,
+        reported_model: &str,
+        revoke_on_change: bool,
+    ) -> Result<bool, CoreStoreError> {
+        if reported_model.is_empty() || reported_model.len() > 256 {
+            return Ok(false);
+        }
+        // SET 表达式看到的是旧行：第一次只记住模型，之后的变化才按开关作废。
+        let revoked = sqlx::query_scalar::<_, bool>("update account_turn_states set turn_state_override = case when $5 and attached_model is not null and lower(attached_model) <> lower($4) then null else turn_state_override end, manual_override = case when $5 and attached_model is not null and lower(attached_model) <> lower($4) then false else manual_override end, next_probe_at = case when $5 and attached_model is not null and lower(attached_model) <> lower($4) then null else next_probe_at end, attached_model = case when $5 and attached_model is not null and lower(attached_model) <> lower($4) then null when attached_model is null then $4 else attached_model end where account_id = $1 and model = $2 and turn_state_override = $3 returning turn_state_override is null")
+            .bind(account.as_str()).bind(model).bind(sent_state).bind(reported_model).bind(revoke_on_change)
+            .fetch_optional(&self.pool).await.map_err(unavailable)?;
+        Ok(revoked.unwrap_or(false))
+    }
+
     pub(super) async fn turn_state_statuses(
         &self,
         account_id: Option<&str>,
@@ -368,7 +387,7 @@ pub(super) async fn install_candidate(
     expected_issued_at: Option<i64>,
 ) -> Result<bool, CoreStoreError> {
     // 手动应用必须匹配用户选中的候选；自动安装仍受轮换开关控制。
-    let row = sqlx::query("update account_turn_states s set turn_state_override = candidate, current_issued_at = candidate_issued_at, current_length = length(candidate), manual_override = ($3::bigint is not null), candidate = null, hunt_attempts = 0, hunt_started_at = null, next_probe_at = candidate_issued_at + (config->>'refreshAfterSeconds')::bigint where account_id = $1 and model = $2 and (($3::bigint is null and (config->>'enabled')::boolean) or candidate_issued_at = $3) and candidate is not null and length(candidate) = (config->>'targetLength')::integer and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at + (config->>'ttlSeconds')::bigint > extract(epoch from now()) and (current_issued_at is null or candidate_issued_at > current_issued_at) and exists (select 1 from provider_accounts a where a.id = s.account_id and a.enabled and a.provider_kind = 'openai' and a.authentication_kind = 'oauth' and a.upstream_account_id is not distinct from s.upstream_account_id and a.upstream_user_id is not distinct from s.upstream_user_id) returning current_issued_at, current_length, candidate_source, candidate_observed_at, candidate_attempts, candidate_hunt_started_at")
+    let row = sqlx::query("update account_turn_states s set attached_model = (select nullif(e.detail->>'reportedModel', '') from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation' and e.detail->>'token' = s.candidate order by e.id desc limit 1), turn_state_override = candidate, current_issued_at = candidate_issued_at, current_length = length(candidate), manual_override = ($3::bigint is not null), candidate = null, hunt_attempts = 0, hunt_started_at = null, next_probe_at = candidate_issued_at + (config->>'refreshAfterSeconds')::bigint where account_id = $1 and model = $2 and (($3::bigint is null and (config->>'enabled')::boolean) or candidate_issued_at = $3) and candidate is not null and length(candidate) = (config->>'targetLength')::integer and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at + (config->>'ttlSeconds')::bigint > extract(epoch from now()) and (current_issued_at is null or candidate_issued_at > current_issued_at) and exists (select 1 from provider_accounts a where a.id = s.account_id and a.enabled and a.provider_kind = 'openai' and a.authentication_kind = 'oauth' and a.upstream_account_id is not distinct from s.upstream_account_id and a.upstream_user_id is not distinct from s.upstream_user_id) returning current_issued_at, current_length, candidate_source, candidate_observed_at, candidate_attempts, candidate_hunt_started_at")
         .bind(account.as_str()).bind(model).bind(expected_issued_at)
         .fetch_optional(&mut **tx).await.map_err(unavailable)?;
     let Some(row) = row else {
@@ -442,7 +461,7 @@ pub(super) async fn install_observed_turn_state(
     {
         return Ok(false);
     }
-    sqlx::query("update account_turn_states set turn_state_override = $3, current_issued_at = $4, current_length = length($3), manual_override = true, candidate = case when candidate_issued_at > $4 then candidate else null end, hunt_attempts = 0, hunt_started_at = null, next_probe_at = $4 + (config->>'refreshAfterSeconds')::bigint where account_id = $1 and model = $2")
+    sqlx::query("update account_turn_states set attached_model = (select nullif(e.detail->>'reportedModel', '') from account_turn_state_events e where e.account_id = account_turn_states.account_id and e.model = account_turn_states.model and e.event_kind = 'observation' and e.detail->>'token' = $3 order by e.id desc limit 1), turn_state_override = $3, current_issued_at = $4, current_length = length($3), manual_override = true, candidate = case when candidate_issued_at > $4 then candidate else null end, hunt_attempts = 0, hunt_started_at = null, next_probe_at = $4 + (config->>'refreshAfterSeconds')::bigint where account_id = $1 and model = $2")
         .bind(account.as_str()).bind(model).bind(&token.value).bind(issued_at)
         .execute(&mut **tx).await.map_err(unavailable)?;
     let installation = TurnStateInstallation {

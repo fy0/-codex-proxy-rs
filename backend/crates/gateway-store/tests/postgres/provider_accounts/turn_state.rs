@@ -1050,3 +1050,100 @@ async fn invalid_history_bodies_are_rejected_and_legacy_extreme_dates_do_not_bre
     );
     database.close().await;
 }
+
+#[tokio::test]
+async fn pause_voids_the_installed_ticket_when_the_reported_model_changes() {
+    let Some(database) = TestDatabase::create("turn_state_detach").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_detach").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "detach".to_owned(),
+    };
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                missing_state_policy: MissingTurnStatePolicy::Pause,
+                detect_actual_model: true,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let issued = Utc::now().timestamp() - 5;
+    let mut seen = observation(id.as_str(), "model-a", 292, issued);
+    seen.reported_model = Some("gpt-5.6-astra".to_owned());
+    repository
+        .observe_turn_state(seen, Some(token(292, issued)))
+        .await
+        .unwrap();
+    assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
+    let installed: String = sqlx::query_scalar(
+        "select turn_state_override from account_turn_states where account_id = $1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let attached: String =
+        sqlx::query_scalar("select attached_model from account_turn_states where account_id = $1")
+            .bind(id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(attached, "gpt-5.6-astra");
+    assert!(
+        !repository
+            .observe_installed_model(&id, "model-a", &installed, "GPT-5.6-ASTRA", true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .observe_installed_model(&id, "model-a", &installed, "gpt-5.6-luna", false)
+            .await
+            .unwrap()
+    );
+    let still: Option<String> = sqlx::query_scalar(
+        "select turn_state_override from account_turn_states where account_id = $1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(still.as_deref(), Some(installed.as_str()));
+    assert!(
+        repository
+            .observe_installed_model(&id, "model-a", &installed, "gpt-5.6-luna", true)
+            .await
+            .unwrap()
+    );
+    let cleared: Option<String> = sqlx::query_scalar(
+        "select turn_state_override from account_turn_states where account_id = $1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(cleared.is_none());
+    let watermark: Option<i64> = sqlx::query_scalar(
+        "select current_issued_at from account_turn_states where account_id = $1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(watermark, Some(issued));
+    database.close().await;
+}

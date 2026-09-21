@@ -98,6 +98,7 @@ impl MemoryAccountStore {
                 next_probe_at: None,
                 manual_probe_requested_at: None,
                 manual_override: false,
+                attached_model: None,
             },
         );
     }
@@ -121,6 +122,7 @@ impl MemoryAccountStore {
         state.current_length = Some(token.value.len());
         state.current = Some(token);
         state.manual_override = manual;
+        state.attached_model = None;
     }
 
     pub(crate) fn request_turn_probe(&self, account: &str, model: &str) {
@@ -405,11 +407,59 @@ impl ProviderAccountStore for MemoryAccountStore {
         let Some(candidate) = installable.then(|| state.candidate.take()).flatten() else {
             return Ok(false);
         };
+        let reported = self
+            .turn_observations
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|item| {
+                item.account_id == account.as_str()
+                    && item.model == model
+                    && item.token.as_deref() == Some(candidate.value.as_str())
+            })
+            .and_then(|item| item.reported_model.clone());
         state.current_issued_at = Some(candidate.issued_at);
         state.current_length = Some(candidate.value.len());
         state.current = Some(candidate);
         state.hunt_attempts = 0;
+        state.attached_model = reported;
         Ok(true)
+    }
+
+    async fn observe_installed_model(
+        &self,
+        account: &ProviderAccountId,
+        model: &str,
+        sent_state: &str,
+        reported_model: &str,
+        revoke_on_change: bool,
+    ) -> Result<bool, StoreError> {
+        if reported_model.is_empty() || reported_model.len() > 256 {
+            return Ok(false);
+        }
+        let mut states = self.turn_states.lock().unwrap();
+        let Some(state) = states.get_mut(&(account.as_str().to_owned(), model.to_owned())) else {
+            return Ok(false);
+        };
+        if state.current.as_ref().map(|token| token.value.as_str()) != Some(sent_state) {
+            return Ok(false);
+        }
+        match state.attached_model.as_deref() {
+            None => {
+                state.attached_model = Some(reported_model.to_owned());
+                Ok(false)
+            }
+            Some(attached) if attached.eq_ignore_ascii_case(reported_model) => Ok(false),
+            Some(_) if revoke_on_change => {
+                state.current = None;
+                state.manual_override = false;
+                state.next_probe_at = None;
+                state.attached_model = None;
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+        }
     }
 
     async fn create_account(&self, input: NewProviderAccount) -> Result<(), StoreError> {

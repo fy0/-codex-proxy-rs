@@ -156,7 +156,7 @@ function averageRetries(bucket: TurnStateStatus) {
   return samples.length ? (samples.reduce((sum, item) => sum + Math.max(0, item.attempts - 1), 0) / samples.length).toFixed(1) : '-'
 }
 function outcome(value: string) {
-  const labels: Record<string, string> = { candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
+  const labels: Record<string, string> = { candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
   if (value === 'reused_state')
     return '相同 state（未续期）'
   if (value === 'not_newer')
@@ -358,6 +358,7 @@ onMounted(async () => {
         <div class="grid gap-1">
           <span :class="businessStatus(row) === 'ready' ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ businessLabel(row) }}</span>
           <span class="text-cp-xs text-cp-text-secondary">无票：{{ row.config.missingStatePolicy === 'pause' ? '暂停业务调度' : '继续调度' }}</span>
+          <span v-if="row.config.detectActualModel" class="text-cp-xs text-cp-text-secondary">实际模型检测{{ row.config.missingStatePolicy === 'pause' ? '：脱离即作废' : '：仅记录' }}</span>
           <span v-if="row.config.missingStatePolicy === 'pause' && !row.config.enabled" class="text-cp-xs text-cp-warning-text">缺票需手动探测并应用</span>
         </div>
       </template>

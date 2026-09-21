@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct TurnStateConfig {
     pub enabled: bool,
     pub missing_state_policy: MissingTurnStatePolicy,
+    /// 暂停业务调度时，已附着的实际模型突然变化则作废当前票。
+    pub detect_actual_model: bool,
     pub target_length: usize,
     pub ttl_seconds: u64,
     pub refresh_after_seconds: u64,
@@ -70,6 +72,7 @@ impl Default for TurnStateConfig {
         Self {
             enabled: false,
             missing_state_policy: MissingTurnStatePolicy::Allow,
+            detect_actual_model: false,
             target_length: 292,
             // 同一张 292 在 191.7 秒时仍被接受，267.1 秒时上游已重新签发。240 秒落在这两次实测之间。
             ttl_seconds: 240,
@@ -123,6 +126,11 @@ impl TurnStateConfig {
             })
             && (self.feishu_webhook_url.is_empty()
                 || valid_feishu_webhook(&self.feishu_webhook_url))
+    }
+
+    /// 实际模型检测只在暂停业务调度时把脱离的票作废，避免继续注入失效票。
+    pub fn revokes_ticket_when_model_detaches(&self) -> bool {
+        self.detect_actual_model && self.missing_state_policy == MissingTurnStatePolicy::Pause
     }
 }
 
@@ -306,6 +314,8 @@ pub struct TurnStateBucket {
     pub next_probe_at: Option<i64>,
     pub manual_probe_requested_at: Option<i64>,
     pub manual_override: bool,
+    /// 本张已安装票最近一次附着的上游实际模型。空表示还没有观测到。
+    pub attached_model: Option<String>,
 }
 
 impl TurnStateBucket {

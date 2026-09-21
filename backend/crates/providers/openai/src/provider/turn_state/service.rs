@@ -210,7 +210,42 @@ impl TurnStateService {
         let candidate = (observation.outcome == "candidate")
             .then_some(token)
             .flatten();
+        let mut revoked = false;
+        if config.detect_actual_model
+            && let Some(reported) = observation.reported_model.clone()
+            && let Some(sent) = request_state.filter(|value| !value.is_empty())
+            && let Ok(account) = ProviderAccountId::new(observation.account_id.clone())
+        {
+            let model = observation.model.clone();
+            match self
+                .store
+                .observe_installed_model(
+                    &account,
+                    &model,
+                    sent,
+                    &reported,
+                    config.revokes_ticket_when_model_detaches(),
+                )
+                .await
+            {
+                Ok(true) => {
+                    observation.outcome = "model_detached".to_owned();
+                    revoked = true;
+                }
+                Ok(false) => {}
+                Err(_) => tracing::warn!(
+                    account_id = observation.account_id,
+                    model = observation.model,
+                    "turn state model observation failed"
+                ),
+            }
+        }
+        let account_id = observation.account_id.clone();
         self.persist(observation, candidate).await;
+        if revoked {
+            // 旧连接里的票已经脱离实际模型，不能继续复用。
+            self.pool.evict_account(&account_id).await;
+        }
     }
 
     async fn persist(&self, observation: TurnStateObservation, candidate: Option<TurnStateToken>) {

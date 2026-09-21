@@ -428,7 +428,7 @@ impl AccountStore for PgAdminAccountStore {
             )
         })?;
         // 保留签发时间水位，阻止同一张旧票被在途响应或后台任务重新安装。
-        let removed = sqlx::query("update account_turn_states set turn_state_override = null, manual_override = false, next_probe_at = null where account_id = $1 and model = $2 and current_issued_at = $3 and turn_state_override is not null")
+        let removed = sqlx::query("update account_turn_states set turn_state_override = null, attached_model = null, manual_override = false, next_probe_at = null where account_id = $1 and model = $2 and current_issued_at = $3 and turn_state_override is not null")
             .bind(account_id.as_str()).bind(model).bind(issued_at)
             .execute(&mut *transaction).await.map_err(|_| {
                 AdminStoreError::new(AdminStoreErrorKind::Unavailable, ENTITY, "turn state removal unavailable")
