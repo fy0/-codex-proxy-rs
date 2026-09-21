@@ -702,12 +702,9 @@ pub(super) fn codex_request_context<'a>(
     }
 }
 
-pub(super) fn build_cookie_header(
-    cookies: &[RuntimeCodexCookie],
+pub(super) fn build_cookie_header<'a>(
+    cookies: impl IntoIterator<Item = &'a RuntimeCodexCookie>,
 ) -> Result<Option<SecretString>, ProviderError> {
-    if cookies.is_empty() {
-        return Ok(None);
-    }
     let mut header = String::new();
     for cookie in cookies {
         let value = cookie.value.expose_secret();
@@ -733,6 +730,9 @@ pub(super) fn build_cookie_header(
                 UpstreamSendState::NotSent,
             ));
         }
+    }
+    if header.is_empty() {
+        return Ok(None);
     }
     Ok(Some(SecretString::from(header)))
 }

@@ -98,12 +98,13 @@ fn all_lengths_are_parseable_without_treating_errors_as_tokens() {
 fn rotation_config_bounds_ttl_budget_and_proxy_selection() {
     let mut config = TurnStateConfig::default();
     assert!(config.is_valid());
-    assert_eq!(config.ttl_seconds, 3600);
+    assert_eq!(config.ttl_seconds, 240);
+    assert_eq!(config.refresh_after_seconds, 120);
     assert!(config.include_account_proxy);
     assert!(!config.include_direct);
     config.refresh_after_seconds = config.ttl_seconds;
     assert!(!config.is_valid());
-    config.refresh_after_seconds = 2100;
+    config.refresh_after_seconds = config.ttl_seconds - 1;
     config.include_account_proxy = false;
     assert!(!config.is_valid());
     config.proxy_ids = vec!["proxy_test".to_owned()];
@@ -213,8 +214,9 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
             .allows(time)
     );
     bucket.upstream_user_id = account.upstream_user_id().map(str::to_owned);
-    assert!(bucket.installed_token(now + 3599).is_some());
-    assert!(bucket.installed_token(now + 3600).is_none());
+    let ttl = i64::try_from(bucket.config.ttl_seconds).unwrap();
+    assert!(bucket.installed_token(now + ttl - 1).is_some());
+    assert!(bucket.installed_token(now + ttl).is_none());
     assert!(bucket.installed_token(now - 1).is_none());
     bucket.current = Some(TurnStateToken::parse(&encoded(now as u64, 233)).unwrap());
     assert!(bucket.installed_token(now).is_none());

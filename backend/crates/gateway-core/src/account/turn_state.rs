@@ -71,8 +71,9 @@ impl Default for TurnStateConfig {
             enabled: false,
             missing_state_policy: MissingTurnStatePolicy::Allow,
             target_length: 292,
-            ttl_seconds: 3600,
-            refresh_after_seconds: 2100,
+            // 2026-09-22 凌晨起，上游对 292 的接受窗口大约只有 240 秒。
+            ttl_seconds: 240,
+            refresh_after_seconds: 120,
             retry_seconds: 30,
             jitter_seconds: 15,
             budget: 40,

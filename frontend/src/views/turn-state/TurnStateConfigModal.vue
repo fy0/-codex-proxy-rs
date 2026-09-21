@@ -143,6 +143,9 @@ async function save() {
       <BaseFormItem label="探测中断策略">
         <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }]" aria-label="探测中断策略" :disabled="saving" />
       </BaseFormItem>
+      <p class="m-0 text-cp-sm text-cp-text-secondary">
+        长度为 292 的 state 目前大约只在签发后 240 秒内可用，并且后续请求必须同时带上该账号可回放的 Cookie。这里的有效期只决定网关何时停止注入。
+      </p>
       <div class="grid grid-cols-2 gap-4 sm:grid-cols-3">
         <BaseFormItem label="目标长度">
           <BaseNumberInput v-model="config.targetLength" label="目标长度" :min="76" :max="4096" :disabled="saving" />

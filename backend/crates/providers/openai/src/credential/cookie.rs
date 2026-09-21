@@ -121,6 +121,17 @@ impl CodexCookiePolicy {
         }
     }
 
+    /// 只有官方 HTTPS 主机才强制探测携带可回放 Cookie；本机联调不在允许域内。
+    pub(crate) fn official_https_host(&self, target: &Url) -> bool {
+        if target.scheme() != "https" {
+            return false;
+        }
+        let Some(host) = target.host_str() else {
+            return false;
+        };
+        normalize_domain(host).is_ok_and(|host| self.is_allowed_domain(&host))
+    }
+
     pub(crate) fn parse_response_headers(
         &self,
         account_id: &str,

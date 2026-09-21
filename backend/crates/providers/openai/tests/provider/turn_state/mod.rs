@@ -159,6 +159,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.headers["chatgpt-account-id"], "upstream-probe");
+        assert!(request.headers.get("cookie").is_none());
         assert_eq!(request.headers["originator"], "test-probe-persona");
         assert_eq!(request.headers["user-agent"], "test-probe-agent/1.0");
         assert_eq!(request.headers["version"], "0.154.0");
