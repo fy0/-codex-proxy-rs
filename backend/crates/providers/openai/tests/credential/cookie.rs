@@ -35,6 +35,18 @@ fn replay_should_respect_host_only_cookie_scope() {
 }
 
 #[test]
+fn official_policy_stores_account_routing_cookies_for_turn_state() {
+    let policy = CodexCookiePolicy::official().expect("official cookie policy");
+    let origin = Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("origin");
+    for name in ["__cflb", "__oai_lb"] {
+        policy
+            .validate_capture(&origin, Some("chatgpt.com"), name, "/")
+            .expect("routing cookie is allowed");
+        assert!(policy.may_replay(&origin, "chatgpt.com", "/", false, true));
+    }
+}
+
+#[test]
 fn replay_should_respect_secure_cookie_attribute() {
     let policy = policy();
 

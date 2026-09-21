@@ -306,7 +306,7 @@ impl TurnStateService {
                 .skip(observation, "access_token_expired_or_unknown")
                 .await;
         }
-        // 官方主机上没有可回放 Cookie 时，292 不能在后续请求中持续，探测直接跳过。
+        // 官方主机上没有可回放的路由 Cookie 时，292 不能稳定落到目标路由，探测直接跳过。
         let cookie_header =
             match probe::session_cookie(&self.endpoint, &credential.cookies, Utc::now()) {
                 probe::SessionCookie::Ready(header) => Some(header),

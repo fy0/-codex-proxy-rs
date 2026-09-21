@@ -49,6 +49,9 @@ impl CodexCookiePolicy {
                 "cf_clearance",
                 "__cf_bm",
                 "_cfuvid",
+                // 打票实测：这两个是账号级路由 Cookie，不和某一张 292 绑定。
+                "__cflb",
+                "__oai_lb",
             ],
             ["chatgpt.com", "openai.com"],
         )

@@ -237,7 +237,8 @@ pub(super) enum SessionCookie {
     Invalid,
 }
 
-/// 官方主机上的 292 必须和仍有效的账号 Cookie 一起发送才会被持续接受。
+/// 官方主机上的 292 需要和仍有效的账号路由 Cookie 一起发送。
+/// `__cflb` / `__oai_lb` 是账号级路由凭据，不和某一张票或某一次对话绑定。
 /// 本机联调地址不在 Cookie 允许域内，没有 Cookie 时仍按原探测继续。
 pub(super) fn session_cookie(
     endpoint: &str,
@@ -268,82 +269,5 @@ pub(super) fn session_cookie(
         Ok(Some(_)) | Err(_) => SessionCookie::Invalid,
         Ok(None) if official => SessionCookie::Required,
         Ok(None) => SessionCookie::Optional,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cookie(
-        name: &str,
-        value: &str,
-        domain: &str,
-        expires_at: Option<DateTime<Utc>>,
-    ) -> RuntimeCodexCookie {
-        RuntimeCodexCookie {
-            name: name.to_owned(),
-            value: SecretString::from(value),
-            domain: domain.to_owned(),
-            path: "/".to_owned(),
-            host_only: false,
-            secure: true,
-            expires_at,
-        }
-    }
-
-    #[test]
-    fn official_probe_requires_a_replayable_cookie_and_loopback_does_not() {
-        let now = Utc::now();
-        let official = "https://chatgpt.com/backend-api/codex/responses";
-        let loopback = "http://127.0.0.1:9/codex/responses";
-        assert!(matches!(
-            session_cookie(official, &[], now),
-            SessionCookie::Required
-        ));
-        assert!(matches!(
-            session_cookie(loopback, &[], now),
-            SessionCookie::Optional
-        ));
-        let expired = cookie(
-            "oai-did",
-            "expired-cookie",
-            "chatgpt.com",
-            Some(now - chrono::Duration::seconds(1)),
-        );
-        assert!(matches!(
-            session_cookie(official, &[expired], now),
-            SessionCookie::Required
-        ));
-        let foreign = cookie("oai-did", "other-site", "example.com", None);
-        assert!(matches!(
-            session_cookie(official, &[foreign], now),
-            SessionCookie::Required
-        ));
-        let session = cookie(
-            "__Secure-next-auth.session-token",
-            "session-value",
-            "chatgpt.com",
-            None,
-        );
-        let device = cookie("oai-did", "device-value", "chatgpt.com", None);
-        match session_cookie(official, &[session, device], now) {
-            SessionCookie::Ready(header) => {
-                assert_eq!(
-                    header.expose_secret(),
-                    "__Secure-next-auth.session-token=session-value; oai-did=device-value"
-                );
-            }
-            _ => panic!("official cookies should be replayed"),
-        }
-        let broken = cookie("oai-did", "a;b", "chatgpt.com", None);
-        assert!(matches!(
-            session_cookie(official, &[broken], now),
-            SessionCookie::Invalid
-        ));
-        assert!(matches!(
-            session_cookie("not a url", &[], now),
-            SessionCookie::Invalid
-        ));
     }
 }

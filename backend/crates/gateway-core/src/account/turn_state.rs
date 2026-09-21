@@ -71,7 +71,7 @@ impl Default for TurnStateConfig {
             enabled: false,
             missing_state_policy: MissingTurnStatePolicy::Allow,
             target_length: 292,
-            // 2026-09-22 凌晨起，上游对 292 的接受窗口大约只有 240 秒。
+            // 同一张 292 在 191.7 秒时仍被接受，267.1 秒时上游已重新签发。240 秒落在这两次实测之间。
             ttl_seconds: 240,
             refresh_after_seconds: 120,
             retry_seconds: 30,
