@@ -690,8 +690,7 @@ fn websocket_connection_profile(headers: &HeaderMap) -> String {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
     })
-    .join("\0");
-    profile
+    .join("\0")
 }
 
 fn routing_cookie_profile(header: Option<&str>) -> String {
