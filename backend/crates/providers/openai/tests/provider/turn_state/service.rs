@@ -117,7 +117,17 @@ fn request_with_state(
         NonZeroU32::new(1).unwrap(),
         SystemTime::now() + Duration::from_secs(30),
         policy,
-        AccountAttemptContext::new(BTreeSet::new(), None, None).with_account_scope(scope),
+        AccountAttemptContext::new(
+            BTreeSet::new(),
+            None,
+            state.map(|_| {
+                gateway_core::engine::ProviderAccountStateOwner::new(
+                    ProviderKind::new("openai").unwrap(),
+                    ProviderAccountId::new(ids[0]).unwrap(),
+                )
+            }),
+        )
+        .with_account_scope(scope),
         None,
         CancellationToken::new(),
     );
