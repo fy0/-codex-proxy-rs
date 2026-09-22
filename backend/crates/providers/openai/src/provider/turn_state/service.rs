@@ -341,18 +341,6 @@ impl TurnStateService {
                 .skip(observation, "access_token_expired_or_unknown")
                 .await;
         }
-        // 官方主机上没有可回放的路由 Cookie 时，292 不能稳定落到目标路由，探测直接跳过。
-        let cookie_header =
-            match probe::session_cookie(&self.endpoint, &credential.cookies, Utc::now()) {
-                probe::SessionCookie::Ready(header) => Some(header),
-                probe::SessionCookie::Optional => None,
-                probe::SessionCookie::Required => {
-                    return self.skip(observation, "cookie_required").await;
-                }
-                probe::SessionCookie::Invalid => {
-                    return self.skip(observation, "cookie_invalid").await;
-                }
-            };
         let Some(upstream_account_id) = account.upstream_account_id() else {
             return self.skip(observation, "missing_account_identity").await;
         };
@@ -430,16 +418,16 @@ impl TurnStateService {
         else {
             return self.skip(observation, "template_error").await;
         };
-        let mut pending = client
+        // 打票请求不能带账号 Cookie。上游见到 Cookie 时不会发放 292。
+        let result = client
             .post(&self.endpoint)
             .headers(request.headers)
             .bearer_auth(secret.access_token.expose_secret())
             .header("chatgpt-account-id", upstream_account_id)
-            .header("content-encoding", "zstd");
-        if let Some(cookie_header) = cookie_header.as_ref() {
-            pending = pending.header("cookie", cookie_header.expose_secret());
-        }
-        let result = pending.body(body).send().await;
+            .header("content-encoding", "zstd")
+            .body(body)
+            .send()
+            .await;
         observation.observed_at = Utc::now().timestamp();
         let mut response = TurnStateResponse {
             status: result

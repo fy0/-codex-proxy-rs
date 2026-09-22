@@ -49,7 +49,7 @@ impl CodexCookiePolicy {
                 "cf_clearance",
                 "__cf_bm",
                 "_cfuvid",
-                // 打票实测：这两个是账号级路由 Cookie，不和某一张 292 绑定。
+                // 业务请求实测：这两个是账号级路由 Cookie，不和某一张 292 绑定。打票请求不回放。
                 "__cflb",
                 "__oai_lb",
             ],
@@ -122,17 +122,6 @@ impl CodexCookiePolicy {
         } else {
             domain_matches(&target_host, domain)
         }
-    }
-
-    /// 只有官方 HTTPS 主机才强制探测携带可回放 Cookie；本机联调不在允许域内。
-    pub(crate) fn official_https_host(&self, target: &Url) -> bool {
-        if target.scheme() != "https" {
-            return false;
-        }
-        let Some(host) = target.host_str() else {
-            return false;
-        };
-        normalize_domain(host).is_ok_and(|host| self.is_allowed_domain(&host))
     }
 
     pub(crate) fn parse_response_headers(
