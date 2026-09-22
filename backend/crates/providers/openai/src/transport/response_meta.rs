@@ -58,7 +58,7 @@ pub(crate) fn reported_model(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-pub(super) fn set_cookie_headers(headers: &HeaderMap) -> Vec<String> {
+pub(crate) fn set_cookie_headers(headers: &HeaderMap) -> Vec<String> {
     headers
         .get_all(SET_COOKIE)
         .iter()

@@ -541,7 +541,8 @@ impl CodexBackendClient {
             .or(request.previous_response_id())?;
         let mut key = CodexWebSocketPoolKey::new(&self.base_url, account_id, conversation_id)
             .with_egress_key(&self.egress_key)
-            .with_connection_profile(connection_profile);
+            .with_connection_profile(connection_profile)
+            .with_routing_cookie(routing_cookie_profile(context.cookie_header));
         if let Some(connection_id) = request.downstream_websocket_connection_id.as_deref() {
             key = key.with_downstream_connection_id(connection_id);
         }
@@ -677,7 +678,7 @@ async fn read_model_catalog_body(response: ReqwestResponse) -> CodexClientResult
 fn websocket_connection_profile(headers: &HeaderMap) -> String {
     // turn-state 在握手头中发送且连接级绑定；纳入画像防止账号覆盖值变更后
     // 复用到携带旧握手状态的池化连接。逐轮值仍由帧 metadata 覆盖。
-    let profile = [
+    [
         "originator",
         "user-agent",
         X_OPENAI_MEMGEN_REQUEST_HEADER,
@@ -690,24 +691,32 @@ fn websocket_connection_profile(headers: &HeaderMap) -> String {
             .unwrap_or_default()
     })
     .join("\0");
-    let routing = headers
-        .get("cookie")
-        .and_then(|value| value.to_str().ok())
-        .map(|header| {
-            header
-                .split(';')
-                .map(str::trim)
-                .filter(|cookie| cookie.starts_with("__oailb=") || cookie.starts_with("__oai_lb="))
-                .collect::<Vec<_>>()
-                .join(";")
-        })
-        .unwrap_or_default();
-    if routing.is_empty() {
-        return profile;
-    }
-    // 只把路由凭证摘要纳入连接画像，调试输出不包含 Cookie 正文。
+    profile
+}
+
+fn routing_cookie_profile(header: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
-    format!("{profile}\0{:x}", Sha256::digest(routing.as_bytes()))
+    let mut digest = Sha256::new();
+    let mut found = false;
+    for cookie in header
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|cookie| cookie.starts_with("__oailb=") || cookie.starts_with("__oai_lb="))
+    {
+        digest.update(cookie.as_bytes());
+        digest.update([0]);
+        found = true;
+    }
+    if !found {
+        return String::new();
+    }
+    // 只保存摘要，调试输出不包含路由凭证正文。
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn http_sse_stream(

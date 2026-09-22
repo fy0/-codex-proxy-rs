@@ -23,6 +23,7 @@ pub struct CodexWebSocketPoolKey {
     account_id: String,
     conversation_id: String,
     connection_profile: String,
+    routing_cookie: String,
     downstream_connection_id: String,
     egress_key: String,
 }
@@ -39,6 +40,7 @@ impl CodexWebSocketPoolKey {
             account_id: account_id.into(),
             conversation_id: conversation_id.into(),
             connection_profile: String::new(),
+            routing_cookie: String::new(),
             downstream_connection_id: String::new(),
             egress_key: String::new(),
         }
@@ -47,6 +49,11 @@ impl CodexWebSocketPoolKey {
     /// 区分实际 WebSocket opening 画像，防止复用旧 UA 或不同握手语义的连接。
     pub(crate) fn with_connection_profile(mut self, connection_profile: impl Into<String>) -> Self {
         self.connection_profile = connection_profile.into();
+        self
+    }
+
+    pub(crate) fn with_routing_cookie(mut self, routing_cookie: String) -> Self {
+        self.routing_cookie = routing_cookie;
         self
     }
 
@@ -78,6 +85,7 @@ impl CodexWebSocketPoolKey {
             self.account_id.as_str(),
             self.conversation_id.as_str(),
             self.connection_profile.as_str(),
+            self.routing_cookie.as_str(),
             self.downstream_connection_id.as_str(),
             self.egress_key.as_str(),
         ])
@@ -88,6 +96,7 @@ impl CodexWebSocketPoolKey {
             && self.account_id == other.account_id
             && self.conversation_id == other.conversation_id
             && self.egress_key == other.egress_key
+            && self.routing_cookie == other.routing_cookie
     }
 }
 

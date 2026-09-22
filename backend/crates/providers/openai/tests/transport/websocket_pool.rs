@@ -2081,3 +2081,59 @@ async fn codex_backend_client_should_discard_pooled_websocket_after_unknown_resp
     assert_eq!(second.websocket_pool_decision.unwrap().kind(), "new");
     assert_eq!(accepted_connections.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn routing_cookie_change_does_not_reuse_connection_local_continuation() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_cookie_local", 1, 0).into(),
+            ))
+            .await
+            .unwrap();
+        tokio::select! {
+            _ = finished => {},
+            message = websocket.next() => panic!("changed routing cookie reused the old pod: {message:?}"),
+        }
+    });
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::new(CodexWebSocketPool::new(Duration::from_mins(1))));
+    let mut request = pooled_websocket_request("cookie-continuation");
+    backend
+        .create_response(
+            &request,
+            CodexRequestContext {
+                cookie_header: Some("__oailb=first-pod"),
+                ..request_context("req_cookie_first", Some("chatgpt-account"))
+            },
+        )
+        .await
+        .unwrap();
+    request.set_previous_response_id(Some("resp_cookie_local".to_owned()));
+    request.previous_response_scope = Some(PreviousResponseScope::ConnectionLocal);
+    let result = timeout(
+        Duration::from_secs(2),
+        backend.create_response(
+            &request,
+            CodexRequestContext {
+                cookie_header: Some("__oailb=second-pod"),
+                ..request_context("req_cookie_second", Some("chatgpt-account"))
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    finish.send(()).unwrap();
+    server.await.unwrap();
+}

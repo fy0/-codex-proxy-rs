@@ -40,6 +40,14 @@ fn strict(enabled: bool) -> TurnStateConfig {
 }
 
 fn request(ids: &[&str], model: &str) -> (ProviderRequest, AttemptContext) {
+    request_with_state(ids, model, None)
+}
+
+fn request_with_state(
+    ids: &[&str],
+    model: &str,
+    state: Option<&str>,
+) -> (ProviderRequest, AttemptContext) {
     let provider = ProviderKind::new("openai").unwrap();
     let policy = AccountSelectionPolicy::new(
         RotationStrategy::Sticky,
@@ -67,6 +75,7 @@ fn request(ids: &[&str], model: &str) -> (ProviderRequest, AttemptContext) {
         "openai",
         json!({
             "model": "public-model", "input": "Hello", "session_id": "ticket-session",
+            "client_metadata": state.map(|state| json!({"x-codex-turn-state":state})).unwrap_or_else(|| json!({})),
         })
         .as_object()
         .unwrap()
@@ -469,7 +478,7 @@ data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"mo
         .mount(&server)
         .await;
     for id in [ACCOUNT, "acct_cookie_other"] {
-        let (input, context) = request(&[id], MODEL);
+        let (input, context) = request_with_state(&[id], MODEL, Some("client-state-preserved"));
         let mut stream = bundle
             .core_provider()
             .execute(input, context)
@@ -483,7 +492,10 @@ data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"mo
     assert_eq!(requests.len(), 2);
     for request in requests {
         assert_eq!(request.headers["cookie"], format!("__oailb={renewed}"));
-        assert!(!request.headers.contains_key("x-codex-turn-state"));
+        assert_eq!(
+            request.headers["x-codex-turn-state"],
+            "client-state-preserved"
+        );
     }
     server.reset().await;
     Mock::given(method("POST"))
