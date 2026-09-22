@@ -1,3 +1,4 @@
+mod cookie_lock;
 mod location;
 mod model_access;
 mod proxy;

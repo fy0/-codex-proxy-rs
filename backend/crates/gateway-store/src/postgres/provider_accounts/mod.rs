@@ -59,6 +59,7 @@ use super::{
 
 mod admin_adapter;
 mod admin_queries;
+mod cookie_lock;
 mod core_adapter;
 mod mapping;
 mod quota_forecast;

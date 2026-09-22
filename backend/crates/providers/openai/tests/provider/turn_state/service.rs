@@ -363,3 +363,153 @@ async fn mapped_model_and_sticky_account_cannot_bypass_expired_bucket() {
     }
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn cookie_only_probe_renews_and_shares_across_accounts_without_state_override() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let server = MockServer::start().await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    seed_named(&store, false, "acct_cookie_other").await;
+    for id in [ACCOUNT, "acct_cookie_other"] {
+        store.seed_turn_state(
+            id,
+            MODEL,
+            TurnStateConfig {
+                cookie_lock_enabled: true,
+                missing_state_policy: MissingTurnStatePolicy::Pause,
+                ..TurnStateConfig::default()
+            },
+        );
+    }
+    let now = Utc::now().timestamp();
+    let jwt = |issued, expires| {
+        format!("{}.{}.c2ln", URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256"}"#), URL_SAFE_NO_PAD.encode(json!({"host":"chat.gateway.unified-185.api.openai.com","iat":issued,"exp":expires}).to_string()))
+    };
+    let first = jwt(now - 3500, now + 100);
+    let response_body = |model: &str| {
+        format!("event: response.created
+data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"model\":\"{model}\",\"status\":\"in_progress\",\"output\":[]}}}}
+
+{COMPLETED}")
+    };
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", format!("__oailb={first}; Path=/; HttpOnly"))
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(response_body(MODEL)),
+        )
+        .mount(&server)
+        .await;
+    let runtime = tempfile::tempdir().unwrap();
+    let mut config = OpenAiConfig::default();
+    config.api.base_url = server.uri();
+    config.resolve_and_validate(runtime.path()).unwrap();
+    let mut bundle =
+        provider_openai::initialize(config, turn_state_provider_ports(Arc::clone(&store)))
+            .await
+            .unwrap();
+    let registration = bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|item| match item {
+            WorkerContribution::Registration(item) if item.id.owner() == "openai-turn-state" => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let WorkerRunnable::Scheduled { task, .. } = registration.runnable else {
+        panic!("scheduled worker")
+    };
+    let cycle = || WorkerCycleContext::new(registration.id.clone(), None, CancellationToken::new());
+    task.run_cycle(cycle()).await.unwrap();
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.headers.contains_key("cookie"))
+    );
+    assert_eq!(store.routing_cookies().await.unwrap().len(), 1);
+    server.reset().await;
+    let renewed = jwt(now, now + 3600);
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", format!("__oailb={renewed}; Path=/; HttpOnly"))
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(response_body(MODEL)),
+        )
+        .mount(&server)
+        .await;
+    // 手动探测跳过节流，仍携带临期 Cookie 完成续约。
+    store.request_turn_probe(ACCOUNT, MODEL);
+    task.run_cycle(cycle()).await.unwrap();
+    assert_eq!(
+        server.received_requests().await.unwrap()[0].headers["cookie"],
+        format!("__oailb={first}")
+    );
+    assert_eq!(
+        store.routing_cookies().await.unwrap()[0].expires_at,
+        now + 3600
+    );
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(response_body(MODEL)),
+        )
+        .mount(&server)
+        .await;
+    for id in [ACCOUNT, "acct_cookie_other"] {
+        let (input, context) = request(&[id], MODEL);
+        let mut stream = bundle
+            .core_provider()
+            .execute(input, context)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert_eq!(request.headers["cookie"], format!("__oailb={renewed}"));
+        assert!(!request.headers.contains_key("x-codex-turn-state"));
+    }
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(response_body("gpt-5.6-luna")),
+        )
+        .mount(&server)
+        .await;
+    let (input, context) = request(&[ACCOUNT], MODEL);
+    let mut stream = bundle
+        .core_provider()
+        .execute(input, context)
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    let (input, context) = request(&["acct_cookie_other"], MODEL);
+    assert!(
+        bundle
+            .core_provider()
+            .execute(input, context)
+            .await
+            .is_err()
+    );
+}

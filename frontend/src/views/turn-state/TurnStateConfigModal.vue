@@ -133,31 +133,39 @@ async function save() {
           <BaseInput v-model="model" :disabled="saving || existing" maxlength="256" aria-label="模型" />
         </BaseFormItem>
       </div>
-      <BaseSwitch v-model="config.enabled" label="启用自动探测" show-label :disabled="saving" />
+      <BaseSwitch v-model="config.enabled" label="state 自动探测与替换" show-label :disabled="saving" />
+      <BaseSwitch v-model="config.cookieLockEnabled" label="Cookie 锁定与自动探测" show-label :disabled="saving" />
+      <p v-if="config.cookieLockEnabled" class="m-0 text-cp-sm text-cp-text-secondary">
+        可单独开启。按响应实际模型选择共享路由 Cookie，过期、模型不符或上游切换 pod 后重新采集；state 自动替换关闭时保留客户端原值。
+      </p>
+      <BaseFormItem v-if="config.cookieLockEnabled" label="Cookie 提前续约（秒）">
+        <BaseNumberInput v-model="config.cookieRefreshBeforeSeconds" label="Cookie 提前续约" :min="30" :max="1800" :disabled="saving" />
+        <span class="text-cp-xs text-cp-text-secondary">以 Cookie 签发的到期时间为准；到期前携带当前 Cookie 探测续约。只有上游返回新有效期才算续约。</span>
+      </BaseFormItem>
       <BaseFormItem label="无票调度策略">
         <BaseSelect v-model="config.missingStatePolicy" :options="[{ label: '继续调度', value: 'allow' }, { label: '暂停业务调度', value: 'pause' }]" aria-label="无票调度策略" :disabled="saving" />
       </BaseFormItem>
-      <p v-if="config.missingStatePolicy === 'pause' && !config.enabled" role="status" class="m-0 text-cp-sm text-cp-warning-text">
+      <p v-if="config.missingStatePolicy === 'pause' && !config.enabled && !config.cookieLockEnabled" role="status" class="m-0 text-cp-sm text-cp-warning-text">
         自动探测已关闭，缺票时需要手动探测并应用 state 才能恢复业务调度。
       </p>
-      <BaseSwitch v-model="config.detectActualModel" label="实际模型检测" show-label :disabled="saving" />
-      <p v-if="config.detectActualModel" class="m-0 text-cp-sm text-cp-text-secondary">
+      <BaseSwitch v-if="!config.cookieLockEnabled" v-model="config.detectActualModel" label="实际模型检测" show-label :disabled="saving" />
+      <p v-if="config.detectActualModel && !config.cookieLockEnabled" class="m-0 text-cp-sm text-cp-text-secondary">
         同时选择暂停业务调度时，本票已附着的实际模型如果突然变成另一个模型，当前票立即作废，后续业务等待新票。
       </p>
-      <BaseFormItem label="探测中断策略">
+      <BaseFormItem v-if="!config.cookieLockEnabled" label="探测中断策略">
         <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }]" aria-label="探测中断策略" :disabled="saving" />
       </BaseFormItem>
       <p class="m-0 text-cp-sm text-cp-text-secondary">
-        同一张 292 在约 192 秒时仍可用，约 267 秒时上游会重新签发。请求要带上仍有效的账号路由 Cookie（__cflb、__oai_lb），Cookie 不和某一张票绑定。这里的有效期只决定网关何时停止注入。
+        {{ config.cookieLockEnabled ? 'Cookie 探测读取 response.created 的模型声明后中断，只有与所选模型一致的 pod 才会使用。池为空时遵循无票调度策略。' : 'state 按目标长度筛选，有效期只决定网关何时停止注入；实际是否接受由上游决定。' }}
       </p>
       <div class="grid grid-cols-2 gap-4 sm:grid-cols-3">
-        <BaseFormItem label="目标长度">
+        <BaseFormItem v-if="!config.cookieLockEnabled" label="目标长度">
           <BaseNumberInput v-model="config.targetLength" label="目标长度" :min="76" :max="4096" :disabled="saving" />
         </BaseFormItem>
-        <BaseFormItem label="state 有效期（秒）">
+        <BaseFormItem v-if="!config.cookieLockEnabled" label="state 有效期（秒）">
           <BaseNumberInput v-model="config.ttlSeconds" label="state 有效期" :min="60" :max="3600" :step="60" :disabled="saving" />
         </BaseFormItem>
-        <BaseFormItem label="轮换龄（秒）">
+        <BaseFormItem v-if="!config.cookieLockEnabled" label="轮换龄（秒）">
           <BaseNumberInput v-model="config.refreshAfterSeconds" label="轮换龄" :min="30" :max="3599" :step="60" :disabled="saving" />
         </BaseFormItem>
         <BaseFormItem label="重试间隔（秒）">
@@ -204,7 +212,7 @@ async function save() {
           <span v-if="preview" class="text-cp-xs text-cp-text-secondary">version 请求头：{{ preview.version }} · 探测日期：{{ preview.currentDate }}（{{ preview.timezone }}）</span>
         </div>
       </div>
-      <BaseFormItem label="飞书机器人 Webhook">
+      <BaseFormItem v-if="!config.cookieLockEnabled" label="飞书机器人 Webhook">
         <!-- URL 保持遮罩，但不用 password 类型，避免浏览器把前面的 UA 识别为登录账号。 -->
         <BaseInput v-model="config.feishuWebhookUrl" type="url" name="turn-state-notification-endpoint" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore :spellcheck="false" :class="{ '[&_input]:[-webkit-text-security:disc]': !showWebhook }" aria-label="飞书机器人 Webhook" placeholder="留空关闭通知" maxlength="512" :disabled="saving">
           <template #suffix>

@@ -245,6 +245,10 @@ impl CodexCanonicalDecoder {
         }
     }
 
+    pub(crate) fn body_response_model(&self) -> Option<&str> {
+        self.response_model.model()
+    }
+
     /// 官方服务端报告优先；缺少报告时仅使用正文明确声明，不使用请求兜底值。
     #[must_use]
     pub fn response_model(&self) -> Option<&str> {

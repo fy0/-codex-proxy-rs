@@ -24,7 +24,7 @@ pub(crate) struct TurnStateService {
     pub(super) store: Arc<dyn ProviderAccountStore>,
     repository: CodexCredentialRepository,
     profile: CodexWireProfileState,
-    endpoint: String,
+    pub(super) endpoint: String,
     instructions: String,
     pool: Arc<CodexWebSocketPool>,
 }
@@ -63,7 +63,12 @@ impl TurnStateService {
         model: &str,
     ) -> Option<TurnStateBucket> {
         match self.store.turn_state_bucket(account, model).await {
-            Ok(bucket) => bucket,
+            Ok(bucket) => bucket.map(|mut bucket| {
+                bucket
+                    .routing_cookies
+                    .retain(|cookie| cookie.origin == self.endpoint);
+                bucket
+            }),
             Err(_) => {
                 tracing::warn!(
                     account_id = account.as_str(),
@@ -108,6 +113,9 @@ impl TurnStateService {
                         .max(bucket.candidate.as_ref().map(|token| token.issued_at))
                 });
                 let config = bucket.map(|bucket| bucket.config).unwrap_or_default();
+                if config.cookie_lock_enabled && !config.enabled {
+                    return;
+                }
                 let observation = TurnStateObservation {
                     observation_id: None,
                     is_installed: false,
@@ -128,6 +136,8 @@ impl TurnStateService {
                     token_length: None,
                     issued_at: None,
                     reported_model: None,
+                    oailb_host: None,
+                    cookie_expires_at: None,
                     token: None,
                     has_token: false,
                     egress,
@@ -248,7 +258,11 @@ impl TurnStateService {
         }
     }
 
-    async fn persist(&self, observation: TurnStateObservation, candidate: Option<TurnStateToken>) {
+    pub(super) async fn persist(
+        &self,
+        observation: TurnStateObservation,
+        candidate: Option<TurnStateToken>,
+    ) {
         // 是否记录由存储在同一事务内按最新开关判断，避免停用后仍输出观察日志。
         if self
             .store
@@ -306,6 +320,8 @@ impl TurnStateService {
             token_length: None,
             issued_at: None,
             reported_model: None,
+            oailb_host: None,
+            cookie_expires_at: None,
             token: None,
             has_token: false,
             egress: "none".to_owned(),
@@ -380,11 +396,12 @@ impl TurnStateService {
         observation.shape = Some(request.shape.to_owned());
         observation.effort = Some(request.effort.to_owned());
         observation.probe_id = Some(request.id);
-        let read_output = match bucket.config.stop_strategy {
-            TurnStateStopStrategy::Headers => false,
-            TurnStateStopStrategy::FirstOutput => true,
-            TurnStateStopStrategy::Mixed => probe::random_index(2) == 1,
-        };
+        let read_output = bucket.config.cookie_lock_enabled
+            || match bucket.config.stop_strategy {
+                TurnStateStopStrategy::Headers => false,
+                TurnStateStopStrategy::FirstOutput => true,
+                TurnStateStopStrategy::Mixed => probe::random_index(2) == 1,
+            };
         observation.stop_mode = Some(
             if read_output {
                 "first_output"
@@ -418,16 +435,30 @@ impl TurnStateService {
         else {
             return self.skip(observation, "template_error").await;
         };
-        // 打票请求不能带账号 Cookie。上游见到 Cookie 时不会发放 292。
-        let result = client
+        // state 探测保持裸请求；Cookie 续约只携带池内路由凭证。
+        let sent_cookie = bucket
+            .config
+            .cookie_lock_enabled
+            .then(|| bucket.renewal_cookie(Utc::now().timestamp()))
+            .flatten()
+            .filter(|cookie| cookie.origin == self.endpoint);
+        let request_started_at = Utc::now().timestamp_millis();
+        let mut outbound = client
             .post(&self.endpoint)
             .headers(request.headers)
             .bearer_auth(secret.access_token.expose_secret())
             .header("chatgpt-account-id", upstream_account_id)
             .header("content-encoding", "zstd")
-            .body(body)
-            .send()
-            .await;
+            .body(body);
+        if let Some(cookie) = sent_cookie {
+            outbound = outbound.header("cookie", cookie.header());
+        }
+        let result = outbound.send().await;
+        let cookie_headers = result
+            .as_ref()
+            .ok()
+            .map(|response| crate::transport::response_meta::set_cookie_headers(response.headers()))
+            .unwrap_or_default();
         observation.observed_at = Utc::now().timestamp();
         let mut response = TurnStateResponse {
             status: result
@@ -449,16 +480,18 @@ impl TurnStateService {
         // 只在明确选择回应策略时读取有界 SSE，任何策略都不保留响应正文。
         // 头块未声明模型时，流内事件的模型声明补进同一份观测。
         let mut body_model: Option<String> = None;
+        let mut created_model = None;
         observation.stop_reason = Some(
             match result {
                 Ok(upstream) if read_output && upstream.status().is_success() => {
                     match tokio::time::timeout(
                         Duration::from_secs(30),
-                        probe::wait_for_output(upstream),
+                        probe::wait_for_output(upstream, bucket.config.cookie_lock_enabled),
                     )
                     .await
                     {
                         Ok(output) => {
+                            created_model = output.created_model;
                             body_model = output.reported_model;
                             output.reason
                         }
@@ -475,6 +508,58 @@ impl TurnStateService {
         }
         response.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         drop(client);
+        if bucket.config.cookie_lock_enabled {
+            let successful = response
+                .status
+                .is_some_and(|status| (200..300).contains(&status));
+            let (cookie, deleted) = if successful {
+                self.observe_cookie(
+                    &cookie_headers,
+                    sent_cookie,
+                    created_model.as_deref(),
+                    request_started_at,
+                )
+                .await
+            } else {
+                (None, false)
+            };
+            observation.http_status = response.status;
+            observation.elapsed_ms = response.elapsed_ms;
+            observation.response_source = Some("response_created".to_owned());
+
+            observation.oailb_host = cookie.as_ref().map(|cookie| cookie.pod.clone());
+            observation.cookie_expires_at = cookie.as_ref().map(|cookie| cookie.expires_at);
+            let usable = !deleted
+                && cookie
+                    .as_ref()
+                    .is_some_and(|cookie| cookie.is_usable(&bucket.model, Utc::now().timestamp()))
+                && created_model
+                    .as_deref()
+                    .is_some_and(|model| model.eq_ignore_ascii_case(&bucket.model));
+            observation.outcome = if response.transport_error {
+                "transport_error"
+            } else if !successful {
+                "http_error"
+            } else if deleted {
+                "cookie_deleted"
+            } else if created_model.is_none() {
+                "missing_model"
+            } else if cookie.is_none() {
+                "missing_cookie"
+            } else if usable {
+                "cookie_ready"
+            } else {
+                "cookie_model_mismatch"
+            }
+            .to_owned();
+            observation.reported_model = created_model;
+            self.persist(observation, None).await;
+            return if usable {
+                ProbeOutcome::Installed
+            } else {
+                ProbeOutcome::Miss
+            };
+        }
         let latest_issued_at = bucket
             .current_issued_at
             .max(bucket.candidate.as_ref().map(|token| token.issued_at));

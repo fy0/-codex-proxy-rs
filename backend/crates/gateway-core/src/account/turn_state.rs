@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct TurnStateConfig {
     pub enabled: bool,
+    pub cookie_lock_enabled: bool,
+    pub cookie_refresh_before_seconds: u64,
     pub missing_state_policy: MissingTurnStatePolicy,
     /// 暂停业务调度时，已附着的实际模型突然变化则作废当前票。
     pub detect_actual_model: bool,
@@ -71,6 +73,8 @@ impl Default for TurnStateConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            cookie_lock_enabled: false,
+            cookie_refresh_before_seconds: 300,
             missing_state_policy: MissingTurnStatePolicy::Allow,
             detect_actual_model: false,
             target_length: 292,
@@ -97,7 +101,8 @@ impl Default for TurnStateConfig {
 
 impl TurnStateConfig {
     pub fn is_valid(&self) -> bool {
-        (76..=4096).contains(&self.target_length)
+        (30..=1800).contains(&self.cookie_refresh_before_seconds)
+            && (76..=4096).contains(&self.target_length)
             && (60..=3600).contains(&self.ttl_seconds)
             && (30..self.ttl_seconds).contains(&self.refresh_after_seconds)
             && (1..=3600).contains(&self.retry_seconds)
@@ -240,6 +245,10 @@ pub struct TurnStateObservation {
     /// 上游在同一响应声明的实际模型；与令牌长度一样是观测事实，不代表生效模型。
     #[serde(default)]
     pub reported_model: Option<String>,
+    #[serde(default)]
+    pub oailb_host: Option<String>,
+    #[serde(default)]
+    pub cookie_expires_at: Option<i64>,
     /// 有效信封正文随观测行持久化；状态查询剥离正文，操作使用观测 ID 精确定位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -306,6 +315,7 @@ pub struct TurnStateBucket {
     pub upstream_user_id: Option<String>,
     pub model: String,
     pub config: TurnStateConfig,
+    pub routing_cookies: Vec<super::RoutingCookie>,
     pub current: Option<TurnStateToken>,
     pub current_issued_at: Option<i64>,
     pub current_length: Option<usize>,
@@ -319,6 +329,27 @@ pub struct TurnStateBucket {
 }
 
 impl TurnStateBucket {
+    pub fn routing_cookie(&self, now: i64) -> Option<&super::RoutingCookie> {
+        self.routing_cookies
+            .iter()
+            .filter(|cookie| cookie.is_usable(&self.model, now))
+            .max_by_key(|cookie| (cookie.expires_at, cookie.observed_at))
+    }
+
+    pub fn renewal_cookie(&self, now: i64) -> Option<&super::RoutingCookie> {
+        self.routing_cookies
+            .iter()
+            .filter(|cookie| {
+                cookie.is_usable(&self.model, now)
+                    && cookie.expires_at <= now + self.config.cookie_refresh_before_seconds as i64
+            })
+            .min_by_key(|cookie| cookie.expires_at)
+    }
+
+    pub fn cookie_renewal_due(&self, now: i64) -> bool {
+        self.renewal_cookie(now).is_some()
+    }
+
     /// 已安装正文才是票，候选及账号级通用覆盖不能满足模型桶的要求。
     pub fn installed_token(&self, now: i64) -> Option<&TurnStateToken> {
         self.current.as_ref().filter(|token| {
@@ -346,6 +377,16 @@ impl TurnStateBucket {
     ) -> TurnStateAvailability {
         if self.config.missing_state_policy == MissingTurnStatePolicy::Allow {
             return TurnStateAvailability::Optional;
+        }
+        if self.config.cookie_lock_enabled {
+            let expires_at = self
+                .routing_cookie(now)
+                .filter(|_| self.matches_account(account, model))
+                .and_then(|cookie| {
+                    std::time::UNIX_EPOCH
+                        .checked_add(std::time::Duration::from_secs(cookie.expires_at as u64))
+                });
+            return TurnStateAvailability::Required { expires_at };
         }
         let expires_at = self
             .installed_token(now)
@@ -379,6 +420,8 @@ pub struct TurnStateStatus {
     pub age_seconds: Option<i64>,
     pub active: bool,
     pub has_installed_state: bool,
+    pub routing_cookie: Option<super::RoutingCookieStatus>,
+    pub cookie_pool: Vec<super::RoutingCookieStatus>,
     pub business_status: TurnStateBusinessStatus,
     pub account_enabled: bool,
     pub hunt_attempts: u64,

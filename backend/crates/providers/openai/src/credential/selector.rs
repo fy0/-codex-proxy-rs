@@ -444,6 +444,11 @@ impl CodexCredentialSelector {
             } else {
                 HashMap::new()
             };
+            for bucket in turn_states.values_mut() {
+                bucket
+                    .routing_cookies
+                    .retain(|cookie| cookie.origin == request.request_url.as_str());
+            }
             let scheduling = self
                 .leases
                 .load_state(

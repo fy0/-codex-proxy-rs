@@ -80,7 +80,7 @@ const columns = defineTableColumns<TurnStateStatus>([
   { key: 'accountName', label: '账号 / 模型', kind: 'identity', size: '3xl' },
   { key: 'enabled', label: '账号 / 自动探测', kind: 'status', size: 'lg' },
   { key: 'businessStatus', label: '业务调度', kind: 'status', size: 'xl' },
-  { key: 'state', label: '当前 state', kind: 'custom', size: 'lg' },
+  { key: 'state', label: '当前路由票', kind: 'custom', size: 'lg' },
   { key: 'recentProbe', label: '最近探测', kind: 'custom', size: 'lg' },
   { key: 'nextProbeAt', label: '预计下次探测', kind: 'datetime', format: (value, row) => row.manualProbeRequestedAt != null ? '手动探测待执行' : value !== null && Number(value) <= now.value ? '即将开始' : date(value as number | null) },
   { key: 'actions', label: '操作', kind: 'actions', size: 'xl' },
@@ -93,6 +93,8 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'probeTrigger', label: '触发方式', kind: 'text', size: 'sm', format: value => value === 'manual' ? '手动' : value === 'scheduled' ? '自动' : '-' },
   { key: 'httpStatus', label: 'HTTP', kind: 'numeric', size: 'sm' },
   { key: 'tokenLength', label: '实际长度', kind: 'numeric', size: 'sm' },
+  { key: 'oailbHost', label: 'Cookie pod', kind: 'text', size: '3xl', format: value => value ?? '-' },
+  { key: 'cookieExpiresAt', label: 'Cookie 到期', kind: 'datetime', format: value => date(value as number | null) },
   { key: 'reportedModel', label: '上游模型', kind: 'text', size: 'lg', format: value => value ?? '-' },
   { key: 'egress', label: '出口', kind: 'text' },
   { key: 'shape', label: 'Shape', kind: 'text', size: 'sm' },
@@ -123,6 +125,8 @@ function age(value: number | null) {
   return value === null ? '-' : `${Math.floor(value / 60)} 分 ${value % 60} 秒`
 }
 function expiresAt(bucket: TurnStateStatus) {
+  if (bucket.config.cookieLockEnabled)
+    return bucket.routingCookie?.expiresAt ?? null
   return bucket.issuedAt === null ? null : bucket.issuedAt + bucket.config.ttlSeconds
 }
 function expired(bucket: TurnStateStatus) {
@@ -137,7 +141,7 @@ function businessStatus(bucket: TurnStateStatus) {
   return bucket.businessStatus
 }
 function businessLabel(bucket: TurnStateStatus) {
-  const labels: Record<TurnStateStatus['businessStatus'], string> = { ready: '正常调度', manual_disabled: '手动停用', waiting_for_state: '等待 state', model_denied: '模型权限禁止', quota_exhausted: '额度耗尽', rate_limited: '限流 / 冷却中', account_error: '账号不可用' }
+  const labels: Record<TurnStateStatus['businessStatus'], string> = { ready: '正常调度', manual_disabled: '手动停用', waiting_for_state: bucket.config.cookieLockEnabled ? '等待 Cookie' : '等待 state', model_denied: '模型权限禁止', quota_exhausted: '额度耗尽', rate_limited: '限流 / 冷却中', account_error: '账号不可用' }
   return labels[businessStatus(bucket)]
 }
 function recentProbe(bucket: TurnStateStatus) {
@@ -148,7 +152,7 @@ function requestStateSource(value: string | null) {
   return value ? labels[value] ?? value : '未记录'
 }
 function responseSource(value: string | null) {
-  const labels: Record<string, string> = { http_headers: 'HTTP 响应头', websocket_start: 'WS 响应起始', websocket_metadata: 'WS 元数据' }
+  const labels: Record<string, string> = { http_headers: 'HTTP 响应头', websocket_start: 'WS 响应起始', websocket_metadata: 'WS 元数据', response_created: '响应模型声明' }
   return value ? labels[value] ?? value : '未记录'
 }
 function averageRetries(bucket: TurnStateStatus) {
@@ -156,7 +160,7 @@ function averageRetries(bucket: TurnStateStatus) {
   return samples.length ? (samples.reduce((sum, item) => sum + Math.max(0, item.attempts - 1), 0) / samples.length).toFixed(1) : '-'
 }
 function outcome(value: string) {
-  const labels: Record<string, string> = { candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
+  const labels: Record<string, string> = { cookie_ready: 'Cookie 可用', cookie_model_mismatch: 'pod 模型不符', missing_cookie: '未获得路由 Cookie', missing_model: '缺少模型声明', cookie_deleted: 'Cookie 已失效', candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
   if (value === 'reused_state')
     return '相同 state（未续期）'
   if (value === 'not_newer')
@@ -187,6 +191,8 @@ async function load() {
 }
 
 function managesInjection(bucket: TurnStateStatus) {
+  if (bucket.config.cookieLockEnabled && !bucket.config.enabled)
+    return false
   return bucket.config.enabled || bucket.manualOverride || bucket.issuedAt !== null || bucket.config.missingStatePolicy === 'pause'
 }
 function hasAccountOverride(bucket: TurnStateStatus) {
@@ -351,15 +357,15 @@ onMounted(async () => {
       <template #enabled="{ row }">
         <div class="grid gap-1">
           <span :class="row.accountEnabled ? 'text-cp-text' : 'text-cp-warning-text'">账号：{{ row.accountEnabled ? '手动启用' : '手动停用' }}</span>
-          <span class="text-cp-xs text-cp-text-secondary">自动探测：{{ row.config.enabled ? '已开启' : '已关闭' }}</span>
+          <span class="text-cp-xs text-cp-text-secondary">自动探测：{{ row.config.cookieLockEnabled ? 'Cookie 锁定' : row.config.enabled ? 'state 替换' : '已关闭' }}</span>
         </div>
       </template>
       <template #businessStatus="{ row }">
         <div class="grid gap-1">
           <span :class="businessStatus(row) === 'ready' ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ businessLabel(row) }}</span>
           <span class="text-cp-xs text-cp-text-secondary">无票：{{ row.config.missingStatePolicy === 'pause' ? '暂停业务调度' : '继续调度' }}</span>
-          <span v-if="row.config.detectActualModel" class="text-cp-xs text-cp-text-secondary">实际模型检测{{ row.config.missingStatePolicy === 'pause' ? '：脱离即作废' : '：仅记录' }}</span>
-          <span v-if="row.config.missingStatePolicy === 'pause' && !row.config.enabled" class="text-cp-xs text-cp-warning-text">缺票需手动探测并应用</span>
+          <span v-if="row.config.detectActualModel && !row.config.cookieLockEnabled" class="text-cp-xs text-cp-text-secondary">实际模型检测{{ row.config.missingStatePolicy === 'pause' ? '：脱离即作废' : '：仅记录' }}</span>
+          <span v-if="row.config.missingStatePolicy === 'pause' && !row.config.enabled && !row.config.cookieLockEnabled" class="text-cp-xs text-cp-warning-text">缺票需手动探测并应用</span>
         </div>
       </template>
       <template #recentProbe="{ row }">
@@ -370,7 +376,12 @@ onMounted(async () => {
         <span v-else class="text-cp-text-secondary">暂无探测</span>
       </template>
       <template #state="{ row }">
-        <div class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}\n到期时间：${date(expiresAt(row))}`">
+        <div v-if="row.config.cookieLockEnabled" class="grid gap-1">
+          <span :class="row.active && !expired(row) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.routingCookie && !expired(row) ? 'Cookie 使用中' : '等待可用 Cookie' }}</span>
+          <span class="break-all text-cp-xs">{{ row.routingCookie?.pod ?? '-' }}</span>
+          <span class="text-cp-xs text-cp-text-secondary">到期：{{ date(row.routingCookie?.expiresAt ?? null) }}</span>
+        </div>
+        <div v-else class="grid gap-1" :title="`签发时间：${date(row.issuedAt)}\n到期时间：${date(expiresAt(row))}`">
           <span :class="row.active && !expired(row) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ expired(row) ? `${row.tokenLength} · 已过期` : row.active ? `${row.tokenLength} · 使用中` : row.tokenLength ? `${row.tokenLength} · 未使用` : '尚未获取' }}</span>
           <span class="text-cp-xs text-cp-text-secondary">{{ expired(row) ? '改写已解除' : row.active ? age(row.ageSeconds) : row.config.enabled ? `已尝试 ${row.huntAttempts} 次` : '仅被动采集' }}</span>
           <span v-if="row.candidateIssuedAt != null" class="text-cp-xs" :class="canApplyState(row, row.candidateIssuedAt, row.candidateLength) ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ row.candidateLength }} · {{ canApplyState(row, row.candidateIssuedAt, row.candidateLength) ? '候选可应用' : '候选（不可应用）' }}</span>
@@ -410,7 +421,7 @@ onMounted(async () => {
         </h2>
         <BaseSelect v-model="selectedKey" :options="bucketOptions" class="w-full sm:w-80" aria-label="查看账号与模型" />
       </div>
-      <dl class="m-0 flex flex-wrap gap-x-8 gap-y-3 text-cp-sm">
+      <dl v-if="!selection.config.cookieLockEnabled" class="m-0 flex flex-wrap gap-x-8 gap-y-3 text-cp-sm">
         <div class="min-w-0 basis-full">
           <dt class="text-cp-text-secondary">
             x-codex-turn-state 生效来源
@@ -480,6 +491,15 @@ onMounted(async () => {
           </dd>
         </div>
       </dl>
+      <div v-if="selection.config.cookieLockEnabled" class="grid gap-2 text-cp-sm">
+        <h3 class="m-0 font-semibold">共享 Cookie 池</h3>
+        <p v-if="!selection.cookiePool?.length" class="m-0 text-cp-text-secondary">尚未采集到路由 Cookie，将按已配置出口继续探测。</p>
+        <div v-for="cookie in selection.cookiePool" :key="cookie.pod" class="flex flex-wrap gap-x-4 gap-y-1">
+          <span class="break-all">{{ cookie.pod }}</span>
+          <span :class="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ cookie.reportedModel || '未确认模型' }}</span>
+          <span class="text-cp-text-secondary">到期 {{ date(cookie.expiresAt) }}</span>
+        </div>
+      </div>
       <BaseSegmented v-model="tab" label="记录类型" class="w-full sm:w-96" :options="[{ label: '主动探测', value: 'probe' }, { label: '被动采集', value: 'passive' }, { label: '安装历史', value: 'history' }]" />
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
       <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">

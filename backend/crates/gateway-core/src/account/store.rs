@@ -15,6 +15,17 @@ use super::{
 /// `provider_accounts` 的数据库中立端口。
 #[async_trait]
 pub trait ProviderAccountStore: Send + Sync {
+    async fn routing_cookies(&self) -> Result<Vec<super::RoutingCookie>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn observe_routing_cookie(
+        &self,
+        _observation: super::RoutingCookieObservation,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::new(crate::error::StoreErrorKind::Unavailable))
+    }
+
     async fn claim_turn_state_notifications(
         &self,
     ) -> Result<Vec<super::TurnStateNotification>, StoreError> {

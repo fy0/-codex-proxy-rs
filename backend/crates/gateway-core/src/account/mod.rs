@@ -1,5 +1,7 @@
 //! Provider 账号领域、持久化端口与同一 target 内的账号选择。
 
+mod cookie_lock;
+pub use cookie_lock::{RoutingCookie, RoutingCookieObservation, RoutingCookieStatus};
 mod error;
 mod location;
 pub use location::{InvalidRequestLocation, RequestLocation};

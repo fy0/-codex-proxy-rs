@@ -34,9 +34,11 @@ impl ScheduledTask for TurnStateTask {
             let probe_cancellation = cancellation.clone();
             let probes: BoxFuture<'static, ()> = Box::pin(
                 futures::stream::iter(buckets.into_iter().filter(|bucket| {
-                    bucket.config.enabled || bucket.manual_probe_requested_at.is_some()
+                    bucket.config.enabled
+                        || bucket.config.cookie_lock_enabled
+                        || bucket.manual_probe_requested_at.is_some()
                 }))
-                .for_each_concurrent(4, move |bucket| {
+                .for_each_concurrent(4, move |mut bucket| {
                     let service = Arc::clone(&service);
                     let cancellation = probe_cancellation.clone();
                     Box::pin(async move {
@@ -47,6 +49,9 @@ impl ScheduledTask for TurnStateTask {
                         else {
                             return;
                         };
+                        bucket
+                            .routing_cookies
+                            .retain(|cookie| cookie.origin == service.endpoint());
                         if bucket.manual_probe_requested_at.is_some() {
                             match service
                                 .store
@@ -68,19 +73,34 @@ impl ScheduledTask for TurnStateTask {
                             }
                             return;
                         }
-                        if bucket
-                            .installed_token(Utc::now().timestamp())
-                            .is_some_and(|token| {
-                                token.is_fresh(
-                                    Utc::now().timestamp(),
-                                    bucket.config.refresh_after_seconds,
-                                )
-                            })
+                        if !bucket.config.cookie_lock_enabled
+                            && bucket
+                                .installed_token(Utc::now().timestamp())
+                                .is_some_and(|token| {
+                                    token.is_fresh(
+                                        Utc::now().timestamp(),
+                                        bucket.config.refresh_after_seconds,
+                                    )
+                                })
                         {
                             return;
                         }
                         // 被动候选可以随时结束 hunt，不必等到下一次主动探测。
-                        if service.install(&account_id, &bucket.model).await {
+                        if !bucket.config.cookie_lock_enabled
+                            && service.install(&account_id, &bucket.model).await
+                        {
+                            return;
+                        }
+                        let now = Utc::now().timestamp();
+                        if bucket.config.cookie_lock_enabled
+                            && !bucket.cookie_renewal_due(now)
+                            && bucket
+                                .routing_cookies
+                                .iter()
+                                .filter(|cookie| cookie.is_usable(&bucket.model, now))
+                                .count()
+                                >= 3
+                        {
                             return;
                         }
                         if bucket
@@ -93,10 +113,12 @@ impl ScheduledTask for TurnStateTask {
                             () = cancellation.cancelled() => return,
                             outcome = service.probe(&bucket, &account_id, false) => outcome,
                         };
-                        if matches!(outcome, ProbeOutcome::Installed) {
+                        if !bucket.config.cookie_lock_enabled
+                            && matches!(outcome, ProbeOutcome::Installed)
+                        {
                             return;
                         }
-                        let delay = if matches!(outcome, ProbeOutcome::Skipped)
+                        let mut delay = if matches!(outcome, ProbeOutcome::Skipped)
                             || (bucket.hunt_attempts + 1)
                                 .is_multiple_of(u64::from(bucket.config.budget))
                         {
@@ -106,6 +128,27 @@ impl ScheduledTask for TurnStateTask {
                                 + probe::random_index(bucket.config.jitter_seconds as usize + 1)
                                     as u64
                         };
+                        // 以本次探测后的池计算上限，长空闲间隔不能错过续约窗口。
+                        if bucket.config.cookie_lock_enabled
+                            && let Some(current) = service.current(&account_id, &bucket.model).await
+                            && let Some(cookie) = current
+                                .routing_cookies
+                                .iter()
+                                .filter(|cookie| {
+                                    cookie.is_usable(&bucket.model, Utc::now().timestamp())
+                                })
+                                .min_by_key(|cookie| cookie.expires_at)
+                        {
+                            let remaining = cookie.expires_at - Utc::now().timestamp();
+                            let before_refresh =
+                                remaining - bucket.config.cookie_refresh_before_seconds as i64;
+                            let cap = if before_refresh > 0 {
+                                before_refresh
+                            } else {
+                                remaining.max(2) / 2
+                            };
+                            delay = delay.min(cap.max(1) as u64);
+                        }
                         if service
                             .store
                             .schedule_turn_state(

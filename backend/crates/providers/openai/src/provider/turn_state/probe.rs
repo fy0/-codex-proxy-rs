@@ -91,15 +91,20 @@ pub(super) fn load_template(path: Option<&Path>) -> Result<String, ()> {
 pub(super) struct ProbeOutput {
     pub reason: &'static str,
     pub reported_model: Option<String>,
+    pub created_model: Option<String>,
 }
 
-pub(super) async fn wait_for_output(response: reqwest::Response) -> ProbeOutput {
+pub(super) async fn wait_for_output(
+    response: reqwest::Response,
+    stop_at_model: bool,
+) -> ProbeOutput {
     let mut stream = response.bytes_stream();
     let mut decoder = SseEventDecoder::default();
     let mut received = 0_usize;
     // 事件头里的声明优先，response.model 兜底，与业务观测的合并规则一致。
     let mut header_model: Option<String> = None;
     let mut body_model = ResponseModelObservation::default();
+    let mut created_model = None;
     let reason = 'read: loop {
         let Some(chunk) = stream.next().await else {
             break 'read "body_ended";
@@ -123,6 +128,17 @@ pub(super) async fn wait_for_output(response: reqwest::Response) -> ProbeOutput 
                             .map(str::to_owned);
                 }
                 body_model.observe(event_type, &value);
+                if event_type == Some("response.created") {
+                    created_model = value
+                        .get("response")
+                        .and_then(|response| response.get("model"))
+                        .and_then(Value::as_str)
+                        .filter(|model| !model.is_empty() && model.len() <= 256)
+                        .map(str::to_owned);
+                    if stop_at_model && created_model.is_some() {
+                        break 'read "response_created";
+                    }
+                }
                 match event_type {
                     Some(
                         "response.output_text.delta"
@@ -142,6 +158,7 @@ pub(super) async fn wait_for_output(response: reqwest::Response) -> ProbeOutput 
     };
     ProbeOutput {
         reason,
+        created_model,
         reported_model: header_model.or_else(|| body_model.model().map(str::to_owned)),
     }
 }

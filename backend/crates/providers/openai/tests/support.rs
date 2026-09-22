@@ -46,6 +46,7 @@ pub(crate) struct MemoryAccountStore {
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
     quota_reads: AtomicUsize,
     fail_provider_listing: AtomicBool,
+    routing_cookies: Mutex<Vec<gateway_core::account::RoutingCookie>>,
     turn_states: Mutex<BTreeMap<(String, String), gateway_core::account::TurnStateBucket>>,
     turn_observations: Mutex<Vec<gateway_core::account::TurnStateObservation>>,
     turn_proxies: Mutex<BTreeMap<String, gateway_core::account::OutboundProxy>>,
@@ -90,6 +91,7 @@ impl MemoryAccountStore {
                     .and_then(|account| account.upstream_user_id().map(str::to_owned)),
                 model: model.to_owned(),
                 config,
+                routing_cookies: Vec::new(),
                 current: None,
                 current_issued_at: None,
                 current_length: None,
@@ -264,6 +266,37 @@ impl MemoryAccountStore {
 
 #[async_trait]
 impl ProviderAccountStore for MemoryAccountStore {
+    async fn routing_cookies(
+        &self,
+    ) -> Result<Vec<gateway_core::account::RoutingCookie>, StoreError> {
+        Ok(self.routing_cookies.lock().unwrap().clone())
+    }
+    async fn observe_routing_cookie(
+        &self,
+        observation: gateway_core::account::RoutingCookieObservation,
+    ) -> Result<(), StoreError> {
+        let mut cookies = self.routing_cookies.lock().unwrap();
+        if let Some(sent) = &observation.sent
+            && (observation.deleted
+                || observation
+                    .received
+                    .as_ref()
+                    .is_some_and(|cookie| cookie.pod != sent.pod))
+        {
+            cookies.retain(|cookie| cookie.origin != sent.origin || cookie.pod != sent.pod);
+        }
+        if !observation.deleted
+            && let Some(mut cookie) = observation.received.or(observation.sent)
+            && let Some(model) = observation.reported_model
+        {
+            cookie.reported_model = model;
+            cookie.observed_at = observation.observed_at;
+            cookies.retain(|old| old.origin != cookie.origin || old.pod != cookie.pod);
+            cookies.push(cookie);
+        }
+        Ok(())
+    }
+
     async fn claim_turn_state_notifications(
         &self,
     ) -> Result<Vec<gateway_core::account::TurnStateNotification>, StoreError> {
@@ -328,7 +361,18 @@ impl ProviderAccountStore for MemoryAccountStore {
     async fn turn_state_buckets(
         &self,
     ) -> Result<Vec<gateway_core::account::TurnStateBucket>, StoreError> {
-        Ok(self.turn_states.lock().unwrap().values().cloned().collect())
+        let cookies = self.routing_cookies.lock().unwrap().clone();
+        Ok(self
+            .turn_states
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .map(|mut bucket| {
+                bucket.routing_cookies = cookies.clone();
+                bucket
+            })
+            .collect())
     }
 
     async fn turn_state_bucket(
@@ -341,7 +385,11 @@ impl ProviderAccountStore for MemoryAccountStore {
             .lock()
             .unwrap()
             .get(&(account.as_str().to_owned(), model.to_owned()))
-            .cloned())
+            .cloned()
+            .map(|mut bucket| {
+                bucket.routing_cookies = self.routing_cookies.lock().unwrap().clone();
+                bucket
+            }))
     }
 
     async fn observe_turn_state(
@@ -360,7 +408,7 @@ impl ProviderAccountStore for MemoryAccountStore {
         if let Some(state) =
             states.get_mut(&(observation.account_id.clone(), observation.model.clone()))
         {
-            record |= state.config.enabled;
+            record |= state.config.enabled || state.config.cookie_lock_enabled;
             if observation.source == "probe" && observation.probe_id.is_some() {
                 state.hunt_attempts += 1;
             }

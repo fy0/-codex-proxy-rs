@@ -49,9 +49,10 @@ impl CodexCookiePolicy {
                 "cf_clearance",
                 "__cf_bm",
                 "_cfuvid",
-                // 业务请求实测：这两个是账号级路由 Cookie，不和某一张 292 绑定。打票请求不回放。
+                // state 探测不回放路由 Cookie；Cookie 锁定另由共享池管理。
                 "__cflb",
                 "__oai_lb",
+                "__oailb",
             ],
             ["chatgpt.com", "openai.com"],
         )

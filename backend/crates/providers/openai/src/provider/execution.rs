@@ -602,7 +602,28 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             allows_capacity_feedback: !context.is_diagnostic_required_account(),
         };
         let mut active_account = lease.account().clone();
-        let cookie_header = build_cookie_header(lease.cookies())?;
+        let cookie_lock = lease.turn_state().is_some_and(|bucket| bucket.config.cookie_lock_enabled);
+        // 冷流真正发送时重新读共享池，不能用选号时缓存的已降级凭证。
+        let cookie_bucket = if cookie_lock {
+            if let Some(service) = &turn_state { service.current(lease.account().id(), upstream_model.as_str()).await } else { None }
+        } else { None };
+        let sent_cookie = cookie_bucket.as_ref().and_then(|bucket| bucket.routing_cookie(chrono::Utc::now().timestamp())).cloned();
+        if cookie_lock && !context.is_diagnostic_required_account()
+            && lease.turn_state().is_some_and(|bucket| bucket.config.missing_state_policy == gateway_core::account::MissingTurnStatePolicy::Pause)
+            && sent_cookie.is_none() {
+            Err(map_selection_error(CredentialSelectionError::MissingTurnState))?;
+        }
+        let cookie_header = if cookie_lock {
+            // 只锁路由凭证；剥离旧亲和 Cookie，保留本账号自己的认证 Cookie。
+            let base = build_cookie_header(lease.cookies().iter().filter(|cookie| !matches!(cookie.name.as_str(), "__oailb" | "__oai_lb" | "__cflb")))?;
+            let mut value = base.as_ref().map(|value| value.expose_secret().to_owned()).unwrap_or_default();
+            if let Some(cookie) = &sent_cookie {
+                if !value.is_empty() { value.push_str("; "); }
+                value.push_str(&cookie.header());
+            }
+            (!value.is_empty()).then(|| SecretString::from(value))
+        } else { build_cookie_header(lease.cookies())? };
+        let cookie_request_started_at = chrono::Utc::now().timestamp_millis();
         let authorization = lease
             .authentication()
             .authorization_header()
@@ -738,6 +759,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         {
             active_account = current;
         }
+        if lease.authentication().oauth().is_some() && let Some(service) = &turn_state {
+            service.observe_cookie(&response.set_cookie_headers, sent_cookie.as_ref(), None, cookie_request_started_at).await;
+        }
         let response_transport = response.transport;
         let websocket_connection_id = response.websocket_connection_id;
         let mut body = response.body;
@@ -762,6 +786,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .with_request_tool_pricing(upstream_model.as_str(), request.tools())
             .with_raw_sse_passthrough();
         let mut pre_commit_events = PreCommitClientEvents::new();
+        let mut observed_cookie_model: Option<String> = None;
         loop {
             let Some(stream_deadline) = remaining(context.deadline()) else {
                 if allows_account_state_mutation {
@@ -907,6 +932,13 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             pre_commit_events.observe_chunk(chunk_len);
             let response_model_changed = observation_state
                 .observe_upstream_response_model(decoder.response_model());
+            if let Some(model) = decoder.body_response_model()
+                && observed_cookie_model.as_deref() != Some(model)
+                && let Some(service) = &turn_state
+                && lease.authentication().oauth().is_some() {
+                service.observe_business_cookie(&active_account, &failure_set_cookie_headers, sent_cookie.as_ref(), upstream_model.as_str(), model, cookie_request_started_at).await;
+                observed_cookie_model = Some(model.to_owned());
+            }
             let service_tier_changed = observation_state
                 .observe_upstream_service_tier(decoder.response_service_tier());
             let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
@@ -1158,6 +1190,12 @@ fn prepare_turn_state(
     } else {
         "none"
     };
+    if lease
+        .turn_state()
+        .is_some_and(|bucket| bucket.config.cookie_lock_enabled && !bucket.config.enabled)
+    {
+        return Ok(source);
+    }
     if let Some(value) = lease.account().turn_state_override() {
         force_turn_state_override(request, value);
         source = "account_override";

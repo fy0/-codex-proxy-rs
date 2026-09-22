@@ -677,7 +677,7 @@ async fn read_model_catalog_body(response: ReqwestResponse) -> CodexClientResult
 fn websocket_connection_profile(headers: &HeaderMap) -> String {
     // turn-state 在握手头中发送且连接级绑定；纳入画像防止账号覆盖值变更后
     // 复用到携带旧握手状态的池化连接。逐轮值仍由帧 metadata 覆盖。
-    [
+    let profile = [
         "originator",
         "user-agent",
         X_OPENAI_MEMGEN_REQUEST_HEADER,
@@ -689,7 +689,25 @@ fn websocket_connection_profile(headers: &HeaderMap) -> String {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
     })
-    .join("\0")
+    .join("\0");
+    let routing = headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .map(|header| {
+            header
+                .split(';')
+                .map(str::trim)
+                .filter(|cookie| cookie.starts_with("__oailb=") || cookie.starts_with("__oai_lb="))
+                .collect::<Vec<_>>()
+                .join(";")
+        })
+        .unwrap_or_default();
+    if routing.is_empty() {
+        return profile;
+    }
+    // 只把路由凭证摘要纳入连接画像，调试输出不包含 Cookie 正文。
+    use sha2::{Digest, Sha256};
+    format!("{profile}\0{:x}", Sha256::digest(routing.as_bytes()))
 }
 
 fn http_sse_stream(

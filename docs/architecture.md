@@ -231,6 +231,14 @@ xAI Provider 负责 Codex custom 工具与 Grok function 工具的双向转换�
 `call_id` 配对；超限或转换失败终止流。默认 `store: false` 的续接由现有会话 owner 重放完整历史；
 原生续接按上游约束处理 `instructions` 与 `previous_response_id`，不把协议差异交给 Core。
 
+### 路由 Cookie 池
+
+OpenAI 的打票 worker 与业务流观测共同采集路由 Cookie，解析与请求注入由 Provider 拥有，
+Core 提供寿命、模型资格和持久化端口，Store 保存按上游端点/pod 共享的有界池。池中不包含认证
+Cookie；账号自己的 Cookie 继续归属凭据仓库。Cookie 锁定与 state 替换开关独立，共用缺票调度策略。
+每次选号和冷流开始发送都复核有效期与模型；持久化按请求开始时间防止晚到响应覆盖更新的降级事实。
+WebSocket 的连接画像包含路由 Cookie 摘要，换池后不能复用原亲和连接；正文不进入状态 API 或诊断输出。
+
 ### 后台账号导入
 
 Admin 拥有进程内导入任务、管理员归属、条目状态与有界队列，以 `account_import` Daemon 贡献给 Host。

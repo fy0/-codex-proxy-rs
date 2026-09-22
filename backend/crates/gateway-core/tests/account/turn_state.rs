@@ -166,6 +166,7 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
         upstream_user_id: account.upstream_user_id().map(str::to_owned),
         model: "upstream-model".to_owned(),
         config: serde_json::from_str("{}").unwrap(),
+        routing_cookies: Vec::new(),
         current: None,
         current_issued_at: None,
         current_length: None,

@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+mod cookie_lock;
 mod quota_forecast;
 mod turn_state;
 mod turn_state_notifications;

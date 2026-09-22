@@ -43,6 +43,9 @@ function installed(bucket: TurnStateStatus) {
   return bucket.hasInstalledState && fresh(bucket, bucket.issuedAt)
 }
 function source(bucket: TurnStateStatus) {
+  if (bucket.config.cookieLockEnabled)
+    return bucket.routingCookie && bucket.routingCookie.expiresAt > now.value ? `Cookie 锁定：${bucket.routingCookie.pod}` : '等待匹配模型的 Cookie'
+
   if (installed(bucket))
     return bucket.manualOverride ? '模型桶手动应用' : '模型桶自动安装'
   if (bucket.config.enabled || bucket.manualOverride || bucket.issuedAt != null || bucket.config.missingStatePolicy === 'pause')
@@ -52,9 +55,9 @@ function source(bucket: TurnStateStatus) {
 function business(bucket: TurnStateStatus) {
   if (!bucket.accountEnabled)
     return '手动停用'
-  if (bucket.businessStatus === 'ready' && bucket.config.missingStatePolicy === 'pause' && !installed(bucket))
-    return '等待 state'
-  const labels: Record<TurnStateStatus['businessStatus'], string> = { ready: '正常调度', manual_disabled: '手动停用', waiting_for_state: '等待 state', model_denied: '模型权限禁止', quota_exhausted: '额度耗尽', rate_limited: '限流 / 冷却中', account_error: '账号不可用' }
+  if (bucket.businessStatus === 'ready' && bucket.config.missingStatePolicy === 'pause' && !(bucket.config.cookieLockEnabled ? bucket.routingCookie && bucket.routingCookie.expiresAt > now.value : installed(bucket)))
+    return bucket.config.cookieLockEnabled ? '等待 Cookie' : '等待 state'
+  const labels: Record<TurnStateStatus['businessStatus'], string> = { ready: '正常调度', manual_disabled: '手动停用', waiting_for_state: bucket.config.cookieLockEnabled ? '等待 Cookie' : '等待 state', model_denied: '模型权限禁止', quota_exhausted: '额度耗尽', rate_limited: '限流 / 冷却中', account_error: '账号不可用' }
   return labels[bucket.businessStatus]
 }
 function date(value: number) {
@@ -106,10 +109,10 @@ useIntervalFn(() => {
 </script>
 
 <template>
-  <section class="grid min-w-0 gap-3" aria-label="模型 state">
+  <section class="grid min-w-0 gap-3" aria-label="模型路由票">
     <div class="flex items-center justify-between gap-3">
       <h3 class="m-0 text-cp font-heavy text-cp-text">
-        模型 state
+        模型路由票
       </h3>
       <BaseIconButton label="刷新账号 state" :disabled="loading" @click="load">
         <RefreshCw :size="15" />
@@ -132,10 +135,10 @@ useIntervalFn(() => {
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span class="text-cp-sm text-cp-text-secondary">{{ source(bucket) }}</span>
         <div class="flex shrink-0 items-center gap-1">
-          <BaseIconButton v-if="installed(bucket)" label="复制已安装 state" :disabled="busy" @click="act(bucket, 'copy')">
+          <BaseIconButton v-if="!bucket.config.cookieLockEnabled && installed(bucket)" label="复制已安装 state" :disabled="busy" @click="act(bucket, 'copy')">
             <Copy :size="15" />
           </BaseIconButton>
-          <BaseIconButton v-if="bucket.hasInstalledState" label="移除已安装 state" :disabled="busy" @click="act(bucket, 'remove')">
+          <BaseIconButton v-if="!bucket.config.cookieLockEnabled && bucket.hasInstalledState" label="移除已安装 state" :disabled="busy" @click="act(bucket, 'remove')">
             <Trash2 :size="15" />
           </BaseIconButton>
           <BaseIconButton label="探测一次" :disabled="busy || !bucket.accountEnabled || bucket.manualProbeRequestedAt != null" @click="act(bucket, 'probe')">
@@ -143,10 +146,10 @@ useIntervalFn(() => {
           </BaseIconButton>
         </div>
       </div>
-      <p v-if="installed(bucket) && bucket.issuedAt != null" class="m-0 text-cp-xs text-cp-text-secondary">
+      <p v-if="!bucket.config.cookieLockEnabled && installed(bucket) && bucket.issuedAt != null" class="m-0 text-cp-xs text-cp-text-secondary">
         {{ bucket.tokenLength }} 字符 · 签发 {{ date(bucket.issuedAt) }} · 到期 {{ date(bucket.issuedAt + bucket.config.ttlSeconds) }}
       </p>
-      <div v-if="fresh(bucket, bucket.candidateIssuedAt)" class="flex flex-wrap items-center justify-between gap-2">
+      <div v-if="!bucket.config.cookieLockEnabled && fresh(bucket, bucket.candidateIssuedAt)" class="flex flex-wrap items-center justify-between gap-2">
         <span class="text-cp-sm text-cp-text-secondary">候选 {{ bucket.candidateLength }} 字符 · 尚未应用</span>
         <div class="flex items-center gap-1">
           <BaseIconButton label="复制候选 state" :disabled="busy" @click="act(bucket, 'candidate')">
@@ -158,8 +161,8 @@ useIntervalFn(() => {
         </div>
       </div>
       <p class="m-0 text-cp-xs text-cp-text-secondary">
-        账号{{ bucket.accountEnabled ? '启用' : '手动停用' }} · 自动探测{{ bucket.config.enabled ? '开启' : '关闭' }}
-        <span v-if="!bucket.config.enabled && bucket.config.missingStatePolicy === 'pause'" class="text-cp-warning-text"> · 缺票时需手动探测并应用恢复</span>
+        账号{{ bucket.accountEnabled ? '启用' : '手动停用' }} · 自动探测{{ bucket.config.cookieLockEnabled ? 'Cookie 锁定' : bucket.config.enabled ? 'state 开启' : '关闭' }}
+        <span v-if="!bucket.config.enabled && !bucket.config.cookieLockEnabled && bucket.config.missingStatePolicy === 'pause'" class="text-cp-warning-text"> · 缺票时需手动探测并应用恢复</span>
       </p>
     </div>
   </section>

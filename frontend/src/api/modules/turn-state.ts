@@ -3,6 +3,8 @@ import request from '../request'
 
 export interface TurnStateConfig {
   enabled: boolean
+  cookieLockEnabled: boolean
+  cookieRefreshBeforeSeconds: number
   missingStatePolicy: 'allow' | 'pause'
   detectActualModel: boolean
   targetLength: number
@@ -24,7 +26,7 @@ export interface TurnStateConfig {
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, missingStatePolicy: 'allow', detectActualModel: false, targetLength: 292, ttlSeconds: 240, refreshAfterSeconds: 120, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
+  return { enabled, cookieLockEnabled: false, cookieRefreshBeforeSeconds: 300, missingStatePolicy: 'allow', detectActualModel: false, targetLength: 292, ttlSeconds: 240, refreshAfterSeconds: 120, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
 }
 
 export interface TurnStateProbePreview {
@@ -65,6 +67,8 @@ export interface TurnStateObservation {
   httpStatus: number | null
   tokenLength: number | null
   issuedAt: number | null
+  oailbHost?: string | null
+  cookieExpiresAt?: number | null
   reportedModel?: string | null
   hasToken?: boolean
   egress: string
@@ -86,6 +90,14 @@ export interface TurnStateInstallation {
   huntSeconds: number
 }
 
+export interface RoutingCookieStatus {
+  pod: string
+  issuedAt: number
+  expiresAt: number
+  observedAt: number
+  reportedModel: string
+}
+
 export interface TurnStateStatus {
   accountId: string
   accountName: string
@@ -97,6 +109,8 @@ export interface TurnStateStatus {
   ageSeconds: number | null
   active: boolean
   hasInstalledState: boolean
+  routingCookie?: RoutingCookieStatus | null
+  cookiePool?: RoutingCookieStatus[]
   businessStatus: 'ready' | 'manual_disabled' | 'waiting_for_state' | 'model_denied' | 'quota_exhausted' | 'rate_limited' | 'account_error'
   accountEnabled: boolean
   huntAttempts: number

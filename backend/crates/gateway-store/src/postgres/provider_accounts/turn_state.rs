@@ -54,6 +54,7 @@ fn bucket(row: sqlx::postgres::PgRow) -> Result<TurnStateBucket, CoreStoreError>
         manual_override: row.try_get("manual_override").map_err(unavailable)?,
         attached_model: row.try_get("attached_model").map_err(unavailable)?,
         config,
+        routing_cookies: Vec::new(),
     })
 }
 
@@ -106,7 +107,7 @@ impl PgProviderAccountRepository {
         if accounts.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query(
+        let rows = sqlx::query(
             "select * from account_turn_states where account_id = any($1::text[]) and model = $2",
         )
         .bind(
@@ -118,28 +119,25 @@ impl PgProviderAccountRepository {
         .bind(model)
         .fetch_all(&self.pool)
         .await
-        .map_err(unavailable)?
-        .into_iter()
-        .map(bucket)
-        .collect()
+        .map_err(unavailable)?;
+        self.with_routing_cookies(rows).await
     }
 
     pub(super) async fn load_turn_state_buckets(
         &self,
     ) -> Result<Vec<TurnStateBucket>, CoreStoreError> {
+        self.clean_routing_cookies().await?;
         // 清理不依赖是否启用轮换，停用的桶也不能继续持有过期正文。
         sqlx::query("update account_turn_states set turn_state_override = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then turn_state_override else null end, attached_model = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then attached_model else null end, candidate = case when candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then candidate else null end where (turn_state_override is not null and (current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true) or (candidate is not null and (candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true)")
             .execute(&self.pool).await.map_err(unavailable)?;
         // 观测事件里的令牌正文与槽位正文同寿命，过期即摘除，历史只保留元数据。
         sqlx::query("update account_turn_state_events e set detail = e.detail - 'token' from account_turn_states s where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation' and e.detail ? 'token' and ((e.detail->>'issuedAt')::numeric > 0 and (e.detail->>'issuedAt')::numeric <= extract(epoch from now()) and (e.detail->>'issuedAt')::numeric + (s.config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true")
             .execute(&self.pool).await.map_err(unavailable)?;
-        sqlx::query("select * from account_turn_states order by account_id, model")
+        let rows = sqlx::query("select * from account_turn_states order by account_id, model")
             .fetch_all(&self.pool)
             .await
-            .map_err(unavailable)?
-            .into_iter()
-            .map(bucket)
-            .collect()
+            .map_err(unavailable)?;
+        self.with_routing_cookies(rows).await
     }
 
     pub(super) async fn load_turn_state_bucket(
@@ -147,14 +145,36 @@ impl PgProviderAccountRepository {
         account: &CoreProviderAccountId,
         model: &str,
     ) -> Result<Option<TurnStateBucket>, CoreStoreError> {
-        sqlx::query("select * from account_turn_states where account_id = $1 and model = $2")
-            .bind(account.as_str())
-            .bind(model)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(unavailable)?
-            .map(bucket)
-            .transpose()
+        let row =
+            sqlx::query("select * from account_turn_states where account_id = $1 and model = $2")
+                .bind(account.as_str())
+                .bind(model)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(unavailable)?;
+        Ok(self
+            .with_routing_cookies(row.into_iter().collect())
+            .await?
+            .pop())
+    }
+
+    async fn with_routing_cookies(
+        &self,
+        rows: Vec<sqlx::postgres::PgRow>,
+    ) -> Result<Vec<TurnStateBucket>, CoreStoreError> {
+        let mut buckets: Vec<_> = rows.into_iter().map(bucket).collect::<Result<_, _>>()?;
+        if buckets
+            .iter()
+            .any(|bucket| bucket.config.cookie_lock_enabled)
+        {
+            let cookies = self.load_routing_cookies().await?;
+            for bucket in &mut buckets {
+                if bucket.config.cookie_lock_enabled {
+                    bucket.routing_cookies = cookies.clone();
+                }
+            }
+        }
+        Ok(buckets)
     }
 
     pub(super) async fn record_turn_state(
@@ -252,7 +272,10 @@ impl PgProviderAccountRepository {
                 .execute(&mut *tx).await.map_err(unavailable)?;
         }
         // 停止后台日志不丢弃有效候选；手动发起的探测仍保留可操作结果。
-        if state.config.enabled || observation.probe_trigger.as_deref() == Some("manual") {
+        if state.config.enabled
+            || state.config.cookie_lock_enabled
+            || observation.probe_trigger.as_deref() == Some("manual")
+        {
             append_event(
                 &mut tx,
                 &observation.account_id,
@@ -300,6 +323,7 @@ impl PgProviderAccountRepository {
     ) -> Result<Vec<TurnStateStatus>, CoreStoreError> {
         let rows = sqlx::query("select s.*, a.name as account_name, a.email as account_email, a.enabled as account_enabled, (a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id) as identity_matches, coalesce((select jsonb_agg((e.detail - 'token') || jsonb_build_object('observationId', e.id::text, 'hasToken', e.detail->>'token' is not null, 'isInstalled', coalesce(e.detail->>'token' = s.turn_state_override, false)) order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation'), '[]'::jsonb) as observations, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'installation'), '[]'::jsonb) as installations from account_turn_states s join provider_accounts a on a.id = s.account_id where ($1::text is null or s.account_id = $1) order by s.account_id, s.model")
             .bind(account_id).fetch_all(&self.pool).await.map_err(unavailable)?;
+        let cookies = self.load_routing_cookies().await?;
         rows.into_iter()
             .map(|row| {
                 let account_name = row.try_get("account_name").map_err(unavailable)?;
@@ -313,11 +337,23 @@ impl PgProviderAccountRepository {
                 let installations =
                     serde_json::from_value(row.try_get("installations").map_err(unavailable)?)
                         .map_err(unavailable)?;
-                let state = bucket(row)?;
+                let mut state = bucket(row)?;
+                state.routing_cookies = cookies.clone();
                 let installed = state
                     .installed_token(Utc::now().timestamp())
                     .filter(|_| identity_matches);
-                let active = account_enabled && installed.is_some();
+                let routing_cookie = state
+                    .config
+                    .cookie_lock_enabled
+                    .then(|| state.routing_cookie(Utc::now().timestamp()))
+                    .flatten()
+                    .filter(|_| identity_matches);
+                let active = account_enabled
+                    && if state.config.cookie_lock_enabled {
+                        routing_cookie.is_some()
+                    } else {
+                        installed.is_some()
+                    };
                 let has_installed_state = installed.is_some();
                 for observation in &mut observations {
                     observation.is_installed &= has_installed_state;
@@ -338,8 +374,20 @@ impl PgProviderAccountRepository {
                 } else {
                     TurnStateBusinessStatus::Ready
                 };
-                let next_probe_at = if !account_enabled || !state.config.enabled {
+                let next_probe_at = if !account_enabled
+                    || (!state.config.enabled && !state.config.cookie_lock_enabled)
+                {
                     None
+                } else if state.config.cookie_lock_enabled {
+                    Some(state.next_probe_at.unwrap_or_else(|| {
+                        routing_cookie.map_or_else(
+                            || Utc::now().timestamp(),
+                            |cookie| {
+                                cookie.expires_at
+                                    - state.config.cookie_refresh_before_seconds as i64
+                            },
+                        )
+                    }))
                 } else if let Some(token) = installed.filter(|token| {
                     token.is_fresh(Utc::now().timestamp(), state.config.refresh_after_seconds)
                 }) {
@@ -351,7 +399,11 @@ impl PgProviderAccountRepository {
                             .unwrap_or_else(|| Utc::now().timestamp()),
                     )
                 };
+                let routing_cookie = routing_cookie.map(|cookie| cookie.status());
+                let cookie_pool = cookies.iter().map(|cookie| cookie.status()).collect();
                 Ok(TurnStateStatus {
+                    routing_cookie,
+                    cookie_pool,
                     account_id: state.account_id,
                     account_name,
                     account_email,

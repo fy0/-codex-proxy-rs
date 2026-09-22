@@ -13,6 +13,18 @@ fn loaded_credential_from_record(
 
 #[async_trait]
 impl ProviderAccountStore for PgProviderAccountRepository {
+    async fn routing_cookies(
+        &self,
+    ) -> Result<Vec<gateway_core::account::RoutingCookie>, CoreStoreError> {
+        self.load_routing_cookies().await
+    }
+    async fn observe_routing_cookie(
+        &self,
+        observation: gateway_core::account::RoutingCookieObservation,
+    ) -> Result<(), CoreStoreError> {
+        self.record_routing_cookie(observation).await
+    }
+
     async fn claim_turn_state_notifications(
         &self,
     ) -> Result<Vec<gateway_core::account::TurnStateNotification>, CoreStoreError> {
@@ -60,7 +72,7 @@ impl ProviderAccountStore for PgProviderAccountRepository {
         model: &str,
         next_probe_at: i64,
     ) -> Result<(), CoreStoreError> {
-        sqlx::query("update account_turn_states set next_probe_at = $3 where account_id = $1 and model = $2 and (config->>'enabled')::boolean")
+        sqlx::query("update account_turn_states set next_probe_at = $3 where account_id = $1 and model = $2 and ((config->>'enabled')::boolean or coalesce((config->>'cookieLockEnabled')::boolean, false))")
             .bind(account.as_str()).bind(model).bind(next_probe_at)
             .execute(&self.pool).await.map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
         Ok(())
