@@ -558,11 +558,15 @@ impl AccountsService for DefaultAccountsService {
             .await
             .map_err(|error| map_store_error(error, "account cookie copy"))?;
         parts.push((routing.name.clone(), routing.value.clone()));
-        let header = parts
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
+        let mut header = String::new();
+        for (index, (name, value)) in parts.iter().enumerate() {
+            if index > 0 {
+                header.push_str("; ");
+            }
+            header.push_str(name);
+            header.push('=');
+            header.push_str(value);
+        }
         Ok(TurnStateCookieCopy {
             pod: routing.pod,
             name: routing.name,
