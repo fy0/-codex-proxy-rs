@@ -100,6 +100,7 @@ pub trait AccountsService: Send + Sync {
         _account_id: ProviderAccountId,
         _model: String,
         _pod: String,
+        _issued_at: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         Err(AdminError::invalid("当前服务不支持应用路由 Cookie"))
     }
@@ -549,6 +550,7 @@ impl AccountsService for DefaultAccountsService {
         account_id: ProviderAccountId,
         model: String,
         pod: String,
+        issued_at: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         if model.is_empty()
             || model.len() > 256
@@ -569,7 +571,7 @@ impl AccountsService for DefaultAccountsService {
         }
         let result = self
             .accounts
-            .apply_turn_state_cookie(&account_id, &model, &pod, context)
+            .apply_turn_state_cookie(&account_id, &model, &pod, issued_at, context)
             .await
             .map_err(|error| map_store_error(error, "routing cookie apply"))?;
         provider.account_unavailable(&account_id).await;

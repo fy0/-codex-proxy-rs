@@ -94,6 +94,7 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'responseSource', label: '观测位置', kind: 'text', size: 'lg', format: value => responseSource(value as string | null) },
   { key: 'probeTrigger', label: '触发方式', kind: 'text', size: 'sm', format: value => value === 'manual' ? '手动' : value === 'scheduled' ? '自动' : '-' },
   { key: 'httpStatus', label: 'HTTP', kind: 'numeric', size: 'sm' },
+  { key: 'issuedAt', label: 'state 签发', kind: 'datetime', format: value => date(value as number | null) },
   { key: 'tokenLength', label: '实际长度', kind: 'numeric', size: 'sm' },
   { key: 'oailbHost', label: 'Cookie pod', kind: 'text', size: '3xl', format: value => value ?? '-' },
   { key: 'cookieExpiresAt', label: 'Cookie 到期', kind: 'datetime', format: value => date(value as number | null) },
@@ -322,12 +323,12 @@ async function copyCookie(bucket: TurnStateStatus, pod: string) {
   }
 }
 
-async function applyCookie(bucket: TurnStateStatus, pod: string) {
+async function applyCookie(bucket: TurnStateStatus, pod: string, issuedAt?: number | null) {
   if (cookieApplying.value || !bucket.accountEnabled)
     return
   cookieApplying.value = true
   try {
-    await applyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod })
+    await applyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod, issuedAt })
     toast.success('已固定 Cookie')
     await load()
   }
@@ -567,7 +568,7 @@ onMounted(async () => {
           <BaseIconButton label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, cookie.pod)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() && selection.cookieOverridePod !== cookie.pod" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod)">
+          <BaseIconButton v-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() && selection.cookieOverridePod !== cookie.pod" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod, cookie.issuedAt)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
           <BaseIconButton v-if="selection.cookieOverridePod === cookie.pod" label="取消 Cookie 固定" :disabled="cookieRemoving" @click="removeCookie(selection)">
@@ -598,7 +599,7 @@ onMounted(async () => {
           <BaseIconButton v-if="row.oailbHost" label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, row.oailbHost)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="row.oailbHost && selection.cookieOverridePod !== row.oailbHost" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost)">
+          <BaseIconButton v-if="row.oailbHost && selection.cookieOverridePod !== row.oailbHost" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost, row.cookieIssuedAt)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

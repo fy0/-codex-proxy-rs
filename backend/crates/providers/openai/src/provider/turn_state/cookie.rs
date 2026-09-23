@@ -81,6 +81,7 @@ impl TurnStateService {
                 issued_at: token.as_ref().map(|token| token.issued_at),
                 reported_model: Some(model.to_owned()),
                 oailb_host: cookie.as_ref().map(|cookie| cookie.pod.clone()),
+                cookie_issued_at: cookie.as_ref().map(|cookie| cookie.issued_at),
                 cookie_expires_at: cookie.as_ref().map(|cookie| cookie.expires_at),
                 token: token
                     .as_ref()

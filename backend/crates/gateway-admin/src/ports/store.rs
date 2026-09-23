@@ -141,6 +141,7 @@ pub trait AccountStore: Send + Sync {
         _account_id: &gateway_core::account::ProviderAccountId,
         _model: &str,
         _pod: &str,
+        _issued_at: Option<i64>,
         _context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
         Err(AdminStoreError::new(

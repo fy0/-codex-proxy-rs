@@ -274,6 +274,9 @@ pub struct TurnStateObservation {
     pub reported_model: Option<String>,
     #[serde(default)]
     pub oailb_host: Option<String>,
+    /// 观测到的 Cookie 签发时间：记录行固定操作据此绑定那条具体 Cookie。
+    #[serde(default)]
+    pub cookie_issued_at: Option<i64>,
     #[serde(default)]
     pub cookie_expires_at: Option<i64>,
     /// 有效信封正文随观测行持久化；状态查询剥离正文，操作使用观测 ID 精确定位。

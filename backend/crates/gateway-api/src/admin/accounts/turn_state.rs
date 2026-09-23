@@ -93,6 +93,8 @@ struct CookieApplyRequest {
     account_id: String,
     model: String,
     pod: String,
+    /// 记录行固定时带上观测到的签发时间，绑定那条具体 Cookie；省略则取池内当前值。
+    issued_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -293,6 +295,7 @@ where
             account_id,
             request.model,
             request.pod,
+            request.issued_at,
         )
         .await
         .map_err(map_service_error)?;

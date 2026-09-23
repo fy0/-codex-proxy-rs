@@ -565,6 +565,7 @@ impl AccountStore for PgAdminAccountStore {
         account_id: &CoreProviderAccountId,
         model: &str,
         pod: &str,
+        issued_at: Option<i64>,
         context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
         let mut transaction = self.pool.begin().await.map_err(|_| {
@@ -574,11 +575,13 @@ impl AccountStore for PgAdminAccountStore {
                 "routing cookie transaction unavailable",
             )
         })?;
-        // 固定精确到池内当前这条 Cookie：把它的签发时间一并记下，续约换值后固定即失效。
-        let applied = sqlx::query("update account_turn_states s set cookie_override_pod = $3, cookie_override_issued_at = (select c.issued_at from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2) limit 1), next_probe_at = null where s.account_id = $1 and s.model = $2 and (s.config->>'cookieLockEnabled')::boolean and exists (select 1 from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2))")
+        // 固定精确到具体一条 Cookie：把它的签发时间一并记下，续约换值后固定即失效。
+        // 调用方给 issued_at 时绑定观测到的那条，省略则取池内当前值。
+        let applied = sqlx::query("update account_turn_states s set cookie_override_pod = $3, cookie_override_issued_at = (select c.issued_at from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2) and ($4::bigint is null or c.issued_at = $4) limit 1), next_probe_at = null where s.account_id = $1 and s.model = $2 and (s.config->>'cookieLockEnabled')::boolean and exists (select 1 from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2) and ($4::bigint is null or c.issued_at = $4))")
             .bind(account_id.as_str())
             .bind(model)
             .bind(pod)
+            .bind(issued_at)
             .execute(&mut *transaction)
             .await
             .map_err(|_| {

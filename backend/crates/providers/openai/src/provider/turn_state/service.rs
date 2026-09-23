@@ -130,6 +130,7 @@ impl TurnStateService {
                     issued_at: None,
                     reported_model: None,
                     oailb_host: None,
+                    cookie_issued_at: None,
                     cookie_expires_at: None,
                     token: None,
                     has_token: false,
@@ -316,6 +317,7 @@ impl TurnStateService {
             issued_at: None,
             reported_model: None,
             oailb_host: None,
+            cookie_issued_at: None,
             cookie_expires_at: None,
             token: None,
             has_token: false,
@@ -525,6 +527,7 @@ impl TurnStateService {
             observation.response_source = Some("response_created".to_owned());
 
             observation.oailb_host = cookie.as_ref().map(|cookie| cookie.pod.clone());
+            observation.cookie_issued_at = cookie.as_ref().map(|cookie| cookie.issued_at);
             observation.cookie_expires_at = cookie.as_ref().map(|cookie| cookie.expires_at);
             let usable = !deleted
                 && cookie
