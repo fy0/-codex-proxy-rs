@@ -462,6 +462,9 @@ onMounted(async () => {
         </div>
       </template>
       <template #actions="{ row }">
+        <BaseIconButton v-if="canCopy(row, row.issuedAt)" label="复制已安装 state" :disabled="copying" @click="copyState(row, row.issuedAt)">
+          <Copy class="size-4" />
+        </BaseIconButton>
         <BaseIconButton :label="row.manualProbeRequestedAt != null ? '探测已排队' : '探测一次'" :disabled="!row.accountEnabled || probing.has(bucketKey(row)) || row.manualProbeRequestedAt != null" @click="probeOnce(row)">
           <Play class="size-4" />
         </BaseIconButton>
