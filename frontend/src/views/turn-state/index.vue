@@ -572,6 +572,9 @@ onMounted(async () => {
           <BaseIconButton v-if="canCopy(selection, row.issuedAt, row)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row)">
             <Copy class="size-4" />
           </BaseIconButton>
+          <BaseIconButton v-if="row.oailbHost && selection.cookieOverridePod !== row.oailbHost" label="固定此 Cookie 网关" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost)">
+            <LockKeyhole class="size-4" />
+          </BaseIconButton>
         </template>
       </BaseTable>
       <BaseTablePagination :pagination="{ currentPage: page, pageSize, total }" :loading="false" @page-change="page = $event" @page-size-change="pageSize = $event; page = 1" />
