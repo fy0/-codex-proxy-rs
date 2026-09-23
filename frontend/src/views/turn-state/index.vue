@@ -97,6 +97,7 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'issuedAt', label: 'state 签发', kind: 'datetime', format: value => date(value as number | null) },
   { key: 'tokenLength', label: '实际长度', kind: 'numeric', size: 'sm' },
   { key: 'oailbHost', label: 'Cookie pod', kind: 'text', size: '3xl', format: value => value ?? '-' },
+  { key: 'cookieIssuedAt', label: 'Cookie 签发', kind: 'datetime', format: value => date(value as number | null) },
   { key: 'cookieExpiresAt', label: 'Cookie 到期', kind: 'datetime', format: value => date(value as number | null) },
   { key: 'reportedModel', label: '上游模型', kind: 'text', size: 'lg', format: value => value ?? '-' },
   { key: 'egress', label: '出口', kind: 'text' },
@@ -212,6 +213,9 @@ function injectionLabel(bucket: TurnStateStatus) {
   if (managesInjection(bucket))
     return bucket.active && !expired(bucket) ? `模型桶：${bucket.manualOverride ? '手动应用' : '自动安装'}` : '模型桶：不携带 state'
   return hasAccountOverride(bucket) ? '账号通用自定义 state' : '不强制覆盖客户端 / 会话 state'
+}
+function pinnedCookie(bucket: TurnStateStatus, pod: string | null | undefined, issuedAt: number | null | undefined) {
+  return !!pod && issuedAt != null && bucket.cookieOverridePod === pod && bucket.cookieOverrideIssuedAt === issuedAt
 }
 function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined, observation?: TurnStateObservation) {
   return issuedAt != null && issuedAt > 0 && issuedAt <= now.value && issuedAt + bucket.config.ttlSeconds > now.value
@@ -568,7 +572,8 @@ onMounted(async () => {
           <BaseIconButton label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, cookie.pod)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() && selection.cookieOverridePod !== cookie.pod" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod, cookie.issuedAt)">
+          <span v-if="pinnedCookie(selection, cookie.pod, cookie.issuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
+          <BaseIconButton v-else-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase()" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod, cookie.issuedAt)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
           <BaseIconButton v-if="selection.cookieOverridePod === cookie.pod" label="取消 Cookie 固定" :disabled="cookieRemoving" @click="removeCookie(selection)">
@@ -599,7 +604,8 @@ onMounted(async () => {
           <BaseIconButton v-if="row.oailbHost" label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, row.oailbHost)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="row.oailbHost && selection.cookieOverridePod !== row.oailbHost" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost, row.cookieIssuedAt)">
+          <span v-if="pinnedCookie(selection, row.oailbHost, row.cookieIssuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
+          <BaseIconButton v-else-if="row.oailbHost && row.cookieIssuedAt != null" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost, row.cookieIssuedAt)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

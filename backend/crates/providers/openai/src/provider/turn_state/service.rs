@@ -561,6 +561,20 @@ impl TurnStateService {
             }
             .to_owned();
             observation.reported_model = created_model;
+            // Cookie 结果单独判定；同一响应里的 state 只留在记录上，不进入候选或安装。
+            if let Some(raw) = response
+                .value
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            {
+                observation.token_length = Some(raw.len());
+                if let Some(token) = TurnStateToken::parse(raw) {
+                    observation.issued_at = Some(token.issued_at);
+                    if token.is_fresh(observation.observed_at, bucket.config.ttl_seconds) {
+                        observation.token = Some(token.value);
+                    }
+                }
+            }
             self.persist(observation, None).await;
             return if usable {
                 ProbeOutcome::Installed

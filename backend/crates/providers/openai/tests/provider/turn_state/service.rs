@@ -2,8 +2,8 @@
 
 use gateway_core::{
     account::{
-        AccountSelectionPolicy, AccountWeight, MissingTurnStatePolicy, RotationStrategy,
-        TurnStateToken,
+        AccountSelectionPolicy, AccountWeight, MissingTurnStatePolicy, ProviderAccountId,
+        ProviderAccountStore, RotationStrategy, TurnStateToken,
     },
     concurrency::ConcurrencyQueuePolicy,
     engine::{
@@ -407,6 +407,7 @@ async fn cookie_only_probe_renews_and_shares_across_accounts_without_state_overr
         format!("{}.{}.c2ln", URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256"}"#), URL_SAFE_NO_PAD.encode(json!({"host":"chat.gateway.unified-185.api.openai.com","iat":issued,"exp":expires}).to_string()))
     };
     let first = jwt(now - 3500, now + 100);
+    let probed_state = super::token_at(217, now);
     let response_body = |model: &str| {
         format!("event: response.created
 data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"model\":\"{model}\",\"status\":\"in_progress\",\"output\":[]}}}}
@@ -418,6 +419,7 @@ data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"mo
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("set-cookie", format!("__oailb={first}; Path=/; HttpOnly"))
+                .insert_header("x-codex-turn-state", &probed_state)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(response_body(MODEL)),
         )
@@ -455,6 +457,21 @@ data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"mo
             .all(|request| !request.headers.contains_key("cookie"))
     );
     assert_eq!(store.routing_cookies().await.unwrap().len(), 1);
+    let probed = store
+        .turn_observations()
+        .into_iter()
+        .find(|item| item.outcome == "cookie_ready")
+        .expect("cookie probe record");
+    assert_eq!(probed.issued_at, Some(now));
+    assert_eq!(probed.token_length, Some(probed_state.len()));
+    assert_eq!(probed.token.as_deref(), Some(probed_state.as_str()));
+    let bucket = store
+        .turn_state_bucket(&ProviderAccountId::new(ACCOUNT).unwrap(), MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bucket.current.is_none());
+    assert!(bucket.candidate.is_none());
     server.reset().await;
     let renewed = jwt(now, now + 3600);
     Mock::given(method("POST"))
