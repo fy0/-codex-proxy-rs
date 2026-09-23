@@ -79,6 +79,8 @@ export interface TurnStateObservation {
   probeId: string | null
   stopMode: string | null
   stopReason: string | null
+  answer?: string | null
+  answerMatch?: boolean | null
 }
 
 export interface TurnStateInstallation {

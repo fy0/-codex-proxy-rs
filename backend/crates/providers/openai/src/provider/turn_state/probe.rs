@@ -1,6 +1,4 @@
-//! 探测模板只继承 instructions，身份、环境和正文在每次发送前重新生成。
-
-use std::{io::Read, path::Path};
+//! 探测题不再携带 Codex 系统提示词；题库声明期望片段，回答正文随观测留存。
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -13,37 +11,16 @@ use uuid::Uuid;
 
 use crate::transport::profile::CodexWireProfileState;
 
-const SHAPES: [(&str, &str); 20] = [
-    ("greeting", "Hello. Reply with a short greeting."),
-    ("chat", "How is your day? Answer in one sentence."),
-    (
-        "python",
-        "Write a Python expression that adds two integers.",
-    ),
-    ("rust", "Name the Rust type for a boolean."),
-    (
-        "javascript",
-        "Write a JavaScript expression that doubles 4.",
-    ),
-    ("sql", "Write a SQL query that selects the number one."),
-    (
-        "shell",
-        "Name the shell command that prints the current directory.",
-    ),
-    ("math", "What is seven plus five?"),
-    ("capital", "What is the capital of France?"),
-    ("science", "Name the chemical symbol for oxygen."),
-    ("definition", "Define recursion in one short sentence."),
-    ("synonym", "Give one synonym for quick."),
-    ("opposite", "What is the opposite of north?"),
-    ("sort", "Sort these integers: 3, 1, 2."),
-    ("json", "Return a JSON object with ready set to true."),
-    ("list", "List two primary colors."),
-    ("boolean", "Is eight an even number?"),
-    ("thanks", "Thank you for your help. Reply briefly."),
-    ("naming", "Suggest a short name for a counter variable."),
-    ("unit", "How many seconds are in one minute?"),
-];
+/// 探测题库：(shape 标识, 问题正文, 回答必须包含的片段)。
+/// 题目只依赖模型自身知识、不要求联网；片段按 ASCII 大小写不敏感匹配。
+const QUESTIONS: &[(&str, &str, &str)] = &[(
+    "x_handle",
+    "Don't search the internet. Who is Thibault Sottiaux on X? Your answer must include the @ handle.",
+    "@thsottiaux",
+)];
+
+/// 回答正文只用于命中判定与管理端展示，按字节上限截断。
+const ANSWER_LIMIT: usize = 8 * 1024;
 
 pub(super) fn random_index(count: usize) -> usize {
     // 拒绝采样使 N+1 出口保持均匀，不把取模偏差带入实验分布。
@@ -61,42 +38,38 @@ pub(super) fn random_index(count: usize) -> usize {
     }
 }
 
-pub(super) fn load_template(path: Option<&Path>) -> Result<String, ()> {
-    let Some(path) = path else {
-        return Ok("You are a helpful coding assistant. Keep the response brief.".to_owned());
-    };
-    let file = std::fs::File::open(path).map_err(|_| ())?;
-    if file.metadata().map_err(|_| ())?.len() > 1024 * 1024 {
-        return Err(());
-    }
-    let decoder = zstd::stream::read::Decoder::new(file).map_err(|_| ())?;
-    let mut bytes = Vec::new();
-    decoder
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    if bytes.len() > 1024 * 1024 {
-        return Err(());
-    }
-    let body: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
-    body.get("instructions")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-        .ok_or(())
-}
-
 /// 有界读取 SSE 的停止结果：reason 维持原语义，reported_model 记录上游在
 /// 已读事件里声明的实际模型（头块声明优先于 response.model）。
 pub(super) struct ProbeOutput {
     pub reason: &'static str,
     pub reported_model: Option<String>,
     pub created_model: Option<String>,
+    /// 题库问题的回答正文（按字节截断）；只有读取正文的探测才会产生。
+    pub answer: Option<String>,
+    /// 回答是否包含题库声明的期望片段；题目未声明期望时为空。
+    pub answer_match: Option<bool>,
+}
+
+fn push_bounded(answer: &mut String, delta: &str) {
+    let mut end = delta
+        .len()
+        .min(ANSWER_LIMIT.saturating_sub(answer.len()));
+    while !delta.is_char_boundary(end) {
+        end -= 1;
+    }
+    answer.push_str(&delta[..end]);
+}
+
+fn contains_ignore_ascii_case(answer: &str, expected: &str) -> bool {
+    answer
+        .to_ascii_lowercase()
+        .contains(&expected.to_ascii_lowercase())
 }
 
 pub(super) async fn wait_for_output(
     response: reqwest::Response,
     stop_at_model: bool,
+    expect: Option<&str>,
 ) -> ProbeOutput {
     let mut stream = response.bytes_stream();
     let mut decoder = SseEventDecoder::default();
@@ -105,6 +78,7 @@ pub(super) async fn wait_for_output(
     let mut header_model: Option<String> = None;
     let mut body_model = ResponseModelObservation::default();
     let mut created_model = None;
+    let mut answer = String::new();
     let reason = 'read: loop {
         let Some(chunk) = stream.next().await else {
             break 'read "body_ended";
@@ -135,19 +109,37 @@ pub(super) async fn wait_for_output(
                         .and_then(Value::as_str)
                         .filter(|model| !model.is_empty() && model.len() <= 256)
                         .map(str::to_owned);
-                    if stop_at_model && created_model.is_some() {
+                    if stop_at_model && expect.is_none() && created_model.is_some() {
                         break 'read "response_created";
                     }
                 }
                 match event_type {
+                    Some("response.output_text.delta") => {
+                        if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                            push_bounded(&mut answer, delta);
+                        }
+                        if let Some(expected) = expect {
+                            if contains_ignore_ascii_case(&answer, expected) {
+                                break 'read "answer_matched";
+                            }
+                            if answer.len() >= ANSWER_LIMIT {
+                                break 'read "answer_limit";
+                            }
+                        } else {
+                            break 'read "first_output";
+                        }
+                    }
                     Some(
-                        "response.output_text.delta"
-                        | "response.refusal.delta"
+                        "response.refusal.delta"
                         | "response.reasoning_text.delta"
                         | "response.reasoning_summary_text.delta"
                         | "response.audio.delta"
                         | "response.output_audio.delta",
-                    ) => break 'read "first_output",
+                    ) => {
+                        if expect.is_none() {
+                            break 'read "first_output";
+                        }
+                    }
                     Some(
                         "response.completed" | "response.failed" | "response.incomplete" | "error",
                     ) => break 'read "terminal",
@@ -160,6 +152,8 @@ pub(super) async fn wait_for_output(
         reason,
         created_model,
         reported_model: header_model.or_else(|| body_model.model().map(str::to_owned)),
+        answer: (!answer.is_empty()).then_some(answer),
+        answer_match: expect.map(|expected| contains_ignore_ascii_case(&answer, expected)),
     }
 }
 
@@ -168,13 +162,13 @@ pub(super) struct ProbeRequest {
     pub body: Value,
     pub shape: &'static str,
     pub effort: &'static str,
+    pub expect: &'static str,
     pub id: String,
 }
 
 pub(super) fn request(
     model: &str,
     config: &TurnStateConfig,
-    instructions: &str,
     profile: &CodexWireProfileState,
     now: DateTime<Utc>,
 ) -> ProbeRequest {
@@ -191,7 +185,7 @@ pub(super) fn request(
         "turn_started_at_unix_ms": now.timestamp_millis(),
     })
     .to_string();
-    let (shape, prompt) = SHAPES[random_index(SHAPES.len())];
+    let (shape, prompt, expect) = QUESTIONS[random_index(QUESTIONS.len())];
     let effort = ["medium", "high", "xhigh"][random_index(3)];
     let profile = profile.snapshot();
     let originator = &config.originator;
@@ -222,9 +216,10 @@ pub(super) fn request(
         headers,
         shape,
         effort,
+        expect,
         id: id.clone(),
         body: json!({
-            "model": model, "instructions": instructions, "stream": true, "store": false,
+            "model": model, "stream": true, "store": false,
             "tools": [], "parallel_tool_calls": true,
             "reasoning": {"effort": effort, "summary": "auto"},
             "include": ["reasoning.encrypted_content"],

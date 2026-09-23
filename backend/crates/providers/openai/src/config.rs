@@ -41,8 +41,6 @@ pub struct OpenAiConfig {
     #[serde(default = "default_stream_max_retries")]
     pub stream_max_retries: u64,
     pub wire_profile: CodexWireProfileConfig,
-    #[serde(default)]
-    pub turn_state_template: Option<PathBuf>,
     #[serde(skip)]
     identity_secret_path: PathBuf,
 }
@@ -123,7 +121,6 @@ impl Default for OpenAiConfig {
             auth: CodexAuthSettings::default(),
             stream_max_retries: DEFAULT_STREAM_MAX_RETRIES,
             wire_profile: CodexWireProfileConfig::default(),
-            turn_state_template: None,
             identity_secret_path: PathBuf::new(),
         }
     }

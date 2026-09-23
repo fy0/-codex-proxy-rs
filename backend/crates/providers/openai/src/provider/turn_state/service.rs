@@ -25,7 +25,6 @@ pub(crate) struct TurnStateService {
     repository: CodexCredentialRepository,
     profile: CodexWireProfileState,
     pub(super) endpoint: String,
-    instructions: String,
     pool: Arc<CodexWebSocketPool>,
 }
 
@@ -40,7 +39,6 @@ impl TurnStateService {
         store: Arc<dyn ProviderAccountStore>,
         profile: CodexWireProfileState,
         endpoint: String,
-        instructions: String,
         pool: Arc<CodexWebSocketPool>,
     ) -> Self {
         Self {
@@ -48,13 +46,8 @@ impl TurnStateService {
             store,
             profile,
             endpoint,
-            instructions,
             pool,
         }
-    }
-
-    pub(crate) fn template(path: Option<&std::path::Path>) -> Result<String, ()> {
-        probe::load_template(path)
     }
 
     pub(crate) async fn current(
@@ -147,6 +140,8 @@ impl TurnStateService {
                     probe_id: None,
                     stop_mode: None,
                     stop_reason: None,
+                    answer: None,
+                    answer_match: None,
                 };
                 service
                     .observe(
@@ -331,6 +326,8 @@ impl TurnStateService {
             probe_id: None,
             stop_mode: None,
             stop_reason: None,
+            answer: None,
+            answer_match: None,
         };
         let loaded = match self.store.load_current_credential(account_id).await {
             Ok(loaded) => loaded,
@@ -386,13 +383,7 @@ impl TurnStateService {
         let proxy = exits[probe::random_index(exits.len())].as_ref();
         observation.egress = proxy.map_or_else(|| "direct".to_owned(), OutboundProxy::endpoint);
         // 探测画像属于模型桶，不覆盖账号的业务画像或出口位置。
-        let request = probe::request(
-            &bucket.model,
-            &bucket.config,
-            &self.instructions,
-            &self.profile,
-            Utc::now(),
-        );
+        let request = probe::request(&bucket.model, &bucket.config, &self.profile, Utc::now());
         observation.shape = Some(request.shape.to_owned());
         observation.effort = Some(request.effort.to_owned());
         observation.probe_id = Some(request.id);
@@ -486,13 +477,19 @@ impl TurnStateService {
                 Ok(upstream) if read_output && upstream.status().is_success() => {
                     match tokio::time::timeout(
                         Duration::from_secs(30),
-                        probe::wait_for_output(upstream, bucket.config.cookie_lock_enabled),
+                        probe::wait_for_output(
+                            upstream,
+                            bucket.config.cookie_lock_enabled,
+                            Some(request.expect),
+                        ),
                     )
                     .await
                     {
                         Ok(output) => {
                             created_model = output.created_model;
                             body_model = output.reported_model;
+                            observation.answer = output.answer;
+                            observation.answer_match = output.answer_match;
                             output.reason
                         }
                         Err(_) => "body_timeout",

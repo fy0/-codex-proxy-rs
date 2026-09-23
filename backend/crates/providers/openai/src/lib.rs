@@ -103,8 +103,6 @@ pub async fn initialize(
         Arc::clone(&accounts),
         profile.clone(),
         transport::endpoint_url(config.base_url(), transport::CODEX_RESPONSES_PATH),
-        provider::TurnStateService::template(config.turn_state_template.as_deref())
-            .map_err(|_| OpenAiInitializeError::TurnStateTemplate)?,
         Arc::clone(&websocket_pool),
     ));
     let catalog = Arc::new(CodexCredentialCatalogService::new(
@@ -271,6 +269,4 @@ pub enum OpenAiInitializeError {
     DesktopRelease,
     #[error("OpenAI worker plan is invalid")]
     Worker,
-    #[error("OpenAI turn state template is invalid")]
-    TurnStateTemplate,
 }

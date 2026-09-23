@@ -79,6 +79,8 @@ impl TurnStateService {
                 probe_id: None,
                 stop_mode: None,
                 stop_reason: None,
+                answer: None,
+                answer_match: None,
             },
             None,
         )

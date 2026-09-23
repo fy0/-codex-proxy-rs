@@ -297,6 +297,12 @@ pub struct TurnStateObservation {
     pub stop_mode: Option<String>,
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// 题库问题的回答正文（有界截断）；仅主动探测产生，业务观测不保存回答。
+    #[serde(default)]
+    pub answer: Option<String>,
+    /// 回答是否命中题库声明的期望片段；未读正文或题目未声明期望时为空。
+    #[serde(default)]
+    pub answer_match: Option<bool>,
 }
 
 impl std::fmt::Debug for TurnStateObservation {

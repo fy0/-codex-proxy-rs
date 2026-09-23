@@ -56,6 +56,8 @@ pub(super) fn observation(
         probe_id: Some("test-probe".to_owned()),
         stop_mode: Some("headers".to_owned()),
         stop_reason: Some("headers".to_owned()),
+        answer: None,
+        answer_match: None,
     }
 }
 

@@ -104,6 +104,7 @@ const logColumns = defineTableColumns<TurnStateObservation>([
   { key: 'elapsedMs', label: '耗时（ms）', kind: 'numeric' },
   { key: 'stopMode', label: '中断策略', kind: 'text', size: 'lg', format: value => value === 'headers' ? '获得 state' : value === 'first_output' ? '获得回应' : '-' },
   { key: 'stopReason', label: '中断原因', kind: 'text', size: 'lg' },
+  { key: 'answer', label: '当前答案', kind: 'custom', size: '3xl' },
   { key: 'probeId', label: '请求 ID', kind: 'mono', size: '3xl' },
   { key: 'actions', label: '操作', kind: 'actions', size: 'lg' },
 ])
@@ -148,6 +149,10 @@ function businessLabel(bucket: TurnStateStatus) {
 }
 function recentProbe(bucket: TurnStateStatus) {
   return bucket.observations.find(item => item.source === 'probe')
+}
+function clippedAnswer(value: string) {
+  const limit = 120
+  return value.length > limit ? `${value.slice(0, limit)}…` : value
 }
 function requestStateSource(value: string | null) {
   const labels: Record<string, string> = { none: '未携带', client: '客户端 / 会话', automatic_override: '模型桶自动安装', bucket_manual_override: '模型桶手动应用', account_override: '账号通用覆盖', manual_override: '手动覆盖（历史记录）' }
@@ -407,6 +412,7 @@ onMounted(async () => {
       <template #recentProbe="{ row }">
         <div v-if="recentProbe(row)" class="grid gap-1">
           <span>{{ outcome(recentProbe(row)!.outcome) }}</span>
+          <span v-if="recentProbe(row)!.answer" class="break-all text-cp-xs" :title="recentProbe(row)!.answer">{{ clippedAnswer(recentProbe(row)!.answer!) }}</span>
           <span class="text-cp-xs text-cp-text-secondary">{{ date(recentProbe(row)!.observedAt) }}</span>
         </div>
         <span v-else class="text-cp-text-secondary">暂无探测</span>
@@ -549,6 +555,14 @@ onMounted(async () => {
       <BaseSegmented v-model="tab" label="记录类型" class="w-full sm:w-96" :options="[{ label: '主动探测', value: 'probe' }, { label: '被动采集', value: 'passive' }, { label: '安装历史', value: 'history' }]" />
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
       <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">
+        <template #answer="{ row }">
+          <div v-if="row.answer" class="grid gap-1" :title="row.answer">
+            <span class="break-all text-cp-xs">{{ clippedAnswer(row.answer) }}</span>
+            <span v-if="row.answerMatch === true" class="text-cp-xs text-cp-success-text">命中期望</span>
+            <span v-else-if="row.answerMatch === false" class="text-cp-xs text-cp-warning-text">未命中期望</span>
+          </div>
+          <span v-else class="text-cp-text-secondary">-</span>
+        </template>
         <template #actions="{ row }">
           <BaseIconButton v-if="canApply(row)" label="应用此 state（不改变自动探测开关）" :disabled="applying" @click="applyState(selection, row.issuedAt, row.tokenLength, row)">
             <Check class="size-4" />

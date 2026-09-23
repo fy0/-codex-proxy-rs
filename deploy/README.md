@@ -284,20 +284,6 @@ native-tls 的系统后端、代理和自定义 CA 都会影响 ClientHello；�
 
 建议先在少量账号上对比带/不带 Cookie、跨账号和跨出口请求的实际模型与 pod，再扩大使用。此路由行为没有公开服务端合同，模型观测不能保证下一次请求仍落到相同模型。升级自动新增共享池表，旧配置默认关闭 Cookie 锁定。
 
-### 探测模板
-
-不配置模板时使用内置英文 coding instructions。需要沿用真实客户端的 instructions 时，先在受控位置从录制中
-提取**仅请求体**，人工清除 instructions 内的项目机密，然后保留 `instructions` 字符串并 zstd 压缩：
-
-```bash
-jq '{instructions: .instructions}' sanitized-body.json | zstd -3 -o turn-state-template.json.zst
-```
-
-在已有 `openai` 配置下增加 `turn_state_template`，指向进程可读的绝对路径；容器部署需挂载对应文件。
-模板在启动时读取，压缩和解压后的体积都不得超过 1 MiB；无有效字符串 instructions 或无法解压时启动报错。
-修改后重启进程。解析器只继承 instructions，原输入、工具、身份和时间不继承，避免重放已消费身份。
-不要放入 `.hdr`、Bearer、Cookie、账号令牌或完整原始录制；模板文件不应提交仓库。
-
 ### 分布验收与排障
 
 1. 选择一个允许探测的真实账号/模型，先用默认账号出口启用一个有限预算，观察多个尝试而非单次命中率。
