@@ -614,8 +614,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             Err(map_selection_error(CredentialSelectionError::MissingTurnState))?;
         }
         let cookie_header = if cookie_lock {
-            // 只锁路由凭证；剥离旧亲和 Cookie，保留本账号自己的认证 Cookie。
-            let base = build_cookie_header(lease.cookies().iter().filter(|cookie| !matches!(cookie.name.as_str(), "__oailb" | "__oai_lb" | "__cflb")))?;
+            // 只锁路由凭证；剥离旧的 __oailb/__oai_lb 避免与池内选定值重复，
+            // __cflb 等其余亲和 Cookie 原样回放。
+            let base = build_cookie_header(lease.cookies().iter().filter(|cookie| !matches!(cookie.name.as_str(), "__oailb" | "__oai_lb")))?;
             let mut value = base.as_ref().map(|value| value.expose_secret().to_owned()).unwrap_or_default();
             if let Some(cookie) = &sent_cookie {
                 if !value.is_empty() { value.push_str("; "); }
