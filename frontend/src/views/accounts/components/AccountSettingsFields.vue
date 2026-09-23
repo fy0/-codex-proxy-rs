@@ -85,7 +85,7 @@ const copyText = useCopyText()
           v-model="turnStateOverride"
           class="min-w-0 flex-1"
           aria-label="自定义 x-codex-turn-state"
-          placeholder="未受模型桶管理的请求使用此覆盖"
+          placeholder="非空时覆盖自动 state，留空则使用模型桶"
           :disabled="disabled"
         />
         <BaseIconButton label="复制账号通用 state" :disabled="!turnStateOverride" @click="copyText(turnStateOverride, { successText: 'state 已复制' })">
@@ -93,7 +93,7 @@ const copyText = useCopyText()
         </BaseIconButton>
       </div>
       <p class="mb-0 mt-2 text-cp-xs text-cp-text-secondary">
-        受模型桶管理时以桶内 state 为准，缺票也不会回退到此通用覆盖。
+        非空时业务请求使用这里的值，覆盖桶内自动安装的 state，直到改为空。清空后恢复桶内票；不能解除暂停业务调度的缺票限制。
       </p>
     </BaseFormItem>
   </div>

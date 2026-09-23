@@ -46,11 +46,13 @@ function source(bucket: TurnStateStatus) {
   if (bucket.config.cookieLockEnabled)
     return bucket.routingCookie && bucket.routingCookie.expiresAt > now.value ? `Cookie 锁定：${bucket.routingCookie.pod}` : '等待匹配模型的 Cookie'
 
+  if (props.hasAccountOverride)
+    return '账号通用覆盖'
   if (installed(bucket))
     return bucket.manualOverride ? '模型桶手动应用' : '模型桶自动安装'
   if (bucket.config.enabled || bucket.manualOverride || bucket.issuedAt != null || bucket.config.missingStatePolicy === 'pause')
-    return '模型桶无有效 state，不回退通用覆盖'
-  return props.hasAccountOverride ? '账号通用覆盖' : '客户端 / 会话'
+    return '模型桶无有效 state'
+  return '客户端 / 会话'
 }
 function business(bucket: TurnStateStatus) {
   if (!bucket.accountEnabled)
@@ -119,7 +121,7 @@ useIntervalFn(() => {
       </BaseIconButton>
     </div>
     <p class="m-0 text-cp-sm text-cp-text-secondary">
-      已安装的模型 state 强制覆盖请求头和会话元数据，会话切换后仍生效。操作立即生效；移除后，自动探测开启的桶会继续寻找新票。
+      账号通用 state 非空时优先于桶内票。否则已安装的模型 state 覆盖请求头和会话元数据，会话切换后仍生效。改为空后恢复桶内票；移除后，自动探测开启的桶会继续寻找新票。
     </p>
     <p v-if="error" role="alert" class="m-0 text-cp-sm text-cp-error">
       {{ error }}

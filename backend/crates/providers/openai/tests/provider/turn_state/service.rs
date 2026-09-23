@@ -138,6 +138,84 @@ fn request_with_state(
 }
 
 #[tokio::test]
+async fn account_turn_state_override_replaces_the_automatic_ticket_until_cleared() {
+    let server = MockServer::start().await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    store.seed_turn_state(
+        ACCOUNT,
+        MODEL,
+        TurnStateConfig {
+            enabled: true,
+            ..TurnStateConfig::default()
+        },
+    );
+    let installed = super::token_at(217, Utc::now().timestamp());
+    store.set_current_turn_state(
+        ACCOUNT,
+        MODEL,
+        TurnStateToken::parse(&installed).unwrap(),
+        false,
+    );
+    store.set_turn_state_override(ACCOUNT, Some("manual-account-state"));
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(COMPLETED),
+        )
+        .mount(&server)
+        .await;
+    let runtime = tempfile::tempdir().unwrap();
+    let mut config = OpenAiConfig::default();
+    config.api.base_url = server.uri();
+    config.resolve_and_validate(runtime.path()).unwrap();
+    let bundle =
+        provider_openai::initialize(config, turn_state_provider_ports(Arc::clone(&store)))
+            .await
+            .unwrap();
+    let (input, context) = request_with_state(&[ACCOUNT], MODEL, Some("client-state"));
+    let mut stream = bundle
+        .core_provider()
+        .execute(input, context)
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    drop(stream);
+    assert_eq!(
+        server.received_requests().await.unwrap()[0].headers["x-codex-turn-state"],
+        "manual-account-state"
+    );
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(COMPLETED),
+        )
+        .mount(&server)
+        .await;
+    store.set_turn_state_override(ACCOUNT, None);
+    let (input, context) = request(&[ACCOUNT], MODEL);
+    let mut stream = bundle
+        .core_provider()
+        .execute(input, context)
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    assert_eq!(
+        server.received_requests().await.unwrap()[0].headers["x-codex-turn-state"],
+        installed
+    );
+}
+
+#[tokio::test]
 async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery_remain_available()
 {
     let server = MockServer::start().await;

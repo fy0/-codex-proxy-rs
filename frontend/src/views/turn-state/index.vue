@@ -210,9 +210,11 @@ function hasAccountOverride(bucket: TurnStateStatus) {
 function injectionLabel(bucket: TurnStateStatus) {
   if (businessStatus(bucket) !== 'ready')
     return '业务暂停，不发送'
+  if (hasAccountOverride(bucket))
+    return '账号通用自定义 state'
   if (managesInjection(bucket))
     return bucket.active && !expired(bucket) ? `模型桶：${bucket.manualOverride ? '手动应用' : '自动安装'}` : '模型桶：不携带 state'
-  return hasAccountOverride(bucket) ? '账号通用自定义 state' : '不强制覆盖客户端 / 会话 state'
+  return '不强制覆盖客户端 / 会话 state'
 }
 function pinnedCookie(bucket: TurnStateStatus, pod: string | null | undefined, issuedAt: number | null | undefined) {
   return !!pod && issuedAt != null && bucket.cookieOverridePod === pod && bucket.cookieOverrideIssuedAt === issuedAt
@@ -495,7 +497,7 @@ onMounted(async () => {
           </dt>
           <dd class="m-0 mt-1 break-words">
             {{ injectionLabel(selection) }}
-            <span v-if="hasAccountOverride(selection) && managesInjection(selection)" class="ml-2 text-cp-warning-text">该模型由桶管理，账号通用自定义 state 不生效</span>
+            <span v-if="hasAccountOverride(selection) && managesInjection(selection)" class="ml-2 text-cp-text-secondary">覆盖桶内自动 state，改为空后恢复</span>
           </dd>
         </div>
         <div>

@@ -365,7 +365,7 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 更新指定 OpenAI 账号的 OAuth token 或 API Key 上游设置 |
 | `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, turnStateOverride?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
-| `POST` | `/api/admin/accounts/turn-state-override` | `{ accountId, turnStateOverride }` | 单独设置账号级 `x-codex-turn-state` 强制覆盖；`null` 或空白串清除，非空值须为合法 HTTP header 值（≤1024 字节） |
+| `POST` | `/api/admin/accounts/turn-state-override` | `{ accountId, turnStateOverride }` | 单独设置账号级 `x-codex-turn-state` 强制覆盖；`null` 或空白串清除，非空值须为合法 HTTP header 值（≤1024 字节）。非空时优先于桶内自动 state，清空后恢复桶内票，不解除缺票暂停 |
 | `GET` | `/api/admin/accounts/turn-state` | 可选 `accountId` | 按账号、上游模型返回轮换配置、令牌元数据、观测和安装历史，不返回令牌正文 |
 | `POST` | `/api/admin/accounts/turn-state/configure` | `{ accountId, model, config }` | 配置 OpenAI OAuth 账号的一个模型桶，返回账号 ID 与配置版本 |
 | `POST` | `/api/admin/accounts/turn-state/probe` | `{ accountId, model }` | 排队一次探测，返回 202 和账号配置版本；账号须启用，不要求桶启用轮换 |
@@ -438,7 +438,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 | 配置字段 | 默认值 | 范围或语义 |
 | --- | --- | --- |
 | `enabled` | `false` | 启用该桶的后台探测与自动安装；关闭不撤销仍有效的已安装 state，被动观测不依赖此开关 |
-| `cookieLockEnabled` | `false` | 独立启用 Cookie 锁定及后台采样、续约；`enabled=false` 时不替换客户端 state，也不应用账号通用 state 覆盖 |
+| `cookieLockEnabled` | `false` | 独立启用 Cookie 锁定及后台采样、续约；`enabled=false` 时不替换客户端 state。账号通用 state 非空时仍写入请求，改为空后不再覆盖 |
 | `cookieRefreshBeforeSeconds` | `300` | 30–1800 秒，在 JWT 到期前提前携带同一 Cookie 探测续约；以新 JWT 的实际期限为准 |
 | `cookieGatewayIds` | `""` | 只允许十进制网关编号，多个值用 `|` 分隔，例如 `185|87`；留空不自动选择，管理员仍可人工固定有效候选 |
 | `missingStatePolicy` | `allow` | `allow` 无有效 state 时继续调度；`pause` 暂停该账号、该上游模型的业务调度，不改变账号与自动探测开关。`pause` 是这里的退避策略 |
@@ -484,7 +484,7 @@ state 模式下，`pause` 的有票条件只认可同账号、同上游模型、
 
 `hasInstalledState` 表示当前存在身份、长度、有效期均匹配的已安装票，不依赖账号开关；因此手动停用时仍可复制有效票。移除后为 false，保留的 `issuedAt` 仅是历史水位，不能用于判断有票。模型票与通用覆盖使用相同的强制注入路径，同时覆盖请求头及会话元数据；切换会话后继续按本次选中账号与实际上游模型应用。
 
-启用自动轮换、采用 `pause` 或曾安装令牌的桶以模型专属覆盖为准，没有有效令牌时清除请求中的旧覆盖；安装只接受比该桶历史签发水位严格更新的候选。自动令牌不会写入账号级标量 `turnStateOverride`。其余模型仍沿用原有账号手工覆盖行为；该接口不具备桶的寿命和隔离保证，不能满足 `pause` 的有票条件。操作说明见 [Turn State 轮换](../deploy/README.md#turn-state-轮换)。
+账号通用 `turnStateOverride` 非空时优先于桶内自动或手动安装的 state，直到管理员把它改为空。清空后，启用自动轮换、采用 `pause` 或曾安装令牌的桶仍以模型专属覆盖为准，没有有效令牌时清除请求中的旧覆盖，不回退到已清空的通用值。安装只接受比该桶历史签发水位严格更新的候选。自动令牌不会写入账号级标量 `turnStateOverride`。该通用值不具备桶的寿命和隔离保证，也不能满足 `pause` 的有票条件。操作说明见 [Turn State 轮换](../deploy/README.md#turn-state-轮换)。
 
 ### 账号模型限制
 

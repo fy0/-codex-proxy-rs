@@ -203,6 +203,16 @@ impl MemoryAccountStore {
             .map(|stored| stored.account.clone())
     }
 
+    pub(crate) fn set_turn_state_override(&self, id: &str, value: Option<&str>) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        stored.account = stored
+            .account
+            .clone()
+            .with_turn_state_override(value.map(str::to_owned));
+    }
+
     pub(crate) fn set_scheduling(
         &self,
         id: &str,

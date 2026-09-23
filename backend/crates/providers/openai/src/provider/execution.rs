@@ -1194,6 +1194,14 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     })
 }
 
+fn account_state_override(lease: &CodexCredentialLease) -> Option<&str> {
+    lease
+        .account()
+        .turn_state_override()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn prepare_turn_state(
     request: &mut CodexResponsesRequest,
     lease: &CodexCredentialLease,
@@ -1205,15 +1213,17 @@ fn prepare_turn_state(
     } else {
         "none"
     };
+    // 非空的账号通用 state 一直覆盖自动票，直到管理员把它改成空。
+    let account_override = account_state_override(lease);
     if lease
         .turn_state()
         .is_some_and(|bucket| bucket.config.cookie_lock_enabled && !bucket.config.enabled)
     {
+        if let Some(value) = account_override {
+            force_turn_state_override(request, value);
+            return Ok("account_override");
+        }
         return Ok(source);
-    }
-    if let Some(value) = lease.account().turn_state_override() {
-        force_turn_state_override(request, value);
-        source = "account_override";
     }
     if let Some(bucket) = lease
         .turn_state()
@@ -1229,7 +1239,11 @@ fn prepare_turn_state(
                 CredentialSelectionError::MissingTurnState,
             ));
         }
-        // 管理桶没有有效票时也清除客户端与账号级覆盖，防止过期或跨模型回退。
+        if let Some(value) = account_override {
+            force_turn_state_override(request, value);
+            return Ok("account_override");
+        }
+        // 通用值为空时，管理桶没有有效票也清除客户端旧覆盖，防止过期或跨模型回退。
         crate::transport::request::clear_turn_state_override(request);
         source = "none";
         if bucket.matches_account(lease.account(), model)
@@ -1242,6 +1256,9 @@ fn prepare_turn_state(
                 "automatic_override"
             };
         }
+    } else if let Some(value) = account_override {
+        force_turn_state_override(request, value);
+        source = "account_override";
     }
     Ok(source)
 }
