@@ -20,9 +20,13 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - 开发和审查按 [问题与方案依据](CONTRIBUTING.md#问题与方案依据) 先核实问题，以官方源码为首要参考确定或评估方案。
 - 先定位变更所属模块、同类实现和上下游调用关系，再选择最小合理改动。复用已有能力，也避免为尚不存在的需求增加抽象。
 - 代码注释使用中文，解释原因与边界；提交信息使用英文，沿用历史中的 Conventional Commits 格式。
-- 按变更范围执行验证，记录命令、结果和缺口。跳过的测试不算通过；界面与集成行为需要对应运行证据，构建通过不能替代实际验收。
+- 按变更范围执行验证，记录命令、结果和缺口。跳过的测试不算通过；界面与集成行为需要对应运行证据，构建通过不能替代实际验收。本机 Rust 编译见下文「本机编译」。
 - 审查请求默认只读。修复、提交、推送和合并按用户当前授权执行；“本地验证通过”不等于用户已经审阅批准。
 - 不读取或输出无关凭据，不把真实密钥、代理认证、账号令牌或请求转储放入提交、截图及审查报告。
+
+## 本机编译
+
+这台机器的磁盘放不下 Rust 编译产物，`backend/target` 已经删除。不要在本机执行 `cargo build`、`cargo test`、`cargo clippy`、`cargo check`，也不要运行其他会重新生成 `backend/target` 的 Cargo 命令。Rust 验证推到 fork 后看 GitHub Actions 的结果。
 
 ## Code Review Rules
 

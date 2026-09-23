@@ -12,6 +12,7 @@ pub struct TurnStateConfig {
     pub enabled: bool,
     pub cookie_lock_enabled: bool,
     pub cookie_refresh_before_seconds: u64,
+    pub cookie_gateway_ids: String,
     pub missing_state_policy: MissingTurnStatePolicy,
     /// 暂停业务调度时，已附着的实际模型突然变化则作废当前票。
     pub detect_actual_model: bool,
@@ -75,6 +76,7 @@ impl Default for TurnStateConfig {
             enabled: false,
             cookie_lock_enabled: false,
             cookie_refresh_before_seconds: 300,
+            cookie_gateway_ids: String::new(),
             missing_state_policy: MissingTurnStatePolicy::Allow,
             detect_actual_model: false,
             target_length: 292,
@@ -129,8 +131,33 @@ impl TurnStateConfig {
             && self.proxy_ids.iter().all(|id| {
                 id.starts_with("proxy_") && id.len() <= 128 && !id.chars().any(char::is_control)
             })
+            && self.cookie_gateway_ids_valid()
             && (self.feishu_webhook_url.is_empty()
                 || valid_feishu_webhook(&self.feishu_webhook_url))
+    }
+
+    pub fn cookie_gateway_ids_valid(&self) -> bool {
+        self.cookie_gateway_ids.len() <= 256
+            && !self.cookie_gateway_ids.chars().any(char::is_control)
+            && (self.cookie_gateway_ids.is_empty()
+                || (self.cookie_gateway_ids.split('|').count() <= 32
+                    && self.cookie_gateway_ids.split('|').all(|id| {
+                        !id.is_empty()
+                            && id.len() <= 10
+                            && id.bytes().all(|byte| byte.is_ascii_digit())
+                    })))
+    }
+
+    pub fn allows_cookie_gateway(&self, pod: &str) -> bool {
+        if self.cookie_gateway_ids.is_empty() {
+            return false;
+        }
+        let Some(gateway_id) = super::RoutingCookie::gateway_id_from_pod(pod) else {
+            return false;
+        };
+        self.cookie_gateway_ids
+            .split('|')
+            .any(|id| id == gateway_id)
     }
 
     /// 实际模型检测只在暂停业务调度时把脱离的票作废，避免继续注入失效票。
@@ -316,6 +343,7 @@ pub struct TurnStateBucket {
     pub model: String,
     pub config: TurnStateConfig,
     pub routing_cookies: Vec<super::RoutingCookie>,
+    pub cookie_override_pod: Option<String>,
     pub current: Option<TurnStateToken>,
     pub current_issued_at: Option<i64>,
     pub current_length: Option<usize>,
@@ -329,10 +357,25 @@ pub struct TurnStateBucket {
 }
 
 impl TurnStateBucket {
+    pub fn cookie_is_selectable(&self, cookie: &super::RoutingCookie) -> bool {
+        self.config.allows_cookie_gateway(&cookie.pod)
+            || self
+                .cookie_override_pod
+                .as_deref()
+                .is_some_and(|pod| pod == cookie.pod)
+    }
+
     pub fn routing_cookie(&self, now: i64) -> Option<&super::RoutingCookie> {
         self.routing_cookies
             .iter()
-            .filter(|cookie| cookie.is_usable(&self.model, now))
+            .filter(|cookie| {
+                cookie.is_usable(&self.model, now)
+                    && self.cookie_is_selectable(cookie)
+                    && self
+                        .cookie_override_pod
+                        .as_deref()
+                        .is_none_or(|pod| pod == cookie.pod)
+            })
             .max_by_key(|cookie| (cookie.expires_at, cookie.observed_at))
     }
 
@@ -341,6 +384,11 @@ impl TurnStateBucket {
             .iter()
             .filter(|cookie| {
                 cookie.is_usable(&self.model, now)
+                    && self.cookie_is_selectable(cookie)
+                    && self
+                        .cookie_override_pod
+                        .as_deref()
+                        .is_none_or(|pod| pod == cookie.pod)
                     && cookie.expires_at <= now + self.config.cookie_refresh_before_seconds as i64
             })
             .min_by_key(|cookie| cookie.expires_at)
@@ -422,6 +470,7 @@ pub struct TurnStateStatus {
     pub has_installed_state: bool,
     pub routing_cookie: Option<super::RoutingCookieStatus>,
     pub cookie_pool: Vec<super::RoutingCookieStatus>,
+    pub cookie_override_pod: Option<String>,
     pub business_status: TurnStateBusinessStatus,
     pub account_enabled: bool,
     pub hunt_attempts: u64,

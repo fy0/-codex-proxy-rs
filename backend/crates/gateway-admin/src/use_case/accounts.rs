@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use futures::StreamExt as _;
 use gateway_core::{
-    account::ProviderAccountId,
+    account::{ProviderAccountId, RoutingCookie},
     engine::probe::{AccountProbe, AccountProbeRequest},
     routing::{ProviderKind, UpstreamModelId},
     runtime::SnapshotControl,
@@ -83,6 +83,25 @@ pub trait AccountsService: Send + Sync {
         _observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         Err(AdminError::invalid("当前服务不支持应用 turn state"))
+    }
+
+    async fn apply_turn_state_cookie(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _model: String,
+        _pod: String,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        Err(AdminError::invalid("当前服务不支持应用路由 Cookie"))
+    }
+
+    async fn remove_turn_state_cookie(
+        &self,
+        _context: &MutationContext,
+        _account_id: ProviderAccountId,
+        _model: String,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        Err(AdminError::invalid("当前服务不支持移除路由 Cookie"))
     }
 
     async fn request_turn_state_probe(
@@ -489,6 +508,71 @@ impl AccountsService for DefaultAccountsService {
             .apply_turn_state(&account_id, &model, issued_at, observation_id, context)
             .await
             .map_err(|error| map_store_error(error, "turn state apply"))?;
+        provider.account_unavailable(&account_id).await;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
+    async fn apply_turn_state_cookie(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        model: String,
+        pod: String,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        if model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+            || RoutingCookie::gateway_id_from_pod(&pod).is_none()
+        {
+            return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
+        }
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai"
+            || stored.account.authentication_kind != "oauth"
+            || !stored.account.enabled
+        {
+            return Err(AdminError::invalid(
+                "仅启用的 OpenAI OAuth 账号支持应用路由 Cookie",
+            ));
+        }
+        let result = self
+            .accounts
+            .apply_turn_state_cookie(&account_id, &model, &pod, context)
+            .await
+            .map_err(|error| map_store_error(error, "routing cookie apply"))?;
+        provider.account_unavailable(&account_id).await;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
+    async fn remove_turn_state_cookie(
+        &self,
+        context: &MutationContext,
+        account_id: ProviderAccountId,
+        model: String,
+    ) -> Result<AccountUpdateResult, AdminError> {
+        if model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+        {
+            return Err(AdminError::invalid("模型 ID 不合法"));
+        }
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai"
+            || stored.account.authentication_kind != "oauth"
+        {
+            return Err(AdminError::invalid(
+                "仅 OpenAI OAuth 账号支持移除路由 Cookie",
+            ));
+        }
+        let result = self
+            .accounts
+            .remove_turn_state_cookie(&account_id, &model, context)
+            .await
+            .map_err(|error| map_store_error(error, "routing cookie removal"))?;
         provider.account_unavailable(&account_id).await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(result)

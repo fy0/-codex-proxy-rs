@@ -547,6 +547,132 @@ impl AccountStore for PgAdminAccountStore {
         })
     }
 
+    async fn apply_turn_state_cookie(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        pod: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        let mut transaction = self.pool.begin().await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "routing cookie transaction unavailable",
+            )
+        })?;
+        let applied = sqlx::query("update account_turn_states s set cookie_override_pod = $3, next_probe_at = null where s.account_id = $1 and s.model = $2 and (s.config->>'cookieLockEnabled')::boolean and exists (select 1 from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2))")
+            .bind(account_id.as_str())
+            .bind(model)
+            .bind(pod)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "routing cookie apply unavailable",
+                )
+            })?;
+        if applied.rows_affected() == 0 {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Conflict,
+                ENTITY,
+                "routing cookie expired or model mismatched",
+            ));
+        }
+        let result: StoreResult<Revision> = async {
+            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+            append_admin_audit_event_in_transaction(
+                &mut transaction,
+                mutation_audit(
+                    context,
+                    "apply_turn_state_cookie",
+                    "provider_account",
+                    account_id.as_str(),
+                    vec!["cookie_override_pod".to_owned()],
+                ),
+                revision,
+            )
+            .await?;
+            Ok(revision)
+        }
+        .await;
+        let revision = super::repository::finish_admin_transaction(
+            transaction,
+            result,
+            "apply turn state cookie",
+        )
+        .await
+        .map_err(|error| admin_store_error(ENTITY, error))?;
+        Ok(AccountUpdateResult {
+            account_id: account_id.clone(),
+            config_revision: admin_revision(revision)?,
+        })
+    }
+
+    async fn remove_turn_state_cookie(
+        &self,
+        account_id: &CoreProviderAccountId,
+        model: &str,
+        context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        let mut transaction = self.pool.begin().await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "routing cookie transaction unavailable",
+            )
+        })?;
+        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, next_probe_at = null where account_id = $1 and model = $2 and cookie_override_pod is not null")
+            .bind(account_id.as_str())
+            .bind(model)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "routing cookie removal unavailable",
+                )
+            })?;
+        if removed.rows_affected() == 0 {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Conflict,
+                ENTITY,
+                "routing cookie override is already removed",
+            ));
+        }
+        let result: StoreResult<Revision> = async {
+            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
+            append_admin_audit_event_in_transaction(
+                &mut transaction,
+                mutation_audit(
+                    context,
+                    "remove_turn_state_cookie",
+                    "provider_account",
+                    account_id.as_str(),
+                    vec!["cookie_override_pod".to_owned()],
+                ),
+                revision,
+            )
+            .await?;
+            Ok(revision)
+        }
+        .await;
+        let revision = super::repository::finish_admin_transaction(
+            transaction,
+            result,
+            "remove turn state cookie",
+        )
+        .await
+        .map_err(|error| admin_store_error(ENTITY, error))?;
+        Ok(AccountUpdateResult {
+            account_id: account_id.clone(),
+            config_revision: admin_revision(revision)?,
+        })
+    }
+
     async fn request_turn_state_probe(
         &self,
         account_id: &CoreProviderAccountId,

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { getAccounts, TurnStateInstallation, TurnStateObservation, TurnStateStatus } from '@/api'
-import { Check, Copy, Eye, Play, Plus, RefreshCw, Settings2, Trash2 } from '@lucide/vue'
+import { Check, Copy, Eye, LockKeyhole, Play, Plus, RefreshCw, Settings2, Trash2, Unlock } from '@lucide/vue'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, onMounted, ref, watch } from 'vue'
-import { applyTurnState, copyTurnState, defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus, probeTurnState, removeTurnState } from '@/api'
+import { applyTurnState, applyTurnStateCookie, copyTurnState, defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus, probeTurnState, removeTurnState, removeTurnStateCookie } from '@/api'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
@@ -34,6 +34,8 @@ const removing = ref(false)
 const now = ref(Date.now() / 1000)
 const loading = ref(false)
 const copying = ref(false)
+const cookieApplying = ref(false)
+const cookieRemoving = ref(false)
 const copyText = useCopyText()
 let loadVersion = 0
 const tableBuckets = computed<TurnStateStatus[]>(() => {
@@ -160,7 +162,7 @@ function averageRetries(bucket: TurnStateStatus) {
   return samples.length ? (samples.reduce((sum, item) => sum + Math.max(0, item.attempts - 1), 0) / samples.length).toFixed(1) : '-'
 }
 function outcome(value: string) {
-  const labels: Record<string, string> = { cookie_ready: 'Cookie 可用', cookie_model_mismatch: 'pod 模型不符', missing_cookie: '未获得路由 Cookie', missing_model: '缺少模型声明', cookie_deleted: 'Cookie 已失效', candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
+  const labels: Record<string, string> = { cookie_ready: 'Cookie 可用', cookie_gateway_filtered: '网关编号未允许', cookie_model_mismatch: 'pod 模型不符', missing_cookie: '未获得路由 Cookie', missing_model: '缺少模型声明', cookie_deleted: 'Cookie 已失效', candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
   if (value === 'reused_state')
     return '相同 state（未续期）'
   if (value === 'not_newer')
@@ -295,6 +297,40 @@ async function applyState(bucket: TurnStateStatus, issuedAt: number | null | und
   }
   finally {
     applying.value = false
+  }
+}
+
+async function applyCookie(bucket: TurnStateStatus, pod: string) {
+  if (cookieApplying.value || !bucket.accountEnabled)
+    return
+  cookieApplying.value = true
+  try {
+    await applyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod })
+    toast.success('已固定 Cookie 网关')
+    await load()
+  }
+  catch {
+    await load()
+  }
+  finally {
+    cookieApplying.value = false
+  }
+}
+
+async function removeCookie(bucket: TurnStateStatus) {
+  if (cookieRemoving.value || !bucket.cookieOverridePod)
+    return
+  cookieRemoving.value = true
+  try {
+    await removeTurnStateCookie({ accountId: bucket.accountId, model: bucket.model })
+    toast.success('已取消 Cookie 固定')
+    await load()
+  }
+  catch {
+    await load()
+  }
+  finally {
+    cookieRemoving.value = false
   }
 }
 
@@ -493,11 +529,21 @@ onMounted(async () => {
       </dl>
       <div v-if="selection.config.cookieLockEnabled" class="grid gap-2 text-cp-sm">
         <h3 class="m-0 font-semibold">共享 Cookie 池</h3>
+        <p class="m-0 text-cp-text-secondary">允许编号：{{ selection.config.cookieGatewayIds || '未设置（仅观察）' }}</p>
+        <p v-if="selection.cookieOverridePod" class="m-0 text-cp-success-text">当前固定：{{ selection.cookieOverridePod }}</p>
         <p v-if="!selection.cookiePool?.length" class="m-0 text-cp-text-secondary">尚未采集到路由 Cookie，将按已配置出口继续探测。</p>
-        <div v-for="cookie in selection.cookiePool" :key="cookie.pod" class="flex flex-wrap gap-x-4 gap-y-1">
-          <span class="break-all">{{ cookie.pod }}</span>
+        <div v-for="cookie in selection.cookiePool" :key="cookie.pod" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span class="font-mono">unified-{{ cookie.gatewayId }}</span>
+          <span class="break-all text-cp-xs text-cp-text-secondary">{{ cookie.pod }}</span>
           <span :class="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ cookie.reportedModel || '未确认模型' }}</span>
+          <span :class="cookie.allowed ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ cookie.allowed ? '编号已允许' : '未允许' }}</span>
           <span class="text-cp-text-secondary">到期 {{ date(cookie.expiresAt) }}</span>
+          <BaseIconButton v-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() && selection.cookieOverridePod !== cookie.pod" label="固定此 Cookie 网关" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod)">
+            <LockKeyhole class="size-4" />
+          </BaseIconButton>
+          <BaseIconButton v-if="selection.cookieOverridePod === cookie.pod" label="取消 Cookie 网关固定" :disabled="cookieRemoving" @click="removeCookie(selection)">
+            <Unlock class="size-4" />
+          </BaseIconButton>
         </div>
       </div>
       <BaseSegmented v-model="tab" label="记录类型" class="w-full sm:w-96" :options="[{ label: '主动探测', value: 'probe' }, { label: '被动采集', value: 'passive' }, { label: '安装历史', value: 'history' }]" />

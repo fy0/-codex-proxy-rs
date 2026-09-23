@@ -142,6 +142,10 @@ async function save() {
         <BaseNumberInput v-model="config.cookieRefreshBeforeSeconds" label="Cookie 提前续约" :min="30" :max="1800" :disabled="saving" />
         <span class="text-cp-xs text-cp-text-secondary">以 Cookie 签发的到期时间为准；到期前携带当前 Cookie 探测续约。只有上游返回新有效期才算续约。</span>
       </BaseFormItem>
+      <BaseFormItem v-if="config.cookieLockEnabled" label="Cookie 网关编号">
+        <BaseInput v-model="config.cookieGatewayIds" aria-label="Cookie 网关编号" placeholder="185|87|..." maxlength="256" :disabled="saving" />
+        <span class="text-cp-xs text-cp-text-secondary">只填写 unified- 后面的数字，多个编号用 | 分隔。留空只采集和记录，不自动选择；仍可在记录中人工固定某个有效 Cookie。</span>
+      </BaseFormItem>
       <BaseFormItem label="无票调度策略">
         <BaseSelect v-model="config.missingStatePolicy" :options="[{ label: '继续调度', value: 'allow' }, { label: '暂停业务调度', value: 'pause' }]" aria-label="无票调度策略" :disabled="saving" />
       </BaseFormItem>
@@ -156,7 +160,7 @@ async function save() {
         <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }]" aria-label="探测中断策略" :disabled="saving" />
       </BaseFormItem>
       <p class="m-0 text-cp-sm text-cp-text-secondary">
-        {{ config.cookieLockEnabled ? 'Cookie 探测读取 response.created 的模型声明后中断，只有与所选模型一致的 pod 才会使用。池为空时遵循无票调度策略。' : 'state 按目标长度筛选，有效期只决定网关何时停止注入；实际是否接受由上游决定。' }}
+        {{ config.cookieLockEnabled ? 'Cookie 探测读取 response.created 的模型声明和 JWT payload；只有模型一致且网关编号命中的 pod 才会自动使用。池为空时遵循无票调度策略。' : 'state 按目标长度筛选，有效期只决定网关何时停止注入；实际是否接受由上游决定。' }}
       </p>
       <div class="grid grid-cols-2 gap-4 sm:grid-cols-3">
         <BaseFormItem v-if="!config.cookieLockEnabled" label="目标长度">

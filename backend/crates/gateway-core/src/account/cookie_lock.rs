@@ -25,6 +25,21 @@ impl std::fmt::Debug for RoutingCookie {
 }
 
 impl RoutingCookie {
+    pub fn gateway_id_from_pod(pod: &str) -> Option<&str> {
+        pod.strip_prefix("chat.gateway.unified-")?
+            .strip_suffix(".api.openai.com")
+            .filter(|number| {
+                !number.is_empty()
+                    && number.len() <= 10
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    }
+
+    pub fn gateway_id(&self) -> &str {
+        // `parse` validates the host, so this is always present for persisted cookies.
+        Self::gateway_id_from_pod(&self.pod).unwrap_or_default()
+    }
+
     /// 只读取上游签发的 JWT 元数据，不验证签名，也不生成或修改 JWT。
     pub fn parse(origin: &str, name: &str, value: &str, now: i64) -> Option<Self> {
         if !matches!(name, "__oailb" | "__oai_lb") || value.len() > 4096 {
@@ -50,12 +65,7 @@ impl RoutingCookie {
         let claims: serde_json::Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).ok()?).ok()?;
         let pod = claims.get("host")?.as_str()?;
-        let number = pod
-            .strip_prefix("chat.gateway.unified-")?
-            .strip_suffix(".api.openai.com")?;
-        if number.is_empty() || number.len() > 10 || !number.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
+        Self::gateway_id_from_pod(pod)?;
         let issued_at = claims.get("iat")?.as_i64()?;
         let expires_at = claims.get("exp")?.as_i64()?;
         if issued_at <= 0
@@ -90,11 +100,13 @@ impl RoutingCookie {
 
     pub fn status(&self) -> RoutingCookieStatus {
         RoutingCookieStatus {
+            gateway_id: self.gateway_id().to_owned(),
             pod: self.pod.clone(),
             issued_at: self.issued_at,
             expires_at: self.expires_at,
             observed_at: self.observed_at,
             reported_model: self.reported_model.clone(),
+            allowed: false,
         }
     }
 }
@@ -102,11 +114,13 @@ impl RoutingCookie {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutingCookieStatus {
+    pub gateway_id: String,
     pub pod: String,
     pub issued_at: i64,
     pub expires_at: i64,
     pub observed_at: i64,
     pub reported_model: String,
+    pub allowed: bool,
 }
 
 /// observed_at 是请求开始时间（毫秒），防止晚到的旧响应覆盖更新的降级事实。

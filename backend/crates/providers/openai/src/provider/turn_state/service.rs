@@ -533,6 +533,9 @@ impl TurnStateService {
                 && cookie
                     .as_ref()
                     .is_some_and(|cookie| cookie.is_usable(&bucket.model, Utc::now().timestamp()))
+                && cookie
+                    .as_ref()
+                    .is_some_and(|cookie| bucket.cookie_is_selectable(cookie))
                 && created_model
                     .as_deref()
                     .is_some_and(|model| model.eq_ignore_ascii_case(&bucket.model));
@@ -546,6 +549,11 @@ impl TurnStateService {
                 "missing_model"
             } else if cookie.is_none() {
                 "missing_cookie"
+            } else if cookie
+                .as_ref()
+                .is_some_and(|cookie| !bucket.cookie_is_selectable(cookie))
+            {
+                "cookie_gateway_filtered"
             } else if usable {
                 "cookie_ready"
             } else {

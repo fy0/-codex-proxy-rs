@@ -128,6 +128,33 @@ pub trait AccountStore: Send + Sync {
         ))
     }
 
+    async fn apply_turn_state_cookie(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _pod: &str,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "turn_state",
+            "routing cookie store unavailable",
+        ))
+    }
+
+    async fn remove_turn_state_cookie(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<AccountUpdateResult> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "turn_state",
+            "routing cookie store unavailable",
+        ))
+    }
+
     async fn request_turn_state_probe(
         &self,
         _account_id: &gateway_core::account::ProviderAccountId,

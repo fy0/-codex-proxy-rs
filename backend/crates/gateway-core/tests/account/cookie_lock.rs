@@ -42,3 +42,23 @@ fn routing_cookie_rejects_expired_future_invalid_scope_and_unbounded_lifetimes()
     assert!(RoutingCookie::parse("origin", "session-token", &value, now).is_none());
     assert!(RoutingCookie::parse("origin", "__oai_lb", &value, now).is_some());
 }
+
+#[test]
+fn routing_cookie_exposes_gateway_id_and_expiry_metadata() {
+    let now = 1_800_000_000;
+    let cookie = RoutingCookie::parse(
+        "origin",
+        "__oailb",
+        &jwt(
+            "chat.gateway.unified-87.api.openai.com",
+            now,
+            now + 3600,
+            "ES256",
+        ),
+        now,
+    )
+    .unwrap();
+    assert_eq!(cookie.gateway_id(), "87");
+    assert_eq!(cookie.expires_at, now + 3600);
+    assert_eq!(cookie.status().gateway_id, "87");
+}

@@ -34,6 +34,11 @@ impl TurnStateService {
             "cookie_deleted"
         } else if cookie.is_none() {
             "missing_cookie"
+        } else if cookie
+            .as_ref()
+            .is_some_and(|cookie| !bucket.cookie_is_selectable(cookie))
+        {
+            "cookie_gateway_filtered"
         } else if model.eq_ignore_ascii_case(requested_model) {
             "cookie_ready"
         } else {

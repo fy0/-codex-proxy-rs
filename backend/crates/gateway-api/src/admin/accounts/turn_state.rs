@@ -14,6 +14,14 @@ where
         .route("/api/admin/accounts/turn-state/probe", post(probe::<S>))
         .route("/api/admin/accounts/turn-state/apply", post(apply::<S>))
         .route("/api/admin/accounts/turn-state/remove", post(remove::<S>))
+        .route(
+            "/api/admin/accounts/turn-state/cookie-apply",
+            post(cookie_apply::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/cookie-remove",
+            post(cookie_remove::<S>),
+        )
         .route("/api/admin/accounts/turn-state/copy", post(copy::<S>))
         .route("/api/admin/accounts/turn-state/preview", post(preview::<S>))
         .route(
@@ -73,6 +81,21 @@ struct RemoveRequest {
     account_id: String,
     model: String,
     issued_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieApplyRequest {
+    account_id: String,
+    model: String,
+    pod: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieRemoveRequest {
+    account_id: String,
+    model: String,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +211,61 @@ where
             account_id,
             request.model,
             request.issued_at,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(UpdatedAccountData::from(result)),
+    ))
+}
+
+async fn cookie_apply<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<CookieApplyRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let account_id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .apply_turn_state_cookie(
+            &auth.context().mutation_context(),
+            account_id,
+            request.model,
+            request.pod,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(UpdatedAccountData::from(result)),
+    ))
+}
+
+async fn cookie_remove<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<CookieRemoveRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let account_id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .remove_turn_state_cookie(
+            &auth.context().mutation_context(),
+            account_id,
+            request.model,
         )
         .await
         .map_err(map_service_error)?;

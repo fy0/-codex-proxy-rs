@@ -92,6 +92,7 @@ impl MemoryAccountStore {
                 model: model.to_owned(),
                 config,
                 routing_cookies: Vec::new(),
+                cookie_override_pod: None,
                 current: None,
                 current_issued_at: None,
                 current_length: None,

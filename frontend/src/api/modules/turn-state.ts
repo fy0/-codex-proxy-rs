@@ -5,6 +5,7 @@ export interface TurnStateConfig {
   enabled: boolean
   cookieLockEnabled: boolean
   cookieRefreshBeforeSeconds: number
+  cookieGatewayIds: string
   missingStatePolicy: 'allow' | 'pause'
   detectActualModel: boolean
   targetLength: number
@@ -26,7 +27,7 @@ export interface TurnStateConfig {
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, cookieLockEnabled: false, cookieRefreshBeforeSeconds: 300, missingStatePolicy: 'allow', detectActualModel: false, targetLength: 292, ttlSeconds: 240, refreshAfterSeconds: 120, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
+  return { enabled, cookieLockEnabled: false, cookieRefreshBeforeSeconds: 300, cookieGatewayIds: '', missingStatePolicy: 'allow', detectActualModel: false, targetLength: 292, ttlSeconds: 240, refreshAfterSeconds: 120, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
 }
 
 export interface TurnStateProbePreview {
@@ -91,11 +92,13 @@ export interface TurnStateInstallation {
 }
 
 export interface RoutingCookieStatus {
+  gatewayId: string
   pod: string
   issuedAt: number
   expiresAt: number
   observedAt: number
   reportedModel: string
+  allowed: boolean
 }
 
 export interface TurnStateStatus {
@@ -111,6 +114,7 @@ export interface TurnStateStatus {
   hasInstalledState: boolean
   routingCookie?: RoutingCookieStatus | null
   cookiePool?: RoutingCookieStatus[]
+  cookieOverridePod?: string | null
   businessStatus: 'ready' | 'manual_disabled' | 'waiting_for_state' | 'model_denied' | 'quota_exhausted' | 'rate_limited' | 'account_error'
   accountEnabled: boolean
   huntAttempts: number
@@ -160,6 +164,22 @@ export function applyTurnState(data: { accountId: string, model: string, issuedA
 export function removeTurnState(data: { accountId: string, model: string, issuedAt: number }) {
   return request<{ accountId: string, configRevision: number }>({
     url: '/api/admin/accounts/turn-state/remove',
+    method: 'POST',
+    data,
+  })
+}
+
+export function applyTurnStateCookie(data: { accountId: string, model: string, pod: string }) {
+  return request<{ accountId: string, configRevision: number }>({
+    url: '/api/admin/accounts/turn-state/cookie-apply',
+    method: 'POST',
+    data,
+  })
+}
+
+export function removeTurnStateCookie(data: { accountId: string, model: string }) {
+  return request<{ accountId: string, configRevision: number }>({
+    url: '/api/admin/accounts/turn-state/cookie-remove',
     method: 'POST',
     data,
   })

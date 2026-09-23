@@ -120,6 +120,20 @@ fn rotation_config_bounds_ttl_budget_and_proxy_selection() {
 }
 
 #[test]
+fn cookie_gateway_ids_accept_pipe_separated_decimal_ids_only() {
+    let mut config = TurnStateConfig::default();
+    assert!(config.cookie_gateway_ids_valid());
+    config.cookie_gateway_ids = "111|222|333".to_owned();
+    assert!(config.is_valid());
+    assert!(config.allows_cookie_gateway("chat.gateway.unified-222.api.openai.com"));
+    assert!(!config.allows_cookie_gateway("chat.gateway.unified-444.api.openai.com"));
+    for invalid in ["111||222", "111| 222", "unified-111", "111|abc"] {
+        config.cookie_gateway_ids = invalid.to_owned();
+        assert!(!config.is_valid());
+    }
+}
+
+#[test]
 fn probe_persona_defaults_are_compatible_and_reject_header_injection() {
     let mut config: TurnStateConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(config.originator, "codex-tui");
@@ -167,6 +181,7 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
         model: "upstream-model".to_owned(),
         config: serde_json::from_str("{}").unwrap(),
         routing_cookies: Vec::new(),
+        cookie_override_pod: None,
         current: None,
         current_issued_at: None,
         current_length: None,

@@ -371,6 +371,8 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/turn-state/probe` | `{ accountId, model }` | 排队一次探测，返回 202 和账号配置版本；账号须启用，不要求桶启用轮换 |
 | `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt, observationId? }` | 应用当前候选或指定观测记录的票，不改变自动轮换开关；票已变更、过期或不再可安装时返回 409 |
 | `POST` | `/api/admin/accounts/turn-state/remove` | `{ accountId, model, issuedAt }` | 移除该桶已安装票，预期签发时间不匹配或已移除时返回 409，不改变账号或探测开关 |
+| `POST` | `/api/admin/accounts/turn-state/cookie-apply` | `{ accountId, model, pod }` | 在共享 Cookie 池中固定指定的 `unified-*` 网关；服务端事务核对模型和 Cookie 有效期，失败返回 409 |
+| `POST` | `/api/admin/accounts/turn-state/cookie-remove` | `{ accountId, model }` | 取消该模型桶的 Cookie 固定；没有固定值时返回 409，不改变 Cookie 锁定或探测开关 |
 | `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt, observationId? }` | 按需读取仍有效的已安装票、当前候选或指定观测记录的票，返回正文和签发时间，响应禁止缓存 |
 | `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、CLI 版本和时区日期，不发送上游请求 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
@@ -437,6 +439,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 | `enabled` | `false` | 启用该桶的后台探测与自动安装；关闭不撤销仍有效的已安装 state，被动观测不依赖此开关 |
 | `cookieLockEnabled` | `false` | 独立启用 Cookie 锁定及后台采样、续约；`enabled=false` 时不替换客户端 state，也不应用账号通用 state 覆盖 |
 | `cookieRefreshBeforeSeconds` | `300` | 30–1800 秒，在 JWT 到期前提前携带同一 Cookie 探测续约；以新 JWT 的实际期限为准 |
+| `cookieGatewayIds` | `""` | 只允许十进制网关编号，多个值用 `|` 分隔，例如 `185|87`；留空不自动选择，管理员仍可人工固定有效候选 |
 | `missingStatePolicy` | `allow` | `allow` 无有效 state 时继续调度；`pause` 暂停该账号、该上游模型的业务调度，不改变账号与自动探测开关。`pause` 是这里的退避策略 |
 | `detectActualModel` | `false` | 开启后记录本票附着的上游实际模型。只有同时为 `pause` 时，后续请求的实际模型突然变化才会作废当前票：清除正文、保留签发水位，并断开该账号已有 WebSocket。第一次看到实际模型只建立附着，不作废。大小写不同视为同一个模型 |
 | `targetLength` | `292` | 76–4096 字节；候选与安装票的长度门槛。只有命中目标长度的合法新票进入候选，其他合法票的正文随观测历史留存 |
@@ -458,9 +461,9 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 state 探测请求不携带账号 Cookie。带上 Cookie 时上游不会发放 292。`__cflb` 和 `__oai_lb` 是账号级路由 Cookie，不绑定某一张 state，也不绑定某一次对话；同一会话可以更换 292，票和 Cookie 错配时上游仍可接受。普通 Codex 响应带回的这两个 Cookie 会写入账号，并在之后的业务请求里与 state 一起回放。探测本身不回放它们。只有 state、没有仍有效的路由 Cookie 时，上游不会稳定接受这条 292。
 
-Cookie 锁定使用 `__oailb`（兼容 `__oai_lb`）的 ES256 JWT 元数据，按上游端点和 pod 共享路由池，不共享账号认证 Cookie、`__cf_bm` 或 `__cflb`。JWT 只解析不验签、不修改，必须具有合法 host、iat、exp，寿命至多一小时。探测读取 `response.created.model`，仅当其与桶模型一致时可用，不要求 state 长度；业务流的模型声明持续更新观测。开启后按代理出口裸请求采样，最多维持三个可用 pod；临期优先携带原 Cookie 续约，重复 JWT 不延长期限。缺少模型声明不会把未知 pod 判为可用；返回不同 host、删除 Cookie 或模型不符后切换其他可用 pod。失效按共享 pod 生效，晚到的旧请求不覆盖更新观测。池为空时 `allow` 清除旧路由 Cookie 并放行，`pause` 保持 `missing_turn_state` 诊断合同并暂停业务；已有请求继续完成。Cookie 锁定不使用 state 复制、手动应用或飞书通知接口。
+Cookie 锁定使用 `__oailb`（兼容 `__oai_lb`）的 ES256 JWT 元数据，按上游端点和 pod 共享路由池，不共享账号认证 Cookie、`__cf_bm` 或 `__cflb`。JWT 只解析不验签、不修改，必须具有合法 host、iat、exp，寿命至多一小时；管理记录显示 `unified-*` 编号和到期时间。探测读取 `response.created.model`，仅当其与桶模型一致且编号命中 `cookieGatewayIds` 时自动注入，不要求 state 长度；业务流仍记录所有可解析 Cookie，未命中的编号可供人工研判。管理员可以在 Cookie 池中固定任意模型匹配且仍有效的 pod，固定失效后不会自动换用其它 pod，取消固定后才恢复按允许编号自动选择。开启后按代理出口裸请求采样，最多维持三个可用 pod；临期优先携带原 Cookie 续约，重复 JWT 不延长期限。缺少模型声明不会把未知 pod 判为可用；返回不同 host、删除 Cookie 或模型不符后按当前固定/允许规则继续采样。池为空时 `allow` 清除旧路由 Cookie 并放行，`pause` 保持 `missing_turn_state` 诊断合同并暂停业务；已有请求继续完成。Cookie 锁定不使用 state 复制或飞书通知接口。
 
-状态增加 `routingCookie` 和 `cookiePool`，仅提供 pod、签发/到期 Unix 秒、请求开始水位 `observedAt`（Unix 毫秒）和 `reportedModel`，不返回 Cookie 正文。Cookie 模式下 `active` 表示存在匹配模型且未过期的路由 Cookie；`hasInstalledState` 仍只表示 state。探测/被动记录增加 `oailbHost`、`cookieExpiresAt`，结果包含 `cookie_ready`、`cookie_model_mismatch`、`cookie_deleted`、`missing_cookie`、`missing_model`。Cookie 的实际亲和和模型稳定性取决于上游，状态不是服务质量保证。
+状态增加 `routingCookie` 和 `cookiePool`，仅提供 `gatewayId`、pod、签发/到期 Unix 秒、请求开始水位 `observedAt`（Unix 毫秒）、`reportedModel` 和 `allowed`，不返回 Cookie 正文；`cookieOverridePod` 表示当前人工固定值。Cookie 模式下 `active` 表示存在匹配模型、未过期且命中允许编号的路由 Cookie；`hasInstalledState` 仍只表示 state。探测/被动记录增加 `oailbHost`、`cookieExpiresAt`，结果包含 `cookie_ready`、`cookie_gateway_filtered`、`cookie_model_mismatch`、`cookie_deleted`、`missing_cookie`、`missing_model`。Cookie 的实际亲和和模型稳定性取决于上游，状态不是服务质量保证。
 
 飞书通知只为配置后成功安装的新票排队，涵盖自动安装与手动应用；候选未应用、重复票和失败探测不通知。内容包含账号、模型、安装来源、距上次安装的时间、本次获取耗时、尝试次数、签发时间、长度和完整 state。后台通过服务器直连发送，不使用账号探测代理，不进入业务计量。每桶仅保留最新安装的待发送任务，领取时核对当前有效票、身份与手动账号开关，自动探测关闭不阻止手动应用后的通知；已移除、过期或被更新的旧票不发送。失败或进程中断后每 60 秒重试，最多 5 次；成功后不再领取。飞书已接收但本地确认失败时可能重复，不承诺远端恰好一次送达。完整 state 不写入通知任务、审计或观测日志，发送时从当前票读取。
 
