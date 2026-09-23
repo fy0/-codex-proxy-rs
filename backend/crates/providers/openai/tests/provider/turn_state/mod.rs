@@ -475,7 +475,7 @@ async fn probe_stop_strategies_abort_at_the_selected_boundary() {
         Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)
             .insert_header("x-codex-turn-state", token(217))
             .insert_header("content-type", "text/event-stream")
-            .set_body_string("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"))
+            .set_body_string("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK @thsottiaux 高市早苗\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"))
             .mount(&server).await;
         let store = Arc::new(MemoryAccountStore::default());
         seed(&store, false).await;
@@ -490,16 +490,19 @@ async fn probe_stop_strategies_abort_at_the_selected_boundary() {
         );
         cycle(Arc::clone(&store), server.uri()).await;
         let observation = store.turn_observations().remove(0);
-        assert_eq!(observation.stop_mode, observation.stop_reason);
         match strategy {
             TurnStateStopStrategy::Headers => {
+                assert_eq!(observation.stop_mode.as_deref(), Some("headers"));
                 assert_eq!(observation.stop_reason.as_deref(), Some("headers"))
             }
             TurnStateStopStrategy::FirstOutput => {
-                assert_eq!(observation.stop_reason.as_deref(), Some("first_output"))
+                // 期望片段命中后提前停读，stop_mode 保持读取边界、reason 记录命中。
+                assert_eq!(observation.stop_mode.as_deref(), Some("first_output"));
+                assert_eq!(observation.stop_reason.as_deref(), Some("answer_matched"));
+                assert_eq!(observation.answer_match, Some(true));
             }
             TurnStateStopStrategy::Mixed => assert!(
-                [Some("headers"), Some("first_output")]
+                [Some("headers"), Some("answer_matched")]
                     .contains(&observation.stop_reason.as_deref())
             ),
         }
@@ -547,7 +550,7 @@ async fn probe_records_upstream_reported_model_from_headers_and_stream() {
             ResponseTemplate::new(200)
                 .insert_header("x-codex-turn-state", token(217))
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string("data: {\"type\":\"response.created\",\"response\":{\"model\":\"body-model\",\"headers\":{\"openai-model\":\"event-model\"}}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n"),
+                .set_body_string("data: {\"type\":\"response.created\",\"response\":{\"model\":\"body-model\",\"headers\":{\"openai-model\":\"event-model\"}}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK @thsottiaux 高市早苗\"}\n\n"),
         )
         .mount(&server)
         .await;
@@ -564,7 +567,7 @@ async fn probe_records_upstream_reported_model_from_headers_and_stream() {
     );
     cycle(Arc::clone(&store), server.uri()).await;
     let observation = store.turn_observations().remove(0);
-    assert_eq!(observation.stop_reason.as_deref(), Some("first_output"));
+    assert_eq!(observation.stop_reason.as_deref(), Some("answer_matched"));
     assert_eq!(observation.reported_model.as_deref(), Some("event-model"));
 }
 

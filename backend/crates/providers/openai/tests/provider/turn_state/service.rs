@@ -396,6 +396,7 @@ async fn cookie_only_probe_renews_and_shares_across_accounts_without_state_overr
             MODEL,
             TurnStateConfig {
                 cookie_lock_enabled: true,
+                cookie_gateway_ids: "185".to_owned(),
                 missing_state_policy: MissingTurnStatePolicy::Pause,
                 ..TurnStateConfig::default()
             },
