@@ -429,7 +429,7 @@ onMounted(async () => {
       <template #recentProbe="{ row }">
         <div v-if="recentProbe(row)" class="grid gap-1">
           <span>{{ outcome(recentProbe(row)!.outcome) }}</span>
-          <span v-if="recentProbe(row)!.answer" class="break-all text-cp-xs" :title="recentProbe(row)!.answer">{{ clippedAnswer(recentProbe(row)!.answer!) }}</span>
+          <span v-if="recentProbe(row)!.answer" class="break-all text-cp-xs" :title="recentProbe(row)!.answer ?? undefined">{{ clippedAnswer(recentProbe(row)!.answer!) }}</span>
           <span class="text-cp-xs text-cp-text-secondary">{{ date(recentProbe(row)!.observedAt) }}</span>
         </div>
         <span v-else class="text-cp-text-secondary">暂无探测</span>
@@ -576,7 +576,7 @@ onMounted(async () => {
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
       <BaseTable v-else :columns="logColumns" :rows="observations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无观测记录" density="compact">
         <template #answer="{ row }">
-          <div v-if="row.answer" class="grid gap-1" :title="row.answer">
+          <div v-if="row.answer" class="grid gap-1" :title="row.answer ?? undefined">
             <span class="break-all text-cp-xs">{{ clippedAnswer(row.answer) }}</span>
             <span v-if="row.answerMatch === true" class="text-cp-xs text-cp-success-text">命中期望</span>
             <span v-else-if="row.answerMatch === false" class="text-cp-xs text-cp-warning-text">未命中期望</span>

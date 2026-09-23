@@ -155,12 +155,13 @@ pub(super) async fn wait_for_output(
             }
         }
     };
+    let answer_match = expect.map(|expected| contains_ignore_ascii_case(&answer, expected));
     ProbeOutput {
         reason,
         created_model,
         reported_model: header_model.or_else(|| body_model.model().map(str::to_owned)),
         answer: (!answer.is_empty()).then_some(answer),
-        answer_match: expect.map(|expected| contains_ignore_ascii_case(&answer, expected)),
+        answer_match,
     }
 }
 
