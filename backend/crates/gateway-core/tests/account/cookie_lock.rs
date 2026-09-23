@@ -40,8 +40,13 @@ fn routing_cookie_rejects_expired_future_and_invalid_scope() {
     }
     // 签发寿命由上游决定，本地不限制 JWT 声明的时长。
     assert!(
-        RoutingCookie::parse("origin", "__oailb", &jwt(host, now, now + 7200, "ES256"), now)
-            .is_some()
+        RoutingCookie::parse(
+            "origin",
+            "__oailb",
+            &jwt(host, now, now + 7200, "ES256"),
+            now
+        )
+        .is_some()
     );
     assert!(RoutingCookie::parse("origin", "session-token", &value, now).is_none());
     assert!(RoutingCookie::parse("origin", "__oai_lb", &value, now).is_some());

@@ -58,9 +58,7 @@ pub(super) struct ProbeOutput {
 }
 
 fn push_bounded(answer: &mut String, delta: &str) {
-    let mut end = delta
-        .len()
-        .min(ANSWER_LIMIT.saturating_sub(answer.len()));
+    let mut end = delta.len().min(ANSWER_LIMIT.saturating_sub(answer.len()));
     while !delta.is_char_boundary(end) {
         end -= 1;
     }
