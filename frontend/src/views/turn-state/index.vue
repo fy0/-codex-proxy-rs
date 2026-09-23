@@ -328,7 +328,7 @@ async function applyCookie(bucket: TurnStateStatus, pod: string) {
   cookieApplying.value = true
   try {
     await applyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod })
-    toast.success('已固定 Cookie 网关')
+    toast.success('已固定 Cookie')
     await load()
   }
   catch {
