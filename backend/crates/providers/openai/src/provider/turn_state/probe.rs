@@ -13,11 +13,18 @@ use crate::transport::profile::CodexWireProfileState;
 
 /// 探测题库：(shape 标识, 问题正文, 回答必须包含的片段)。
 /// 题目只依赖模型自身知识、不要求联网；片段按 ASCII 大小写不敏感匹配。
-const QUESTIONS: &[(&str, &str, &str)] = &[(
-    "x_handle",
-    "Don't search the internet. Who is Thibault Sottiaux on X? Your answer must include the @ handle.",
-    "@thsottiaux",
-)];
+const QUESTIONS: &[(&str, &str, &str)] = &[
+    (
+        "x_handle",
+        "Don't search the internet. Who is Thibault Sottiaux on X? Your answer must include the @ handle.",
+        "@thsottiaux",
+    ),
+    (
+        "japan_pm",
+        "不要搜索，只凭记忆，告诉我日本首相是谁。",
+        "高市早苗",
+    ),
+];
 
 /// 回答正文只用于命中判定与管理端展示，按字节上限截断。
 const ANSWER_LIMIT: usize = 8 * 1024;
