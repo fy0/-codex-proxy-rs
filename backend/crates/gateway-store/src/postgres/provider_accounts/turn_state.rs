@@ -54,6 +54,9 @@ fn bucket(row: sqlx::postgres::PgRow) -> Result<TurnStateBucket, CoreStoreError>
         manual_override: row.try_get("manual_override").map_err(unavailable)?,
         attached_model: row.try_get("attached_model").map_err(unavailable)?,
         cookie_override_pod: row.try_get("cookie_override_pod").map_err(unavailable)?,
+        cookie_override_issued_at: row
+            .try_get("cookie_override_issued_at")
+            .map_err(unavailable)?,
         config,
         routing_cookies: Vec::new(),
     })
@@ -417,6 +420,7 @@ impl PgProviderAccountRepository {
                     routing_cookie,
                     cookie_pool,
                     cookie_override_pod: state.cookie_override_pod,
+                    cookie_override_issued_at: state.cookie_override_issued_at,
                     account_id: state.account_id,
                     account_name,
                     account_email,

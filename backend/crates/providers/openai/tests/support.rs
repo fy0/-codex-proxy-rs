@@ -93,6 +93,7 @@ impl MemoryAccountStore {
                 config,
                 routing_cookies: Vec::new(),
                 cookie_override_pod: None,
+                cookie_override_issued_at: None,
                 current: None,
                 current_issued_at: None,
                 current_length: None,

@@ -556,7 +556,7 @@ onMounted(async () => {
       <div v-if="selection.config.cookieLockEnabled" class="grid gap-2 text-cp-sm">
         <h3 class="m-0 font-semibold">共享 Cookie 池</h3>
         <p class="m-0 text-cp-text-secondary">允许编号：{{ selection.config.cookieGatewayIds || '未设置（仅观察）' }}</p>
-        <p v-if="selection.cookieOverridePod" class="m-0 text-cp-success-text">当前固定：{{ selection.cookieOverridePod }}</p>
+        <p v-if="selection.cookieOverridePod" class="m-0 text-cp-success-text">当前固定：{{ selection.cookieOverridePod }}<span v-if="selection.cookieOverrideIssuedAt" class="text-cp-xs">（签发 {{ date(selection.cookieOverrideIssuedAt) }}）</span></p>
         <p v-if="!selection.cookiePool?.length" class="m-0 text-cp-text-secondary">尚未采集到路由 Cookie，将按已配置出口继续探测。</p>
         <div v-for="cookie in selection.cookiePool" :key="cookie.pod" class="flex flex-wrap items-center gap-x-4 gap-y-1">
           <span class="font-mono">unified-{{ cookie.gatewayId }}</span>
@@ -567,10 +567,10 @@ onMounted(async () => {
           <BaseIconButton label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, cookie.pod)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() && selection.cookieOverridePod !== cookie.pod" label="固定此 Cookie 网关" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod)">
+          <BaseIconButton v-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() && selection.cookieOverridePod !== cookie.pod" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="selection.cookieOverridePod === cookie.pod" label="取消 Cookie 网关固定" :disabled="cookieRemoving" @click="removeCookie(selection)">
+          <BaseIconButton v-if="selection.cookieOverridePod === cookie.pod" label="取消 Cookie 固定" :disabled="cookieRemoving" @click="removeCookie(selection)">
             <Unlock class="size-4" />
           </BaseIconButton>
         </div>
@@ -598,7 +598,7 @@ onMounted(async () => {
           <BaseIconButton v-if="row.oailbHost" label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, row.oailbHost)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="row.oailbHost && selection.cookieOverridePod !== row.oailbHost" label="固定此 Cookie 网关" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost)">
+          <BaseIconButton v-if="row.oailbHost && selection.cookieOverridePod !== row.oailbHost" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

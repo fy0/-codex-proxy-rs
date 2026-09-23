@@ -574,7 +574,8 @@ impl AccountStore for PgAdminAccountStore {
                 "routing cookie transaction unavailable",
             )
         })?;
-        let applied = sqlx::query("update account_turn_states s set cookie_override_pod = $3, next_probe_at = null where s.account_id = $1 and s.model = $2 and (s.config->>'cookieLockEnabled')::boolean and exists (select 1 from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2))")
+        // 固定精确到池内当前这条 Cookie：把它的签发时间一并记下，续约换值后固定即失效。
+        let applied = sqlx::query("update account_turn_states s set cookie_override_pod = $3, cookie_override_issued_at = (select c.issued_at from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2) limit 1), next_probe_at = null where s.account_id = $1 and s.model = $2 and (s.config->>'cookieLockEnabled')::boolean and exists (select 1 from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2))")
             .bind(account_id.as_str())
             .bind(model)
             .bind(pod)
@@ -637,7 +638,7 @@ impl AccountStore for PgAdminAccountStore {
                 "routing cookie transaction unavailable",
             )
         })?;
-        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, next_probe_at = null where account_id = $1 and model = $2 and cookie_override_pod is not null")
+        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, cookie_override_issued_at = null, next_probe_at = null where account_id = $1 and model = $2 and cookie_override_pod is not null")
             .bind(account_id.as_str())
             .bind(model)
             .execute(&mut *transaction)

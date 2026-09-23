@@ -182,6 +182,7 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
         config: serde_json::from_str("{}").unwrap(),
         routing_cookies: Vec::new(),
         cookie_override_pod: None,
+        cookie_override_issued_at: None,
         current: None,
         current_issued_at: None,
         current_length: None,
@@ -251,4 +252,53 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
     assert!(
         serde_json::from_str::<TurnStateConfig>(r#"{"missingStatePolicy":"invalid"}"#).is_err()
     );
+}
+
+#[test]
+fn cookie_override_binds_the_exact_cookie_instance() {
+    let now = 1_800_000_000;
+    let account = super::account("acct_cookie_pin");
+    let cookie = |iat: i64| {
+        let mut cookie = gateway_core::account::RoutingCookie::parse(
+            "origin",
+            "__oailb",
+            &format!(
+                "{}.{}.c2ln",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::json!({"alg":"ES256"}).to_string()),
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    serde_json::json!({"host":"chat.gateway.unified-185.api.openai.com","iat":iat,"exp":now + 3600})
+                        .to_string()
+                )
+            ),
+            now,
+        )
+        .unwrap();
+        cookie.reported_model = "upstream-model".to_owned();
+        cookie
+    };
+    let mut bucket = TurnStateBucket {
+        account_id: account.id().as_str().to_owned(),
+        upstream_account_id: account.upstream_account_id().map(str::to_owned),
+        upstream_user_id: account.upstream_user_id().map(str::to_owned),
+        model: "upstream-model".to_owned(),
+        config: TurnStateConfig::default(),
+        routing_cookies: vec![cookie(now - 100)],
+        cookie_override_pod: Some("chat.gateway.unified-185.api.openai.com".to_owned()),
+        cookie_override_issued_at: Some(now - 100),
+        current: None,
+        current_issued_at: None,
+        current_length: None,
+        candidate: None,
+        hunt_attempts: 0,
+        next_probe_at: None,
+        manual_probe_requested_at: None,
+        manual_override: false,
+        attached_model: None,
+    };
+    assert!(bucket.routing_cookie(now).is_some());
+    // 同 pod 续约换值后签发时间变化，旧固定立即失效而不是跟随新值。
+    bucket.routing_cookies = vec![cookie(now)];
+    assert!(bucket.routing_cookie(now).is_none());
+    assert!(!bucket.cookie_is_selectable(&bucket.routing_cookies[0]));
 }

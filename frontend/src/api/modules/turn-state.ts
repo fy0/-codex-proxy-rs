@@ -117,6 +117,7 @@ export interface TurnStateStatus {
   routingCookie?: RoutingCookieStatus | null
   cookiePool?: RoutingCookieStatus[]
   cookieOverridePod?: string | null
+  cookieOverrideIssuedAt?: number | null
   businessStatus: 'ready' | 'manual_disabled' | 'waiting_for_state' | 'model_denied' | 'quota_exhausted' | 'rate_limited' | 'account_error'
   accountEnabled: boolean
   huntAttempts: number

@@ -100,10 +100,8 @@ impl ScheduledTask for TurnStateTask {
                                 .filter(|cookie| {
                                     cookie.is_usable(&bucket.model, now)
                                         && bucket.cookie_is_selectable(cookie)
-                                        && bucket
-                                            .cookie_override_pod
-                                            .as_deref()
-                                            .is_none_or(|pod| pod == cookie.pod)
+                                        && (bucket.cookie_override_pod.is_none()
+                                            || bucket.cookie_override_matches(cookie))
                                 })
                                 .count()
                                 >= if bucket.cookie_override_pod.is_some() {
