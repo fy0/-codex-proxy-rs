@@ -6,5 +6,6 @@ mod probe;
 mod service;
 mod worker;
 
+pub(crate) use cookie::BusinessCookieObservation;
 pub(crate) use service::TurnStateService;
 pub(crate) use worker::TurnStateTask;

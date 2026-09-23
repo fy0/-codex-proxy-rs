@@ -7,22 +7,34 @@ use secrecy::ExposeSecret;
 use super::TurnStateService;
 use crate::credential::CodexCookiePolicy;
 
+/// 一次业务响应里与路由 Cookie 观测相关的全部输入。
+pub(crate) struct BusinessCookieObservation<'a> {
+    pub account: &'a gateway_core::account::ProviderAccount,
+    pub headers: &'a [String],
+    pub sent: Option<&'a RoutingCookie>,
+    pub requested_model: &'a str,
+    pub model: &'a str,
+    pub request_state_source: &'static str,
+    pub response_state: Option<&'a str>,
+    pub started_at: i64,
+}
+
 impl TurnStateService {
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
-    pub(crate) async fn observe_business_cookie(
-        &self,
-        account: &gateway_core::account::ProviderAccount,
-        headers: &[String],
-        sent: Option<&RoutingCookie>,
-        requested_model: &str,
-        model: &str,
-        request_state_source: &'static str,
-        response_state: Option<&str>,
-        started_at: i64,
-    ) {
+    pub(crate) async fn observe_business_cookie(&self, observation: BusinessCookieObservation<'_>) {
+        let BusinessCookieObservation {
+            account,
+            headers,
+            sent,
+            requested_model,
+            model,
+            request_state_source,
+            response_state,
+            started_at,
+        } = observation;
         let (cookie, deleted) = self
             .observe_cookie(headers, sent, Some(model), started_at)
             .await;

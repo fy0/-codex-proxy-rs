@@ -938,7 +938,20 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             if let Some(model) = decoder.body_response_model()
                 && observed_cookie_model.as_deref() != Some(model)
                 && let Some(service) = &turn_state {
-                service.observe_business_cookie(&active_account, &failure_set_cookie_headers, sent_cookie.as_ref(), upstream_model.as_str(), model, request_state_source, response_turn_state.as_deref(), cookie_request_started_at).await;
+                service
+                    .observe_business_cookie(
+                        super::turn_state::BusinessCookieObservation {
+                            account: &active_account,
+                            headers: &failure_set_cookie_headers,
+                            sent: sent_cookie.as_ref(),
+                            requested_model: upstream_model.as_str(),
+                            model,
+                            request_state_source,
+                            response_state: response_turn_state.as_deref(),
+                            started_at: cookie_request_started_at,
+                        },
+                    )
+                    .await;
                 observed_cookie_model = Some(model.to_owned());
             }
             let service_tier_changed = observation_state
