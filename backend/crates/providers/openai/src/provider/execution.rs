@@ -759,7 +759,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         {
             active_account = current;
         }
-        if lease.authentication().oauth().is_some() && let Some(service) = &turn_state {
+        // 路由 Cookie 是共享池资源，与账号认证类型无关；API key 账号同样采集。
+        if let Some(service) = &turn_state {
             service.observe_cookie(&response.set_cookie_headers, sent_cookie.as_ref(), None, cookie_request_started_at).await;
         }
         let response_transport = response.transport;
@@ -934,8 +935,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 .observe_upstream_response_model(decoder.response_model());
             if let Some(model) = decoder.body_response_model()
                 && observed_cookie_model.as_deref() != Some(model)
-                && let Some(service) = &turn_state
-                && lease.authentication().oauth().is_some() {
+                && let Some(service) = &turn_state {
                 service.observe_business_cookie(&active_account, &failure_set_cookie_headers, sent_cookie.as_ref(), upstream_model.as_str(), model, cookie_request_started_at).await;
                 observed_cookie_model = Some(model.to_owned());
             }

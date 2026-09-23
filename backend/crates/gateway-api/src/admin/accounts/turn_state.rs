@@ -19,6 +19,10 @@ where
             post(cookie_apply::<S>),
         )
         .route(
+            "/api/admin/accounts/turn-state/cookie-copy",
+            post(cookie_copy::<S>),
+        )
+        .route(
             "/api/admin/accounts/turn-state/cookie-remove",
             post(cookie_remove::<S>),
         )
@@ -89,6 +93,23 @@ struct CookieApplyRequest {
     account_id: String,
     model: String,
     pod: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieCopyRequest {
+    account_id: String,
+    model: String,
+    pod: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CookieCopyResponse {
+    pod: String,
+    name: String,
+    value: String,
+    expires_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -218,6 +239,39 @@ where
         StatusCode::OK,
         AdminEnvelope::ok(UpdatedAccountData::from(result)),
     ))
+}
+
+async fn cookie_copy<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<CookieCopyRequest>,
+) -> Result<Response, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let account_id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let cookie = state
+        .admin_services()
+        .accounts()
+        .turn_state_cookie(account_id, request.model, request.pod)
+        .await
+        .map_err(map_service_error)?;
+    let mut response = AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(CookieCopyResponse {
+            pod: cookie.pod,
+            name: cookie.name,
+            value: cookie.value,
+            expires_at: cookie.expires_at,
+        }),
+    )
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn cookie_apply<S>(

@@ -32,6 +32,31 @@ impl PgProviderAccountRepository {
             .collect()
     }
 
+    /// 管理员按需复制仍有效的 Cookie 正文；状态轮询不携带值。
+    pub(super) async fn routing_cookie_value(
+        &self,
+        pod: &str,
+    ) -> Result<Option<RoutingCookie>, CoreStoreError> {
+        let row = sqlx::query("select * from openai_routing_cookies where pod = $1 and value is not null and expires_at > extract(epoch from now())")
+            .bind(pod)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        row.map(|row| {
+            Ok(RoutingCookie {
+                origin: row.try_get("origin").map_err(unavailable)?,
+                pod: row.try_get("pod").map_err(unavailable)?,
+                name: row.try_get("name").map_err(unavailable)?,
+                value: row.try_get("value").map_err(unavailable)?,
+                issued_at: row.try_get("issued_at").map_err(unavailable)?,
+                expires_at: row.try_get("expires_at").map_err(unavailable)?,
+                observed_at: row.try_get("observed_at").map_err(unavailable)?,
+                reported_model: row.try_get("reported_model").map_err(unavailable)?,
+            })
+        })
+        .transpose()
+    }
+
     pub(super) async fn record_routing_cookie(
         &self,
         observation: RoutingCookieObservation,

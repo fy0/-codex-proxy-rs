@@ -128,6 +128,14 @@ pub trait AccountStore: Send + Sync {
         ))
     }
 
+    /// 仅管理员主动复制时读取路由 Cookie 正文，状态轮询不携带值。
+    async fn turn_state_cookie(
+        &self,
+        _pod: &str,
+    ) -> AdminStoreResult<Option<gateway_core::account::RoutingCookie>> {
+        Ok(None)
+    }
+
     async fn apply_turn_state_cookie(
         &self,
         _account_id: &gateway_core::account::ProviderAccountId,

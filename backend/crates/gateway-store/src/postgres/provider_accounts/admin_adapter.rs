@@ -547,6 +547,22 @@ impl AccountStore for PgAdminAccountStore {
         })
     }
 
+    async fn turn_state_cookie(
+        &self,
+        pod: &str,
+    ) -> AdminStoreResult<Option<gateway_core::account::RoutingCookie>> {
+        self.accounts
+            .routing_cookie_value(pod)
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "routing cookie unavailable",
+                )
+            })
+    }
+
     async fn apply_turn_state_cookie(
         &self,
         account_id: &CoreProviderAccountId,

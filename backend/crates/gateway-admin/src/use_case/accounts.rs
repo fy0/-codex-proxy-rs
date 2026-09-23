@@ -85,6 +85,15 @@ pub trait AccountsService: Send + Sync {
         Err(AdminError::invalid("当前服务不支持应用 turn state"))
     }
 
+    async fn turn_state_cookie(
+        &self,
+        _account_id: ProviderAccountId,
+        _model: String,
+        _pod: String,
+    ) -> Result<RoutingCookie, AdminError> {
+        Err(AdminError::invalid("当前服务不支持复制路由 Cookie"))
+    }
+
     async fn apply_turn_state_cookie(
         &self,
         _context: &MutationContext,
@@ -511,6 +520,27 @@ impl AccountsService for DefaultAccountsService {
         provider.account_unavailable(&account_id).await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(result)
+    }
+
+    async fn turn_state_cookie(
+        &self,
+        _account_id: ProviderAccountId,
+        model: String,
+        pod: String,
+    ) -> Result<RoutingCookie, AdminError> {
+        if model.is_empty()
+            || model.len() > 256
+            || model.trim() != model
+            || model.chars().any(char::is_control)
+            || RoutingCookie::gateway_id_from_pod(&pod).is_none()
+        {
+            return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
+        }
+        self.accounts
+            .turn_state_cookie(&pod)
+            .await
+            .map_err(|error| map_store_error(error, "routing cookie copy"))?
+            .ok_or_else(|| AdminError::invalid("Cookie 已过期或已被替换，请刷新后重试"))
     }
 
     async fn apply_turn_state_cookie(
