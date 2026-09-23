@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { getAccounts, TurnStateInstallation, TurnStateObservation, TurnStateStatus } from '@/api'
-import { Check, Cookie, Copy, Eye, LockKeyhole, Play, Plus, RefreshCw, Settings2, Trash2, Unlock } from '@lucide/vue'
+import { Check, Cookie, Copy, Eye, LockKeyhole, Play, Plus, RefreshCw, Settings2, Trash2 } from '@lucide/vue'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, onMounted, ref, watch } from 'vue'
 import { applyTurnState, applyTurnStateCookie, copyTurnState, copyTurnStateCookie, defaultTurnStateConfig, getAccounts as fetchAccounts, getTurnStateStatus, probeTurnState, removeTurnState, removeTurnStateCookie } from '@/api'
@@ -19,11 +19,11 @@ import TurnStateConfigModal from './TurnStateConfigModal.vue'
 
 const buckets = ref<TurnStateStatus[]>([])
 const accountFilter = ref('')
-const selectedKey = ref('')
+const selectedKey = ref(sessionStorage.getItem('turn-state-selection') ?? '')
 const accounts = ref<Awaited<ReturnType<typeof getAccounts>>['items']>([])
 const error = ref('')
 const autoRefresh = ref(true)
-const tab = ref('probe')
+const tab = ref(sessionStorage.getItem('turn-state-tab') === 'passive' || sessionStorage.getItem('turn-state-tab') === 'history' ? sessionStorage.getItem('turn-state-tab')! : 'probe')
 const page = ref(1)
 const pageSize = ref(20)
 const showConfig = ref(false)
@@ -65,6 +65,7 @@ const tableBuckets = computed<TurnStateStatus[]>(() => {
   }), ...unconfigured]
 })
 const selection = computed(() => tableBuckets.value.find(bucket => bucketKey(bucket) === selectedKey.value))
+const shownCookie = computed(() => selection.value ? currentCookie(selection.value) : null)
 const accountOptions = computed(() => [{ label: '全部账号', value: '' }, ...accounts.value.map(account => ({ label: `${account.email?.trim() || account.name} · ${account.id}`, value: account.id }))])
 const bucketOptions = computed(() => tableBuckets.value.map(bucket => ({ label: `${bucket.accountEmail?.trim() || bucket.accountName} · ${bucket.accountId} / ${bucket.model}`, value: bucketKey(bucket) })))
 const observations = computed(() => selection.value?.observations.filter(item => item.source === tab.value) ?? [])
@@ -219,9 +220,20 @@ function injectionLabel(bucket: TurnStateStatus) {
 function pinnedCookie(bucket: TurnStateStatus, pod: string | null | undefined, issuedAt: number | null | undefined) {
   return !!pod && issuedAt != null && bucket.cookieOverridePod === pod && bucket.cookieOverrideIssuedAt === issuedAt
 }
+function currentCookie(bucket: TurnStateStatus) {
+  if (bucket.cookieOverridePod) {
+    return bucket.cookiePool?.find(cookie => pinnedCookie(bucket, cookie.pod, cookie.issuedAt)) ?? bucket.routingCookie ?? null
+  }
+  return bucket.routingCookie ?? null
+}
 function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined, observation?: TurnStateObservation) {
-  return issuedAt != null && issuedAt > 0 && issuedAt <= now.value && issuedAt + bucket.config.ttlSeconds > now.value
-    && (observation ? !!observation.observationId && observation.hasToken === true : (bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt)
+  if (issuedAt == null || issuedAt <= 0)
+    return false
+  // 观测行的正文一直留着，刷新后仍可复制；当前票和候选仍受有效期限制。
+  if (observation)
+    return !!observation.observationId && observation.hasToken === true
+  return issuedAt <= now.value && issuedAt + bucket.config.ttlSeconds > now.value
+    && ((bucket.hasInstalledState && issuedAt === bucket.issuedAt) || issuedAt === bucket.candidateIssuedAt)
 }
 async function removeState(bucket: TurnStateStatus) {
   if (removing.value || !bucket.hasInstalledState || bucket.issuedAt == null)
@@ -363,6 +375,8 @@ async function removeCookie(bucket: TurnStateStatus) {
   }
 }
 
+watch(selectedKey, value => sessionStorage.setItem('turn-state-selection', value))
+watch(tab, value => sessionStorage.setItem('turn-state-tab', value))
 watch(accountFilter, load)
 watch([selectedKey, tab], () => {
   page.value = 1
@@ -561,27 +575,29 @@ onMounted(async () => {
         </div>
       </dl>
       <div v-if="selection.config.cookieLockEnabled" class="grid gap-2 text-cp-sm">
-        <h3 class="m-0 font-semibold">共享 Cookie 池</h3>
+        <h3 class="m-0 font-semibold">当前 Cookie</h3>
         <p class="m-0 text-cp-text-secondary">允许编号：{{ selection.config.cookieGatewayIds || '未设置（仅观察）' }}</p>
-        <p v-if="selection.cookieOverridePod" class="m-0 text-cp-success-text">当前固定：{{ selection.cookieOverridePod }}<span v-if="selection.cookieOverrideIssuedAt" class="text-cp-xs">（签发 {{ date(selection.cookieOverrideIssuedAt) }}）</span></p>
-        <p v-if="!selection.cookiePool?.length" class="m-0 text-cp-text-secondary">尚未采集到路由 Cookie，将按已配置出口继续探测。</p>
-        <div v-for="cookie in selection.cookiePool" :key="cookie.pod" class="flex flex-wrap items-center gap-x-4 gap-y-1">
-          <span class="font-mono">unified-{{ cookie.gatewayId }}</span>
-          <span class="break-all text-cp-xs text-cp-text-secondary">{{ cookie.pod }}</span>
-          <span :class="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase() ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ cookie.reportedModel || '未确认模型' }}</span>
-          <span :class="cookie.allowed ? 'text-cp-success-text' : 'text-cp-text-secondary'">{{ cookie.allowed ? '编号已允许' : '未允许' }}</span>
-          <span class="text-cp-text-secondary">到期 {{ date(cookie.expiresAt) }}</span>
-          <BaseIconButton label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, cookie.pod)">
-            <Cookie class="size-4" />
-          </BaseIconButton>
-          <span v-if="pinnedCookie(selection, cookie.pod, cookie.issuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
-          <BaseIconButton v-else-if="cookie.reportedModel.toLowerCase() === selection.model.toLowerCase()" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, cookie.pod, cookie.issuedAt)">
-            <LockKeyhole class="size-4" />
-          </BaseIconButton>
-          <BaseIconButton v-if="selection.cookieOverridePod === cookie.pod" label="取消 Cookie 固定" :disabled="cookieRemoving" @click="removeCookie(selection)">
-            <Unlock class="size-4" />
-          </BaseIconButton>
+        <div v-if="selection.cookieOverridePod || shownCookie" class="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span :class="selection.cookieOverridePod ? 'text-cp-success-text' : 'text-cp-text'">{{ selection.cookieOverridePod ? '已固定' : '自动选择' }}</span>
+          <template v-if="shownCookie">
+            <span class="font-mono">unified-{{ shownCookie.gatewayId }}</span>
+            <span class="break-all text-cp-xs text-cp-text-secondary">{{ shownCookie.pod }}</span>
+            <span class="text-cp-text-secondary">签发 {{ date(shownCookie.issuedAt) }}</span>
+            <span class="text-cp-text-secondary">到期 {{ date(shownCookie.expiresAt) }}</span>
+            <BaseIconButton label="复制当前 Cookie" :disabled="copying" @click="copyCookie(selection, shownCookie.pod)">
+              <Cookie class="size-4" />
+            </BaseIconButton>
+          </template>
+          <template v-else>
+            <span class="break-all font-mono text-cp-xs">{{ selection.cookieOverridePod }}</span>
+            <span class="text-cp-text-secondary">签发 {{ date(selection.cookieOverrideIssuedAt ?? null) }}</span>
+            <span class="text-cp-warning-text">这张票已经不在可用记录里</span>
+          </template>
+          <BaseButton v-if="selection.cookieOverridePod" :disabled="cookieRemoving" @click="removeCookie(selection)">
+            解除固定
+          </BaseButton>
         </div>
+        <p v-else class="m-0 text-cp-text-secondary">当前没有选定 Cookie。可在下面的记录里固定某一条。</p>
       </div>
       <BaseSegmented v-model="tab" label="记录类型" class="w-full sm:w-96" :options="[{ label: '主动探测', value: 'probe' }, { label: '被动采集', value: 'passive' }, { label: '安装历史', value: 'history' }]" />
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />

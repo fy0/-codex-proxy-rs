@@ -97,10 +97,11 @@ impl PgProviderAccountRepository {
         }
         let value = values.remove(0);
         let token = TurnStateToken { value, issued_at };
-        Ok((TurnStateToken::parse(&token.value)
-            .is_some_and(|parsed| parsed.issued_at == issued_at)
-            && token.is_fresh(now, state.config.ttl_seconds))
-        .then_some(token))
+        let parsed = TurnStateToken::parse(&token.value)
+            .is_some_and(|parsed| parsed.issued_at == issued_at);
+        // 指定观测行时保留过期正文，刷新后仍可复制；未指定时只交出仍有效的票。
+        Ok((parsed && (observation_id.is_some() || token.is_fresh(now, state.config.ttl_seconds)))
+            .then_some(token))
     }
 
     pub(super) async fn load_turn_state_buckets_for_model(
@@ -134,9 +135,7 @@ impl PgProviderAccountRepository {
         // 清理不依赖是否启用轮换，停用的桶也不能继续持有过期正文。
         sqlx::query("update account_turn_states set turn_state_override = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then turn_state_override else null end, attached_model = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then attached_model else null end, candidate = case when candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then candidate else null end where (turn_state_override is not null and (current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true) or (candidate is not null and (candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true)")
             .execute(&self.pool).await.map_err(unavailable)?;
-        // 观测事件里的令牌正文与槽位正文同寿命，过期即摘除，历史只保留元数据。
-        sqlx::query("update account_turn_state_events e set detail = e.detail - 'token' from account_turn_states s where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation' and e.detail ? 'token' and ((e.detail->>'issuedAt')::numeric > 0 and (e.detail->>'issuedAt')::numeric <= extract(epoch from now()) and (e.detail->>'issuedAt')::numeric + (s.config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true")
-            .execute(&self.pool).await.map_err(unavailable)?;
+        // 已安装槽位过期后不再注入；观测记录里的正文留下，供之后复制。
         let rows = sqlx::query("select * from account_turn_states order by account_id, model")
             .fetch_all(&self.pool)
             .await
@@ -361,13 +360,8 @@ impl PgProviderAccountRepository {
                 let has_installed_state = installed.is_some();
                 for observation in &mut observations {
                     observation.is_installed &= has_installed_state;
-                    observation.has_token &= identity_matches
-                        && observation.issued_at.is_some_and(|issued_at| {
-                            issued_at > 0
-                                && Utc::now().timestamp().checked_sub(issued_at).is_some_and(
-                                    |age| age >= 0 && (age as u64) < state.config.ttl_seconds,
-                                )
-                        });
+                    // 正文还在就可以复制；是否还能安装由有效期单独判断。
+                    observation.has_token &= identity_matches;
                 }
                 let business_status = if !account_enabled {
                     TurnStateBusinessStatus::ManualDisabled
@@ -572,14 +566,12 @@ async fn append_event(
     kind: &str,
     detail: serde_json::Value,
 ) -> Result<(), CoreStoreError> {
-    let source = detail
-        .get("source")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_owned();
     sqlx::query("insert into account_turn_state_events(account_id, model, event_kind, detail) values ($1, $2, $3, $4)")
-        .bind(account).bind(model).bind(kind).bind(detail).execute(&mut **tx).await.map_err(unavailable)?;
-    sqlx::query("delete from account_turn_state_events where account_id = $1 and model = $2 and event_kind = $3 and ($3 <> 'observation' or detail->>'source' = $4) and id not in (select id from account_turn_state_events where account_id = $1 and model = $2 and event_kind = $3 and ($3 <> 'observation' or detail->>'source' = $4) order by id desc limit 100)")
-        .bind(account).bind(model).bind(kind).bind(source).execute(&mut **tx).await.map_err(unavailable)?;
+        .bind(account).bind(model).bind(kind).bind(&detail).execute(&mut **tx).await.map_err(unavailable)?;
+    // 探测与被动采集的 state 记录全部保留。安装历史仍只留最近 100 条。
+    if kind != "observation" {
+        sqlx::query("delete from account_turn_state_events where account_id = $1 and model = $2 and event_kind = $3 and id not in (select id from account_turn_state_events where account_id = $1 and model = $2 and event_kind = $3 order by id desc limit 100)")
+            .bind(account).bind(model).bind(kind).execute(&mut **tx).await.map_err(unavailable)?;
+    }
     Ok(())
 }
