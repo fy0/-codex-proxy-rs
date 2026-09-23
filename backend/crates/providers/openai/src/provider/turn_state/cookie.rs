@@ -36,7 +36,7 @@ impl TurnStateService {
             started_at,
         } = observation;
         let (cookie, deleted) = self
-            .observe_cookie(headers, sent, Some(model), started_at)
+            .observe_cookie(headers, sent, Some(model), started_at, true)
             .await;
         let Some(bucket) = self.current(account.id(), requested_model).await else {
             return;
@@ -115,6 +115,7 @@ impl TurnStateService {
         sent: Option<&RoutingCookie>,
         model: Option<&str>,
         started_at: i64,
+        persist: bool,
     ) -> (Option<RoutingCookie>, bool) {
         let Ok(origin) = url::Url::parse(&self.endpoint) else {
             return (None, false);
@@ -165,6 +166,10 @@ impl TurnStateService {
             }
         }
         let observed = received.as_ref().or(sent).cloned();
+        // 未命中期望的探测只留在记录里，不写进可回放的池。
+        if !persist {
+            return (observed, deleted);
+        }
         if (received.is_some() || sent.is_some())
             && self
                 .store

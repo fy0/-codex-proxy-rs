@@ -490,6 +490,9 @@ async fn cookie_only_probe_renews_and_shares_across_accounts_without_state_overr
         format!("event: response.created
 data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"model\":\"{model}\",\"status\":\"in_progress\",\"output\":[]}}}}
 
+event: response.output_text.delta
+data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市早苗\"}}
+
 {COMPLETED}")
     };
     Mock::given(method("POST"))

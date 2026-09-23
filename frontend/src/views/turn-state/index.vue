@@ -175,6 +175,8 @@ function outcome(value: string) {
     return '相同 state（未续期）'
   if (value === 'not_newer')
     return '签发时间未更新'
+  if (value === 'answer_mismatch')
+    return '未命中期望'
   return labels[value] ?? value
 }
 
@@ -303,7 +305,7 @@ function canApplyState(bucket: TurnStateStatus, issuedAt: number | null | undefi
   if (bucket.issuedAt !== null && issuedAt <= bucket.issuedAt)
     return false
   if (observation)
-    return !!observation.observationId && observation.hasToken === true && tokenLength === bucket.config.targetLength
+    return observation.answerMatch !== false && !!observation.observationId && observation.hasToken === true && tokenLength === bucket.config.targetLength
   return issuedAt === bucket.candidateIssuedAt && bucket.candidateLength === bucket.config.targetLength
 }
 async function applyState(bucket: TurnStateStatus, issuedAt: number | null | undefined, tokenLength?: number | null, observation?: TurnStateObservation) {
@@ -359,8 +361,12 @@ async function applyCookie(bucket: TurnStateStatus, pod: string, issuedAt?: numb
 }
 
 async function removeCookie(bucket: TurnStateStatus) {
-  if (cookieRemoving.value || !bucket.cookieOverridePod)
+  if (cookieRemoving.value)
     return
+  if (!bucket.cookieOverridePod) {
+    toast.warning('当前没有人工固定。这张 Cookie 是按允许编号自动选中的')
+    return
+  }
   cookieRemoving.value = true
   try {
     await removeTurnStateCookie({ accountId: bucket.accountId, model: bucket.model })
@@ -593,11 +599,11 @@ onMounted(async () => {
             <span class="text-cp-text-secondary">签发 {{ date(selection.cookieOverrideIssuedAt ?? null) }}</span>
             <span class="text-cp-warning-text">这张票已经不在可用记录里</span>
           </template>
-          <BaseButton v-if="selection.cookieOverridePod" :disabled="cookieRemoving" @click="removeCookie(selection)">
-            解除固定
-          </BaseButton>
         </div>
-        <p v-else class="m-0 text-cp-text-secondary">当前没有选定 Cookie。可在下面的记录里固定某一条。</p>
+        <BaseButton v-if="selection.cookieOverridePod || shownCookie" variant="destructive" size="sm" class="w-fit" :disabled="cookieRemoving" @click="removeCookie(selection)">
+          解除固定
+        </BaseButton>
+        <p v-if="!selection.cookieOverridePod && !shownCookie" class="m-0 text-cp-text-secondary">当前没有选定 Cookie。可在下面的记录里固定某一条。</p>
       </div>
       <BaseSegmented v-model="tab" label="记录类型" class="w-full sm:w-96" :options="[{ label: '主动探测', value: 'probe' }, { label: '被动采集', value: 'passive' }, { label: '安装历史', value: 'history' }]" />
       <BaseTable v-if="tab === 'history'" :columns="historyColumns" :rows="installations.slice((page - 1) * pageSize, page * pageSize)" empty-text="暂无安装记录" density="compact" />
@@ -623,7 +629,7 @@ onMounted(async () => {
             <Cookie class="size-4" />
           </BaseIconButton>
           <span v-if="pinnedCookie(selection, row.oailbHost, row.cookieIssuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
-          <BaseIconButton v-else-if="row.oailbHost && row.cookieIssuedAt != null" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost, row.cookieIssuedAt)">
+          <BaseIconButton v-else-if="row.oailbHost && row.cookieIssuedAt != null && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost, row.cookieIssuedAt)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

@@ -762,7 +762,15 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         }
         // 路由 Cookie 是共享池资源，与账号认证类型无关；API key 账号同样采集。
         if let Some(service) = &turn_state {
-            service.observe_cookie(&response.set_cookie_headers, sent_cookie.as_ref(), None, cookie_request_started_at).await;
+            service
+                .observe_cookie(
+                    &response.set_cookie_headers,
+                    sent_cookie.as_ref(),
+                    None,
+                    cookie_request_started_at,
+                    true,
+                )
+                .await;
         }
         let response_transport = response.transport;
         let websocket_connection_id = response.websocket_connection_id;

@@ -204,6 +204,8 @@ impl TurnStateService {
             .is_some_and(|token| !token.is_newer_than(latest_issued_at))
         {
             "not_newer"
+        } else if observation.answer_match == Some(false) {
+            "answer_mismatch"
         } else {
             "candidate"
         }
@@ -511,12 +513,15 @@ impl TurnStateService {
             let successful = response
                 .status
                 .is_some_and(|status| (200..300).contains(&status));
+            // 探测题的期望答案必须命中，Cookie 才能进入可回放池。
+            let answer_matched = observation.answer_match == Some(true);
             let (cookie, deleted) = if successful {
                 self.observe_cookie(
                     &cookie_headers,
                     sent_cookie,
                     created_model.as_deref(),
                     request_started_at,
+                    answer_matched,
                 )
                 .await
             } else {
@@ -529,7 +534,8 @@ impl TurnStateService {
             observation.oailb_host = cookie.as_ref().map(|cookie| cookie.pod.clone());
             observation.cookie_issued_at = cookie.as_ref().map(|cookie| cookie.issued_at);
             observation.cookie_expires_at = cookie.as_ref().map(|cookie| cookie.expires_at);
-            let usable = !deleted
+            let usable = answer_matched
+                && !deleted
                 && cookie
                     .as_ref()
                     .is_some_and(|cookie| cookie.is_usable(&bucket.model, Utc::now().timestamp()))
@@ -545,6 +551,8 @@ impl TurnStateService {
                 "http_error"
             } else if deleted {
                 "cookie_deleted"
+            } else if !answer_matched {
+                "answer_mismatch"
             } else if created_model.is_none() {
                 "missing_model"
             } else if cookie.is_none() {
