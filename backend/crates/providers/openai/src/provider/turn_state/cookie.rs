@@ -19,6 +19,8 @@ impl TurnStateService {
         sent: Option<&RoutingCookie>,
         requested_model: &str,
         model: &str,
+        request_state_source: &'static str,
+        response_state: Option<&str>,
         started_at: i64,
     ) {
         let (cookie, deleted) = self
@@ -44,6 +46,10 @@ impl TurnStateService {
         } else {
             "cookie_model_mismatch"
         };
+        // 响应的 x-codex-turn-state 一并解析留存，记录可直接复制或套用为票；
+        // 过期或未来签发的票只保留元数据，与主动观测一致。
+        let observed_at = Utc::now().timestamp();
+        let token = response_state.and_then(gateway_core::account::TurnStateToken::parse);
         self.persist(
             gateway_core::account::TurnStateObservation {
                 observation_id: None,
@@ -51,20 +57,23 @@ impl TurnStateService {
                 upstream_account_id: account.upstream_account_id().map(str::to_owned),
                 upstream_user_id: account.upstream_user_id().map(str::to_owned),
                 model: requested_model.to_owned(),
-                observed_at: Utc::now().timestamp(),
+                observed_at,
                 started_at: Some(started_at / 1000),
                 source: "passive".to_owned(),
-                request_state_source: None,
+                request_state_source: Some(request_state_source.to_owned()),
                 response_source: Some("response_created".to_owned()),
                 probe_trigger: None,
                 outcome: outcome.to_owned(),
                 http_status: None,
-                token_length: None,
-                issued_at: None,
+                token_length: response_state.map(str::len),
+                issued_at: token.as_ref().map(|token| token.issued_at),
                 reported_model: Some(model.to_owned()),
                 oailb_host: cookie.as_ref().map(|cookie| cookie.pod.clone()),
                 cookie_expires_at: cookie.as_ref().map(|cookie| cookie.expires_at),
-                token: None,
+                token: token
+                    .as_ref()
+                    .filter(|token| token.is_fresh(observed_at, bucket.config.ttl_seconds))
+                    .map(|token| token.value.clone()),
                 has_token: false,
                 is_installed: false,
                 hunt_attempts: None,

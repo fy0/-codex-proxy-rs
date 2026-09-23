@@ -773,6 +773,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             failure_diagnostics.request_id = None;
         }
         let failure_set_cookie_headers = response.set_cookie_headers.clone();
+        let response_turn_state = response.turn_state.clone();
         let failure_rate_limit_headers = response.rate_limit_headers.clone();
         let mut passive_quota_observation =
             OpenAiPassiveQuotaObservation::new(response.rate_limit_headers);
@@ -937,7 +938,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             if let Some(model) = decoder.body_response_model()
                 && observed_cookie_model.as_deref() != Some(model)
                 && let Some(service) = &turn_state {
-                service.observe_business_cookie(&active_account, &failure_set_cookie_headers, sent_cookie.as_ref(), upstream_model.as_str(), model, cookie_request_started_at).await;
+                service.observe_business_cookie(&active_account, &failure_set_cookie_headers, sent_cookie.as_ref(), upstream_model.as_str(), model, request_state_source, response_turn_state.as_deref(), cookie_request_started_at).await;
                 observed_cookie_model = Some(model.to_owned());
             }
             let service_tier_changed = observation_state
