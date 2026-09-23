@@ -1043,7 +1043,8 @@ async fn invalid_history_bodies_are_rejected_and_legacy_extreme_dates_do_not_bre
     .fetch_one(&database.pool)
     .await
     .unwrap();
-    assert_eq!(remaining, 1);
+    // 未签发和未来签发的正文被摘掉；已过期的历史正文保留，加上当前有效票共两条。
+    assert_eq!(remaining, 2);
     assert_eq!(
         admin
             .turn_state_token(&id, "model-a", fresh.issued_at, None)

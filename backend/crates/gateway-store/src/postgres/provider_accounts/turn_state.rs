@@ -135,7 +135,9 @@ impl PgProviderAccountRepository {
         // 清理不依赖是否启用轮换，停用的桶也不能继续持有过期正文。
         sqlx::query("update account_turn_states set turn_state_override = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then turn_state_override else null end, attached_model = case when current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then attached_model else null end, candidate = case when candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now()) then candidate else null end where (turn_state_override is not null and (current_issued_at > 0 and current_issued_at <= extract(epoch from now()) and current_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true) or (candidate is not null and (candidate_issued_at > 0 and candidate_issued_at <= extract(epoch from now()) and candidate_issued_at::numeric + (config->>'ttlSeconds')::numeric > extract(epoch from now())) is not true)")
             .execute(&self.pool).await.map_err(unavailable)?;
-        // 已安装槽位过期后不再注入；观测记录里的正文留下，供之后复制。
+        // 已安装槽位过期后不再注入。观测记录里已生效过的正文留下；未签发或未来签发的正文摘掉。
+        sqlx::query("update account_turn_state_events e set detail = e.detail - 'token' where e.event_kind = 'observation' and e.detail ? 'token' and ((e.detail->>'issuedAt')::numeric > 0 and (e.detail->>'issuedAt')::numeric <= extract(epoch from now())) is not true")
+            .execute(&self.pool).await.map_err(unavailable)?;
         let rows = sqlx::query("select * from account_turn_states order by account_id, model")
             .fetch_all(&self.pool)
             .await
