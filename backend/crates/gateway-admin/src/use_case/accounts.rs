@@ -44,6 +44,15 @@ use super::{
 
 const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 
+/// 管理员复制时拿到的路由票，以及拼好的完整 Cookie 请求头。
+pub struct TurnStateCookieCopy {
+    pub pod: String,
+    pub name: String,
+    pub value: String,
+    pub expires_at: i64,
+    pub header: String,
+}
+
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
@@ -90,7 +99,7 @@ pub trait AccountsService: Send + Sync {
         _account_id: ProviderAccountId,
         _model: String,
         _pod: String,
-    ) -> Result<RoutingCookie, AdminError> {
+    ) -> Result<TurnStateCookieCopy, AdminError> {
         Err(AdminError::invalid("当前服务不支持复制路由 Cookie"))
     }
 
@@ -525,10 +534,10 @@ impl AccountsService for DefaultAccountsService {
 
     async fn turn_state_cookie(
         &self,
-        _account_id: ProviderAccountId,
+        account_id: ProviderAccountId,
         model: String,
         pod: String,
-    ) -> Result<RoutingCookie, AdminError> {
+    ) -> Result<TurnStateCookieCopy, AdminError> {
         if model.is_empty()
             || model.len() > 256
             || model.trim() != model
@@ -537,11 +546,30 @@ impl AccountsService for DefaultAccountsService {
         {
             return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
         }
-        self.accounts
+        let routing = self
+            .accounts
             .turn_state_cookie(&pod)
             .await
             .map_err(|error| map_store_error(error, "routing cookie copy"))?
-            .ok_or_else(|| AdminError::invalid("Cookie 已过期或已被替换，请刷新后重试"))
+            .ok_or_else(|| AdminError::invalid("Cookie 已过期或已被替换，请刷新后重试"))?;
+        let mut parts = self
+            .accounts
+            .account_replay_cookies(&account_id)
+            .await
+            .map_err(|error| map_store_error(error, "account cookie copy"))?;
+        parts.push((routing.name.clone(), routing.value.clone()));
+        let header = parts
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Ok(TurnStateCookieCopy {
+            pod: routing.pod,
+            name: routing.name,
+            value: routing.value,
+            expires_at: routing.expires_at,
+            header,
+        })
     }
 
     async fn apply_turn_state_cookie(

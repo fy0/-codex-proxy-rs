@@ -32,6 +32,44 @@ impl PgProviderAccountRepository {
             .collect()
     }
 
+    /// 账号凭据中尚未过期、且不是路由票的 Cookie。值为请求头里的原文。
+    pub(super) async fn account_replay_cookies(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<(String, String)>, CoreStoreError> {
+        let rows = sqlx::query(
+            "select c->>'name' as name, c->>'value' as value, c->>'expires_at' as expires_at from provider_accounts a cross join lateral jsonb_array_elements(coalesce(a.provider_credentials_json->'cookies', '[]'::jsonb)) c where a.id = $1",
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        let now = Utc::now();
+        let mut cookies = Vec::new();
+        for row in rows {
+            let name: String = row.try_get("name").map_err(unavailable)?;
+            let value: String = row.try_get("value").map_err(unavailable)?;
+            let expires_at: Option<String> = row.try_get("expires_at").map_err(unavailable)?;
+            if matches!(name.as_str(), "__oailb" | "__oai_lb")
+                || name.is_empty()
+                || value.is_empty()
+                || value.contains(';')
+                || value.chars().any(char::is_control)
+                || name.chars().any(char::is_control)
+            {
+                continue;
+            }
+            if expires_at.as_deref().is_some_and(|expires| {
+                chrono::DateTime::parse_from_rfc3339(expires)
+                    .is_ok_and(|expires| expires.timestamp() < now.timestamp())
+            }) {
+                continue;
+            }
+            cookies.push((name, value));
+        }
+        Ok(cookies)
+    }
+
     /// 管理员按需复制仍有效的 Cookie 正文；状态轮询不携带值。
     pub(super) async fn routing_cookie_value(
         &self,

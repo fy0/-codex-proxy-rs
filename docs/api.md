@@ -372,7 +372,7 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt, observationId? }` | 应用当前候选或指定观测记录的票，不改变自动轮换开关；票已变更、过期或不再可安装时返回 409 |
 | `POST` | `/api/admin/accounts/turn-state/remove` | `{ accountId, model, issuedAt }` | 移除该桶已安装票，预期签发时间不匹配或已移除时返回 409，不改变账号或探测开关 |
 | `POST` | `/api/admin/accounts/turn-state/cookie-apply` | `{ accountId, model, pod, issuedAt? }` | 固定共享池中该 pod 的 Cookie（按 pod + 签发时间绑定具体值）；提供 `issuedAt` 时绑定观测记录里的那条 Cookie，省略则取池内当前值；服务端事务核对模型和有效期，失败返回 409；Cookie 到期或被续约替换后固定自动失效 |
-| `POST` | `/api/admin/accounts/turn-state/cookie-copy` | `{ accountId, model, pod }` | 按需读取池内仍有效的路由 Cookie，返回 `pod`、`name`、`value` 和 `expiresAt`，响应禁止缓存；Cookie 已过期或被替换时返回错误 |
+| `POST` | `/api/admin/accounts/turn-state/cookie-copy` | `{ accountId, model, pod }` | 按需读取池内仍有效的路由 Cookie。`header` 是账号上仍可回放的 Cookie 加上这张路由票，格式与业务请求的 `Cookie` 头相同；同时返回 `pod`、`name`、`value` 和 `expiresAt`。响应禁止缓存；路由 Cookie 已过期或被替换时返回错误 |
 | `POST` | `/api/admin/accounts/turn-state/cookie-remove` | `{ accountId, model }` | 取消该模型桶的 Cookie 固定；没有固定值时返回 409，不改变 Cookie 锁定或探测开关 |
 | `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt, observationId? }` | 按需读取仍有效的已安装票、当前候选或指定观测记录的票，返回正文和签发时间，响应禁止缓存 |
 | `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、CLI 版本和时区日期，不发送上游请求 |

@@ -330,7 +330,7 @@ async function copyCookie(bucket: TurnStateStatus, pod: string) {
   copying.value = true
   try {
     const cookie = await copyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod })
-    await copyText(`${cookie.name}=${cookie.value}`, { successText: 'Cookie 已复制' })
+    await copyText(cookie.header, { successText: 'Cookie 已复制' })
   }
   catch {
     // 值不落页面状态，过期或被替换后重新核对池状态。

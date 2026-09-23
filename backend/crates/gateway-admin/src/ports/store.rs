@@ -136,6 +136,14 @@ pub trait AccountStore: Send + Sync {
         Ok(None)
     }
 
+    /// 账号凭据里仍可回放的 Cookie，不含路由票。复制时和路由票拼成完整请求头。
+    async fn account_replay_cookies(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     async fn apply_turn_state_cookie(
         &self,
         _account_id: &gateway_core::account::ProviderAccountId,

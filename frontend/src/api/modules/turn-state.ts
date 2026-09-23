@@ -174,7 +174,7 @@ export function removeTurnState(data: { accountId: string, model: string, issued
 }
 
 export function copyTurnStateCookie(data: { accountId: string, model: string, pod: string }) {
-  return request<{ pod: string, name: string, value: string, expiresAt: number }>({
+  return request<{ pod: string, name: string, value: string, expiresAt: number, header: string }>({
     url: '/api/admin/accounts/turn-state/cookie-copy',
     method: 'POST',
     data,

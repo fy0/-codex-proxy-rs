@@ -112,6 +112,8 @@ struct CookieCopyResponse {
     name: String,
     value: String,
     expires_at: i64,
+    /// 账号仍有效的 Cookie，加上选中的路由票，格式与业务请求的 Cookie 头相同。
+    header: String,
 }
 
 #[derive(Deserialize)]
@@ -267,6 +269,7 @@ where
             name: cookie.name,
             value: cookie.value,
             expires_at: cookie.expires_at,
+            header: cookie.header,
         }),
     )
     .into_response();

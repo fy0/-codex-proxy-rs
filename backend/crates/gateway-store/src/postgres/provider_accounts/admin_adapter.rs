@@ -560,6 +560,22 @@ impl AccountStore for PgAdminAccountStore {
         })
     }
 
+    async fn account_replay_cookies(
+        &self,
+        account_id: &gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<Vec<(String, String)>> {
+        self.accounts
+            .account_replay_cookies(account_id.as_str())
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "account cookies unavailable",
+                )
+            })
+    }
+
     async fn apply_turn_state_cookie(
         &self,
         account_id: &CoreProviderAccountId,
