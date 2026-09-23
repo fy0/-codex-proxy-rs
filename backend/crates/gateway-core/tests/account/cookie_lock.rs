@@ -11,7 +11,7 @@ fn jwt(host: &str, iat: i64, exp: i64, alg: &str) -> String {
 }
 
 #[test]
-fn routing_cookie_rejects_expired_future_invalid_scope_and_unbounded_lifetimes() {
+fn routing_cookie_rejects_expired_future_and_invalid_scope() {
     let now = 1_800_000_000;
     let host = "chat.gateway.unified-185.api.openai.com";
     let value = jwt(host, now, now + 3600, "ES256");
@@ -31,7 +31,6 @@ fn routing_cookie_rejects_expired_future_invalid_scope_and_unbounded_lifetimes()
     for (host, iat, exp, alg) in [
         (host, now + 1, now + 3600, "ES256"),
         (host, now - 3600, now, "ES256"),
-        (host, now, now + 3601, "ES256"),
         ("evil.example", now, now + 3600, "ES256"),
         (host, now, now + 3600, "none"),
     ] {
@@ -39,6 +38,11 @@ fn routing_cookie_rejects_expired_future_invalid_scope_and_unbounded_lifetimes()
             RoutingCookie::parse("origin", "__oailb", &jwt(host, iat, exp, alg), now).is_none()
         );
     }
+    // 签发寿命由上游决定，本地不限制 JWT 声明的时长。
+    assert!(
+        RoutingCookie::parse("origin", "__oailb", &jwt(host, now, now + 7200, "ES256"), now)
+            .is_some()
+    );
     assert!(RoutingCookie::parse("origin", "session-token", &value, now).is_none());
     assert!(RoutingCookie::parse("origin", "__oai_lb", &value, now).is_some());
 }

@@ -68,12 +68,7 @@ impl RoutingCookie {
         Self::gateway_id_from_pod(pod)?;
         let issued_at = claims.get("iat")?.as_i64()?;
         let expires_at = claims.get("exp")?.as_i64()?;
-        if issued_at <= 0
-            || issued_at > now
-            || expires_at <= now
-            || expires_at <= issued_at
-            || expires_at.checked_sub(issued_at)? > 3600
-        {
+        if issued_at <= 0 || issued_at > now || expires_at <= now || expires_at <= issued_at {
             return None;
         }
         Some(Self {
