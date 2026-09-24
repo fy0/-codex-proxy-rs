@@ -171,10 +171,9 @@ async fn account_turn_state_override_replaces_the_automatic_ticket_until_cleared
     let mut config = OpenAiConfig::default();
     config.api.base_url = server.uri();
     config.resolve_and_validate(runtime.path()).unwrap();
-    let bundle =
-        provider_openai::initialize(config, turn_state_provider_ports(Arc::clone(&store)))
-            .await
-            .unwrap();
+    let bundle = provider_openai::initialize(config, turn_state_provider_ports(Arc::clone(&store)))
+        .await
+        .unwrap();
     let (input, context) = request_with_state(&[ACCOUNT], MODEL, Some("client-state"));
     let mut stream = bundle
         .core_provider()
@@ -555,6 +554,12 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
     assert!(bucket.candidate.is_none());
     for id in [ACCOUNT, "acct_cookie_other"] {
         let (input, context) = request(&[id], MODEL);
-        assert!(bundle.core_provider().execute(input, context).await.is_err());
+        assert!(
+            bundle
+                .core_provider()
+                .execute(input, context)
+                .await
+                .is_err()
+        );
     }
 }

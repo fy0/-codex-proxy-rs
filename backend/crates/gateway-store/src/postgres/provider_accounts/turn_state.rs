@@ -105,11 +105,13 @@ impl PgProviderAccountRepository {
         }
         let value = values.remove(0);
         let token = TurnStateToken { value, issued_at };
-        let parsed = TurnStateToken::parse(&token.value)
-            .is_some_and(|parsed| parsed.issued_at == issued_at);
+        let parsed =
+            TurnStateToken::parse(&token.value).is_some_and(|parsed| parsed.issued_at == issued_at);
         // 指定观测行时保留过期正文，刷新后仍可复制；未指定时只交出仍有效的票。
-        Ok((parsed && (observation_id.is_some() || token.is_fresh(now, state.config.ttl_seconds)))
-            .then_some(token))
+        Ok(
+            (parsed && (observation_id.is_some() || token.is_fresh(now, state.config.ttl_seconds)))
+                .then_some(token),
+        )
     }
 
     pub(super) async fn load_turn_state_buckets_for_model(
