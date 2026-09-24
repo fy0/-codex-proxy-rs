@@ -696,7 +696,7 @@ impl AccountStore for PgAdminAccountStore {
                 "routing cookie transaction unavailable",
             )
         })?;
-        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, cookie_override_issued_at = null, cookie_override_name = null, cookie_override_value = null, cookie_override_expires_at = null, cookie_override_observation_id = null, next_probe_at = null where account_id = $1 and model = $2 and cookie_override_value is not null")
+        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, cookie_override_issued_at = null, cookie_override_name = null, cookie_override_value = null, cookie_override_expires_at = null, cookie_override_observation_id = null, next_probe_at = null where account_id = $1 and model = $2 and (cookie_override_value is not null or cookie_override_pod is not null or cookie_override_name is not null or cookie_override_observation_id is not null)")
             .bind(account_id.as_str())
             .bind(model)
             .execute(&mut *transaction)

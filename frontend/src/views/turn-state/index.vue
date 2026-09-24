@@ -361,10 +361,13 @@ async function applyCookie(bucket: TurnStateStatus, pod: string, issuedAt?: numb
   }
 }
 
+function cookieBound(bucket: TurnStateStatus) {
+  return !!(bucket.cookieOverrideName || bucket.cookieOverrideValue || bucket.cookieOverridePod || bucket.cookieOverrideObservationId)
+}
 async function removeCookie(bucket: TurnStateStatus) {
   if (cookieRemoving.value)
     return
-  if (!bucket.cookieOverrideName) {
+  if (!cookieBound(bucket)) {
     toast.warning('当前没有固定的 Cookie')
     return
   }
@@ -583,7 +586,7 @@ onMounted(async () => {
       </dl>
       <div v-if="selection.config.cookieLockEnabled" class="grid gap-2 text-cp-sm">
         <h3 class="m-0 font-semibold">当前 Cookie</h3>
-        <div v-if="selection.cookieOverrideName" class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div v-if="cookieBound(selection)" class="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span class="text-cp-success-text">已固定</span>
           <span class="font-mono">{{ selection.cookieOverrideName }}</span>
           <span v-if="selection.cookieOverridePod" class="break-all text-cp-xs text-cp-text-secondary">{{ selection.cookieOverridePod }}</span>
