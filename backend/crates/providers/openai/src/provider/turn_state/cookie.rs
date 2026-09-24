@@ -83,6 +83,10 @@ impl TurnStateService {
                 oailb_host: cookie.as_ref().map(|cookie| cookie.pod.clone()),
                 cookie_issued_at: cookie.as_ref().map(|cookie| cookie.issued_at),
                 cookie_expires_at: cookie.as_ref().map(|cookie| cookie.expires_at),
+                cookie_origin: cookie.as_ref().map(|cookie| cookie.origin.clone()),
+                cookie_name: cookie.as_ref().map(|cookie| cookie.name.clone()),
+                cookie_value: cookie.as_ref().map(|cookie| cookie.value.clone()),
+                has_cookie: false,
                 token: token
                     .as_ref()
                     .filter(|token| token.is_fresh(observed_at, bucket.config.ttl_seconds))

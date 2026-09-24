@@ -95,6 +95,7 @@ struct CookieApplyRequest {
     pod: String,
     /// 记录行固定时带上观测到的签发时间，绑定那条具体 Cookie；省略则取池内当前值。
     issued_at: Option<i64>,
+    observation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +104,7 @@ struct CookieCopyRequest {
     account_id: String,
     model: String,
     pod: String,
+    observation_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -256,10 +258,21 @@ where
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let account_id = ProviderAccountId::new(request.account_id)
         .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let observation_id = request
+        .observation_id
+        .as_deref()
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| map_wire_error(WireValidationError::new("observationId")))
+        })
+        .transpose()?;
     let cookie = state
         .admin_services()
         .accounts()
-        .turn_state_cookie(account_id, request.model, request.pod)
+        .turn_state_cookie(account_id, request.model, request.pod, observation_id)
         .await
         .map_err(map_service_error)?;
     let mut response = AdminResponse::new(
@@ -290,6 +303,17 @@ where
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let account_id = ProviderAccountId::new(request.account_id)
         .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let observation_id = request
+        .observation_id
+        .as_deref()
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| map_wire_error(WireValidationError::new("observationId")))
+        })
+        .transpose()?;
     let result = state
         .admin_services()
         .accounts()
@@ -299,6 +323,7 @@ where
             request.model,
             request.pod,
             request.issued_at,
+            observation_id,
         )
         .await
         .map_err(map_service_error)?;

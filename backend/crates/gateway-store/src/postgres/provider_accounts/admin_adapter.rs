@@ -560,6 +560,37 @@ impl AccountStore for PgAdminAccountStore {
         })
     }
 
+    async fn recorded_routing_cookie(
+        &self,
+        account_id: &gateway_core::account::ProviderAccountId,
+        model: &str,
+        observation_id: i64,
+    ) -> AdminStoreResult<Option<gateway_core::account::RoutingCookie>> {
+        self.accounts
+            .recorded_routing_cookie(account_id.as_str(), model, observation_id)
+            .await
+            .map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Unavailable,
+                    ENTITY,
+                    "recorded routing cookie unavailable",
+                )
+            })
+    }
+
+    async fn restore_routing_cookie(
+        &self,
+        cookie: &gateway_core::account::RoutingCookie,
+    ) -> AdminStoreResult<()> {
+        self.accounts.restore_routing_cookie(cookie).await.map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                ENTITY,
+                "restore routing cookie unavailable",
+            )
+        })
+    }
+
     async fn account_replay_cookies(
         &self,
         account_id: &gateway_core::account::ProviderAccountId,

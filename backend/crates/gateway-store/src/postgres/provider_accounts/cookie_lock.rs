@@ -70,6 +70,82 @@ impl PgProviderAccountRepository {
         Ok(cookies)
     }
 
+    /// 读取某一条探测记录上保存的路由 Cookie。旧记录没有正文时返回空。
+    pub(super) async fn recorded_routing_cookie(
+        &self,
+        account_id: &str,
+        model: &str,
+        observation_id: i64,
+    ) -> Result<Option<RoutingCookie>, CoreStoreError> {
+        let row = sqlx::query("select detail->>'cookieName' as name, detail->>'cookieValue' as value, detail->>'oailbHost' as pod, detail->>'cookieOrigin' as origin, (detail->>'cookieIssuedAt')::bigint as issued_at, (detail->>'cookieExpiresAt')::bigint as expires_at, coalesce(detail->>'reportedModel', '') as reported_model from account_turn_state_events where id = $1 and account_id = $2 and model = $3 and event_kind = 'observation'")
+            .bind(observation_id)
+            .bind(account_id)
+            .bind(model)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let name: Option<String> = row.try_get("name").map_err(unavailable)?;
+        let value: Option<String> = row.try_get("value").map_err(unavailable)?;
+        let pod: Option<String> = row.try_get("pod").map_err(unavailable)?;
+        let origin: Option<String> = row.try_get("origin").map_err(unavailable)?;
+        let (Some(name), Some(value), Some(pod)) = (name, value, pod) else {
+            return Ok(None);
+        };
+        if name.is_empty() || value.is_empty() || pod.is_empty() {
+            return Ok(None);
+        }
+        let issued_at: Option<i64> = row.try_get("issued_at").map_err(unavailable)?;
+        let expires_at: Option<i64> = row.try_get("expires_at").map_err(unavailable)?;
+        let reported_model: String = row.try_get("reported_model").map_err(unavailable)?;
+        Ok(Some(RoutingCookie {
+            origin: origin.unwrap_or_default(),
+            pod,
+            name,
+            value,
+            issued_at: issued_at.unwrap_or(0),
+            expires_at: expires_at.unwrap_or(0),
+            observed_at: 0,
+            reported_model,
+        }))
+    }
+
+    /// 把探测记录上的那张 Cookie 写回池，供这次人工固定后的请求回放。
+    pub(super) async fn restore_routing_cookie(
+        &self,
+        cookie: &RoutingCookie,
+    ) -> Result<(), CoreStoreError> {
+        let origin = if !cookie.origin.is_empty() {
+            cookie.origin.clone()
+        } else {
+            let stored: Option<String> = sqlx::query_scalar("select origin from openai_routing_cookies where pod = $1 or true order by observed_at desc limit 1")
+                .bind(&cookie.pod)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(unavailable)?;
+            let Some(origin) = stored.filter(|origin| !origin.is_empty()) else {
+                return Ok(());
+            };
+            origin
+        };
+        let now = Utc::now().timestamp_millis();
+        sqlx::query("insert into openai_routing_cookies(origin, pod, name, value, issued_at, expires_at, observed_at, reported_model) values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (origin, pod) do update set name = excluded.name, value = excluded.value, issued_at = excluded.issued_at, expires_at = excluded.expires_at, observed_at = excluded.observed_at, reported_model = excluded.reported_model")
+            .bind(origin)
+            .bind(&cookie.pod)
+            .bind(&cookie.name)
+            .bind(&cookie.value)
+            .bind(cookie.issued_at)
+            .bind(cookie.expires_at)
+            .bind(now)
+            .bind(&cookie.reported_model)
+            .execute(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        Ok(())
+    }
+
     /// 管理员按需复制仍有效的 Cookie 正文；状态轮询不携带值。
     pub(super) async fn routing_cookie_value(
         &self,

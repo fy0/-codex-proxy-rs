@@ -47,6 +47,10 @@ pub(super) fn observation(
         oailb_host: None,
         cookie_issued_at: None,
         cookie_expires_at: None,
+        cookie_origin: None,
+        cookie_name: None,
+        cookie_value: None,
+        has_cookie: false,
         // 使用合成正文验证存储边界，失效票应在持久化时被剥离。
         token: Some(token(length, issued_at).value),
         has_token: false,

@@ -99,6 +99,7 @@ pub trait AccountsService: Send + Sync {
         _account_id: ProviderAccountId,
         _model: String,
         _pod: String,
+        _observation_id: Option<i64>,
     ) -> Result<TurnStateCookieCopy, AdminError> {
         Err(AdminError::invalid("当前服务不支持复制路由 Cookie"))
     }
@@ -110,6 +111,7 @@ pub trait AccountsService: Send + Sync {
         _model: String,
         _pod: String,
         _issued_at: Option<i64>,
+        _observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         Err(AdminError::invalid("当前服务不支持应用路由 Cookie"))
     }
@@ -537,6 +539,7 @@ impl AccountsService for DefaultAccountsService {
         account_id: ProviderAccountId,
         model: String,
         pod: String,
+        observation_id: Option<i64>,
     ) -> Result<TurnStateCookieCopy, AdminError> {
         if model.is_empty()
             || model.len() > 256
@@ -546,12 +549,23 @@ impl AccountsService for DefaultAccountsService {
         {
             return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
         }
-        let routing = self
-            .accounts
-            .turn_state_cookie(&pod)
-            .await
-            .map_err(|error| map_store_error(error, "routing cookie copy"))?
-            .ok_or_else(|| AdminError::invalid("Cookie 已过期或已被替换，请刷新后重试"))?;
+        let recorded = match observation_id {
+            Some(id) => self
+                .accounts
+                .recorded_routing_cookie(&account_id, &model, id)
+                .await
+                .map_err(|error| map_store_error(error, "recorded routing cookie"))?,
+            None => None,
+        };
+        let routing = if let Some(cookie) = recorded {
+            cookie
+        } else {
+            self.accounts
+                .turn_state_cookie(&pod)
+                .await
+                .map_err(|error| map_store_error(error, "routing cookie copy"))?
+                .ok_or_else(|| AdminError::invalid("这条探测没有保存 Cookie 正文"))?
+        };
         let mut parts = self
             .accounts
             .account_replay_cookies(&account_id)
@@ -581,8 +595,9 @@ impl AccountsService for DefaultAccountsService {
         context: &MutationContext,
         account_id: ProviderAccountId,
         model: String,
-        pod: String,
-        issued_at: Option<i64>,
+        mut pod: String,
+        mut issued_at: Option<i64>,
+        observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         if model.is_empty()
             || model.len() > 256
@@ -591,6 +606,22 @@ impl AccountsService for DefaultAccountsService {
             || RoutingCookie::gateway_id_from_pod(&pod).is_none()
         {
             return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
+        }
+        if let Some(id) = observation_id {
+            if let Some(mut cookie) = self
+                .accounts
+                .recorded_routing_cookie(&account_id, &model, id)
+                .await
+                .map_err(|error| map_store_error(error, "recorded routing cookie"))?
+            {
+                cookie.reported_model = model.clone();
+                self.accounts
+                    .restore_routing_cookie(&cookie)
+                    .await
+                    .map_err(|error| map_store_error(error, "restore routing cookie"))?;
+                pod = cookie.pod;
+                issued_at = Some(cookie.issued_at);
+            }
         }
         let (stored, provider) = self.provider_for_account(&account_id).await?;
         if stored.account.provider_kind.as_str() != "openai"

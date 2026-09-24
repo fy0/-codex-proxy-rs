@@ -222,11 +222,6 @@ function injectionLabel(bucket: TurnStateStatus) {
 function pinnedCookie(bucket: TurnStateStatus, pod: string | null | undefined, issuedAt: number | null | undefined) {
   return !!pod && issuedAt != null && bucket.cookieOverridePod === pod && bucket.cookieOverrideIssuedAt === issuedAt
 }
-function livePoolCookie(bucket: TurnStateStatus, pod: string | null | undefined) {
-  if (!pod)
-    return null
-  return bucket.cookiePool?.find(cookie => cookie.pod === pod && cookie.expiresAt > now.value && cookie.reportedModel.toLowerCase() === bucket.model.toLowerCase()) ?? null
-}
 function currentCookie(bucket: TurnStateStatus) {
   if (bucket.cookieOverridePod) {
     return bucket.cookiePool?.find(cookie => pinnedCookie(bucket, cookie.pod, cookie.issuedAt)) ?? bucket.routingCookie ?? null
@@ -331,22 +326,20 @@ async function applyState(bucket: TurnStateStatus, issuedAt: number | null | und
   }
 }
 
-function copyLiveCookie(bucket: TurnStateStatus, pod: string | null | undefined) {
-  const cookie = livePoolCookie(bucket, pod)
-  if (cookie)
-    void copyCookie(bucket, cookie.pod)
+function copyRecordCookie(bucket: TurnStateStatus, row: TurnStateObservation) {
+  if (row.oailbHost)
+    void copyCookie(bucket, row.oailbHost, row.observationId)
 }
-function pinLiveCookie(bucket: TurnStateStatus, pod: string | null | undefined) {
-  const cookie = livePoolCookie(bucket, pod)
-  if (cookie)
-    void applyCookie(bucket, cookie.pod, cookie.issuedAt)
+function pinRecordCookie(bucket: TurnStateStatus, row: TurnStateObservation) {
+  if (row.oailbHost)
+    void applyCookie(bucket, row.oailbHost, row.cookieIssuedAt, row.observationId)
 }
-async function copyCookie(bucket: TurnStateStatus, pod: string) {
+async function copyCookie(bucket: TurnStateStatus, pod: string, observationId?: string) {
   if (copying.value)
     return
   copying.value = true
   try {
-    const cookie = await copyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod })
+    const cookie = await copyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod, observationId })
     await copyText(cookie.header, { successText: 'Cookie 已复制' })
   }
   catch {
@@ -358,12 +351,12 @@ async function copyCookie(bucket: TurnStateStatus, pod: string) {
   }
 }
 
-async function applyCookie(bucket: TurnStateStatus, pod: string, issuedAt?: number | null) {
+async function applyCookie(bucket: TurnStateStatus, pod: string, issuedAt?: number | null, observationId?: string) {
   if (cookieApplying.value || !bucket.accountEnabled)
     return
   cookieApplying.value = true
   try {
-    await applyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod, issuedAt })
+    await applyTurnStateCookie({ accountId: bucket.accountId, model: bucket.model, pod, issuedAt, observationId })
     toast.success('已固定 Cookie')
     await load()
   }
@@ -640,11 +633,11 @@ onMounted(async () => {
           <BaseIconButton v-if="canCopy(selection, row.issuedAt, row)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row)">
             <Copy class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="livePoolCookie(selection, row.oailbHost)" label="复制此 Cookie" :disabled="copying" @click="copyLiveCookie(selection, row.oailbHost)">
+          <BaseIconButton v-if="row.oailbHost" label="复制此 Cookie" :disabled="copying" @click="copyRecordCookie(selection, row)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <span v-if="pinnedCookie(selection, row.oailbHost, livePoolCookie(selection, row.oailbHost)?.issuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
-          <BaseIconButton v-else-if="livePoolCookie(selection, row.oailbHost) && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinLiveCookie(selection, row.oailbHost)">
+          <span v-if="pinnedCookie(selection, row.oailbHost, row.cookieIssuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
+          <BaseIconButton v-else-if="row.oailbHost && row.cookieIssuedAt != null && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinRecordCookie(selection, row)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

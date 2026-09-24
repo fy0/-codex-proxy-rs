@@ -136,6 +136,24 @@ pub trait AccountStore: Send + Sync {
         Ok(None)
     }
 
+    /// 某一条探测记录上保存的路由 Cookie。没有正文时返回空。
+    async fn recorded_routing_cookie(
+        &self,
+        _account_id: &gateway_core::account::ProviderAccountId,
+        _model: &str,
+        _observation_id: i64,
+    ) -> AdminStoreResult<Option<gateway_core::account::RoutingCookie>> {
+        Ok(None)
+    }
+
+    /// 把探测记录上的 Cookie 写回共享池，供人工固定后的请求回放。
+    async fn restore_routing_cookie(
+        &self,
+        _cookie: &gateway_core::account::RoutingCookie,
+    ) -> AdminStoreResult<()> {
+        Ok(())
+    }
+
     /// 账号凭据里仍可回放的 Cookie，不含路由票。复制时和路由票拼成完整请求头。
     async fn account_replay_cookies(
         &self,

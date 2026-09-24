@@ -279,6 +279,15 @@ pub struct TurnStateObservation {
     pub cookie_issued_at: Option<i64>,
     #[serde(default)]
     pub cookie_expires_at: Option<i64>,
+    /// 这一条探测当时拿到的路由 Cookie。状态列表不返回正文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_value: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_cookie: bool,
     /// 有效信封正文随观测行持久化；状态查询剥离正文，操作使用观测 ID 精确定位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,

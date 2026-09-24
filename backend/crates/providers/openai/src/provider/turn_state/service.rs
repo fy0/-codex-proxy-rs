@@ -132,6 +132,10 @@ impl TurnStateService {
                     oailb_host: None,
                     cookie_issued_at: None,
                     cookie_expires_at: None,
+                    cookie_origin: None,
+                    cookie_name: None,
+                    cookie_value: None,
+                    has_cookie: false,
                     token: None,
                     has_token: false,
                     egress,
@@ -321,6 +325,10 @@ impl TurnStateService {
             oailb_host: None,
             cookie_issued_at: None,
             cookie_expires_at: None,
+            cookie_origin: None,
+            cookie_name: None,
+            cookie_value: None,
+            has_cookie: false,
             token: None,
             has_token: false,
             egress: "none".to_owned(),
@@ -534,6 +542,9 @@ impl TurnStateService {
             observation.oailb_host = cookie.as_ref().map(|cookie| cookie.pod.clone());
             observation.cookie_issued_at = cookie.as_ref().map(|cookie| cookie.issued_at);
             observation.cookie_expires_at = cookie.as_ref().map(|cookie| cookie.expires_at);
+            observation.cookie_origin = cookie.as_ref().map(|cookie| cookie.origin.clone());
+            observation.cookie_name = cookie.as_ref().map(|cookie| cookie.name.clone());
+            observation.cookie_value = cookie.as_ref().map(|cookie| cookie.value.clone());
             let usable = answer_matched
                 && !deleted
                 && cookie

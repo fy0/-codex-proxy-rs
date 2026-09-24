@@ -70,6 +70,7 @@ export interface TurnStateObservation {
   issuedAt: number | null
   oailbHost?: string | null
   cookieIssuedAt?: number | null
+  hasCookie?: boolean
   cookieExpiresAt?: number | null
   reportedModel?: string | null
   hasToken?: boolean
@@ -173,7 +174,7 @@ export function removeTurnState(data: { accountId: string, model: string, issued
   })
 }
 
-export function copyTurnStateCookie(data: { accountId: string, model: string, pod: string }) {
+export function copyTurnStateCookie(data: { accountId: string, model: string, pod: string, observationId?: string }) {
   return request<{ pod: string, name: string, value: string, expiresAt: number, header: string }>({
     url: '/api/admin/accounts/turn-state/cookie-copy',
     method: 'POST',
@@ -181,7 +182,7 @@ export function copyTurnStateCookie(data: { accountId: string, model: string, po
   })
 }
 
-export function applyTurnStateCookie(data: { accountId: string, model: string, pod: string, issuedAt?: number | null }) {
+export function applyTurnStateCookie(data: { accountId: string, model: string, pod: string, issuedAt?: number | null, observationId?: string }) {
   return request<{ accountId: string, configRevision: number }>({
     url: '/api/admin/accounts/turn-state/cookie-apply',
     method: 'POST',
