@@ -388,7 +388,7 @@ impl PgProviderAccountRepository {
                     None
                 } else if state.config.cookie_lock_enabled {
                     Some(state.next_probe_at.unwrap_or_else(|| {
-                        routing_cookie.map_or_else(
+                        routing_cookie.as_ref().map_or_else(
                             || Utc::now().timestamp(),
                             |cookie| {
                                 cookie.expires_at

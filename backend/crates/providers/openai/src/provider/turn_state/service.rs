@@ -452,7 +452,7 @@ impl TurnStateService {
             .header("chatgpt-account-id", upstream_account_id)
             .header("content-encoding", "zstd")
             .body(body);
-        if let Some(cookie) = sent_cookie {
+        if let Some(cookie) = &sent_cookie {
             outbound = outbound.header("cookie", cookie.header());
         }
         let result = outbound.send().await;
@@ -525,7 +525,7 @@ impl TurnStateService {
             let (cookie, deleted) = if successful {
                 self.observe_cookie(
                     &cookie_headers,
-                    sent_cookie,
+                    sent_cookie.as_ref(),
                     created_model.as_deref(),
                     request_started_at,
                 )
