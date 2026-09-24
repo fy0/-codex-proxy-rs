@@ -87,6 +87,13 @@ fn iter_tool_values<'a>(
             .unwrap_or_default()
             .to_lowercase();
         let name = tool.get("name").map(string_value).unwrap_or_default();
+        // namespace 分支先判定：ToolSpec 会拿走 tool_type 的所有权。
+        if tool_type == "namespace"
+            && !name.is_empty()
+            && let Some(nested) = tool.get("tools")
+        {
+            iter_tool_values(nested, name, callback);
+        }
         if (tool_type == "function" || tool_type == "custom") && !name.is_empty() {
             let key = if namespace.is_empty() {
                 name.to_owned()
@@ -99,11 +106,6 @@ fn iter_tool_values<'a>(
                 tool_type,
                 spec: tool,
             });
-        }
-        if tool_type == "namespace" && !name.is_empty() {
-            if let Some(nested) = tool.get("tools") {
-                iter_tool_values(nested, name, callback);
-            }
         }
     }
 }
