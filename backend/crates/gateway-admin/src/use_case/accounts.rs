@@ -549,23 +549,15 @@ impl AccountsService for DefaultAccountsService {
         {
             return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
         }
-        let recorded = match observation_id {
-            Some(id) => self
-                .accounts
-                .recorded_routing_cookie(&account_id, &model, id)
-                .await
-                .map_err(|error| map_store_error(error, "recorded routing cookie"))?,
-            None => None,
+        let Some(id) = observation_id else {
+            return Err(AdminError::invalid("请从单条探测记录复制 Cookie"));
         };
-        let routing = if let Some(cookie) = recorded {
-            cookie
-        } else {
-            self.accounts
-                .turn_state_cookie(&pod)
-                .await
-                .map_err(|error| map_store_error(error, "routing cookie copy"))?
-                .ok_or_else(|| AdminError::invalid("这条探测没有保存 Cookie 正文"))?
-        };
+        let routing = self
+            .accounts
+            .recorded_routing_cookie(&account_id, &model, id)
+            .await
+            .map_err(|error| map_store_error(error, "recorded routing cookie"))?
+            .ok_or_else(|| AdminError::invalid("这条探测没有保存这次请求的 Cookie"))?;
         let mut parts = self
             .accounts
             .account_replay_cookies(&account_id)

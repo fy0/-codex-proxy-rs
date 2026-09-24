@@ -598,9 +598,6 @@ onMounted(async () => {
             <span class="break-all text-cp-xs text-cp-text-secondary">{{ shownCookie.pod }}</span>
             <span class="text-cp-text-secondary">签发 {{ date(shownCookie.issuedAt) }}</span>
             <span class="text-cp-text-secondary">到期 {{ date(shownCookie.expiresAt) }}</span>
-            <BaseIconButton label="复制当前 Cookie" :disabled="copying" @click="copyCookie(selection, shownCookie.pod)">
-              <Cookie class="size-4" />
-            </BaseIconButton>
           </template>
           <template v-else>
             <span class="break-all font-mono text-cp-xs">{{ selection.cookieOverridePod }}</span>
@@ -633,7 +630,7 @@ onMounted(async () => {
           <BaseIconButton v-if="canCopy(selection, row.issuedAt, row)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row)">
             <Copy class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="row.oailbHost" label="复制此 Cookie" :disabled="copying" @click="copyRecordCookie(selection, row)">
+          <BaseIconButton v-if="row.hasCookie && row.observationId" label="复制此 Cookie" :disabled="copying" @click="copyRecordCookie(selection, row)">
             <Cookie class="size-4" />
           </BaseIconButton>
           <span v-if="pinnedCookie(selection, row.oailbHost, row.cookieIssuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
