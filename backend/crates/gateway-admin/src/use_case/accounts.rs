@@ -588,7 +588,7 @@ impl AccountsService for DefaultAccountsService {
         account_id: ProviderAccountId,
         model: String,
         mut pod: String,
-        mut issued_at: Option<i64>,
+        _issued_at: Option<i64>,
         observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
         if model.is_empty()
@@ -609,7 +609,7 @@ impl AccountsService for DefaultAccountsService {
             .map_err(|error| map_store_error(error, "recorded routing cookie"))?
             .ok_or_else(|| AdminError::invalid("这条探测没有保存这次请求的 Cookie"))?;
         pod = cookie.pod;
-        issued_at = Some(cookie.issued_at);
+        let issued_at = Some(cookie.issued_at);
         let name = cookie.name;
         let value = cookie.value;
         let expires_at = cookie.expires_at;
