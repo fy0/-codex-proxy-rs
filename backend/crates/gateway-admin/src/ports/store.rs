@@ -166,11 +166,7 @@ pub trait AccountStore: Send + Sync {
         &self,
         _account_id: &gateway_core::account::ProviderAccountId,
         _model: &str,
-        _pod: &str,
-        _issued_at: Option<i64>,
-        _name: &str,
-        _value: &str,
-        _expires_at: i64,
+        _cookie: &gateway_core::account::RoutingCookie,
         _observation_id: i64,
         _context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {

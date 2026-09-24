@@ -587,7 +587,7 @@ impl AccountsService for DefaultAccountsService {
         context: &MutationContext,
         account_id: ProviderAccountId,
         model: String,
-        mut pod: String,
+        _pod: String,
         _issued_at: Option<i64>,
         observation_id: Option<i64>,
     ) -> Result<AccountUpdateResult, AdminError> {
@@ -595,9 +595,8 @@ impl AccountsService for DefaultAccountsService {
             || model.len() > 256
             || model.trim() != model
             || model.chars().any(char::is_control)
-            || RoutingCookie::gateway_id_from_pod(&pod).is_none()
         {
-            return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
+            return Err(AdminError::invalid("模型不合法"));
         }
         let Some(id) = observation_id else {
             return Err(AdminError::invalid("请从单条探测记录固定 Cookie"));
@@ -608,11 +607,9 @@ impl AccountsService for DefaultAccountsService {
             .await
             .map_err(|error| map_store_error(error, "recorded routing cookie"))?
             .ok_or_else(|| AdminError::invalid("这条探测没有保存这次请求的 Cookie"))?;
-        pod = cookie.pod;
-        let issued_at = Some(cookie.issued_at);
-        let name = cookie.name;
-        let value = cookie.value;
-        let expires_at = cookie.expires_at;
+        if RoutingCookie::gateway_id_from_pod(&cookie.pod).is_none() {
+            return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
+        }
         let (stored, provider) = self.provider_for_account(&account_id).await?;
         if stored.account.provider_kind.as_str() != "openai"
             || stored.account.authentication_kind != "oauth"
@@ -624,17 +621,7 @@ impl AccountsService for DefaultAccountsService {
         }
         let result = self
             .accounts
-            .apply_turn_state_cookie(
-                &account_id,
-                &model,
-                &pod,
-                issued_at,
-                &name,
-                &value,
-                expires_at,
-                id,
-                context,
-            )
+            .apply_turn_state_cookie(&account_id, &model, &cookie, id, context)
             .await
             .map_err(|error| map_store_error(error, "routing cookie apply"))?;
         provider.account_unavailable(&account_id).await;

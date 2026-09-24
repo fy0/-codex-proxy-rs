@@ -614,11 +614,7 @@ impl AccountStore for PgAdminAccountStore {
         &self,
         account_id: &CoreProviderAccountId,
         model: &str,
-        pod: &str,
-        issued_at: Option<i64>,
-        name: &str,
-        value: &str,
-        expires_at: i64,
+        cookie: &gateway_core::account::RoutingCookie,
         observation_id: i64,
         context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
@@ -634,11 +630,11 @@ impl AccountStore for PgAdminAccountStore {
         let applied = sqlx::query("update account_turn_states set cookie_override_pod = $3, cookie_override_issued_at = $4, cookie_override_name = $5, cookie_override_value = $6, cookie_override_expires_at = $7, cookie_override_observation_id = $8, next_probe_at = null where account_id = $1 and model = $2 and (config->>'cookieLockEnabled')::boolean and $5 <> '' and $6 <> ''")
             .bind(account_id.as_str())
             .bind(model)
-            .bind(pod)
-            .bind(issued_at)
-            .bind(name)
-            .bind(value)
-            .bind(expires_at)
+            .bind(&cookie.pod)
+            .bind(cookie.issued_at)
+            .bind(&cookie.name)
+            .bind(&cookie.value)
+            .bind(cookie.expires_at)
             .bind(observation_id)
             .execute(&mut *transaction)
             .await
