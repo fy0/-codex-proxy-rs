@@ -188,7 +188,7 @@ fn describe_parameter_names(parameters: &Map<String, Value>) -> String {
         .and_then(Value::as_array)
         .map(|list| {
             list.iter()
-                .map(|value| string_value(value))
+                .map(string_value)
                 .filter(|name| !name.is_empty())
                 .collect()
         })
@@ -626,7 +626,7 @@ pub(crate) fn prepare_request_body(source: &Map<String, Value>) -> Map<String, V
     output.insert("input".to_owned(), Value::Array(translated));
     output.insert(
         "reasoning_effort".to_owned(),
-        Value::String(reasoning_effort_from_source(source).to_owned()),
+        Value::String(reasoning_effort_from_source(source)),
     );
     output.insert("context_management".to_owned(), context_management(source));
     let conversation = explicit_conversation_key(source);
@@ -801,21 +801,15 @@ fn schema_matches(value: &Value, schema: &Map<String, Value>) -> bool {
                 return false;
             }
         }
-        "null" => {
-            if !value.is_null() {
-                return false;
-            }
+        "null" if !value.is_null() => {
+            return false;
         }
         _ => {}
     }
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
         && !enum_values.is_empty()
     {
-        let rendered = value.to_string();
-        if !enum_values
-            .iter()
-            .any(|option| option.to_string() == rendered)
-        {
+        if !enum_values.iter().any(|option| option == value) {
             return false;
         }
     }
@@ -934,9 +928,7 @@ fn extract_native_client_tool_call(
                 .cloned(),
             None => native.get("arguments").cloned(),
         };
-        let Some(parsed) = arguments.as_ref().and_then(parse_arguments) else {
-            return None;
-        };
+        let parsed = arguments.as_ref().and_then(parse_arguments)?;
         if let Some(parameters) =
             first_map(spec.spec, &["parameters", "inputSchema", "input_schema"])
             && !schema_matches(&Value::Object(parsed.clone()), parameters)
