@@ -528,7 +528,6 @@ impl TurnStateService {
                     sent_cookie,
                     created_model.as_deref(),
                     request_started_at,
-                    answer_matched,
                 )
                 .await
             } else {

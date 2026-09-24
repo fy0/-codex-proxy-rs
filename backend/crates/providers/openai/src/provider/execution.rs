@@ -768,7 +768,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     sent_cookie.as_ref(),
                     None,
                     cookie_request_started_at,
-                    true,
                 )
                 .await;
         }

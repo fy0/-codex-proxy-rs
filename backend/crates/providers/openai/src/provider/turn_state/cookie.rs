@@ -1,7 +1,7 @@
 //! 路由 Cookie 仅来自同一上游响应，模型声明与请求开始水位一起提交。
 
 use chrono::Utc;
-use gateway_core::account::{RoutingCookie, RoutingCookieObservation};
+use gateway_core::account::RoutingCookie;
 use secrecy::ExposeSecret;
 
 use super::TurnStateService;
@@ -36,7 +36,7 @@ impl TurnStateService {
             started_at,
         } = observation;
         let (cookie, deleted) = self
-            .observe_cookie(headers, sent, Some(model), started_at, true)
+            .observe_cookie(headers, sent, Some(model), started_at)
             .await;
         let Some(bucket) = self.current(account.id(), requested_model).await else {
             return;
@@ -119,7 +119,6 @@ impl TurnStateService {
         sent: Option<&RoutingCookie>,
         model: Option<&str>,
         started_at: i64,
-        persist: bool,
     ) -> (Option<RoutingCookie>, bool) {
         let Ok(origin) = url::Url::parse(&self.endpoint) else {
             return (None, false);
@@ -170,27 +169,6 @@ impl TurnStateService {
             }
         }
         let observed = received.as_ref().or(sent).cloned();
-        // 未命中期望的探测只留在记录里，不写进可回放的池。
-        if !persist {
-            return (observed, deleted);
-        }
-        if (received.is_some() || sent.is_some())
-            && self
-                .store
-                .observe_routing_cookie(RoutingCookieObservation {
-                    origin: self.endpoint.clone(),
-                    observed_at: started_at,
-                    sent: sent.cloned(),
-                    received,
-                    reported_model: model.map(str::to_owned),
-                    deleted,
-                })
-                .await
-                .is_err()
-        {
-            tracing::warn!("routing cookie observation persistence failed");
-            return (None, deleted);
-        }
         (observed, deleted)
     }
 }
