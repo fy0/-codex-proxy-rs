@@ -808,10 +808,9 @@ fn schema_matches(value: &Value, schema: &Map<String, Value>) -> bool {
     }
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
         && !enum_values.is_empty()
+        && !enum_values.iter().any(|option| option == value)
     {
-        if !enum_values.iter().any(|option| option == value) {
-            return false;
-        }
+        return false;
     }
     true
 }
