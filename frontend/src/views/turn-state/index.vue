@@ -222,6 +222,11 @@ function injectionLabel(bucket: TurnStateStatus) {
 function pinnedCookie(bucket: TurnStateStatus, pod: string | null | undefined, issuedAt: number | null | undefined) {
   return !!pod && issuedAt != null && bucket.cookieOverridePod === pod && bucket.cookieOverrideIssuedAt === issuedAt
 }
+function livePoolCookie(bucket: TurnStateStatus, pod: string | null | undefined) {
+  if (!pod)
+    return null
+  return bucket.cookiePool?.find(cookie => cookie.pod === pod && cookie.expiresAt > now.value && cookie.reportedModel.toLowerCase() === bucket.model.toLowerCase()) ?? null
+}
 function currentCookie(bucket: TurnStateStatus) {
   if (bucket.cookieOverridePod) {
     return bucket.cookiePool?.find(cookie => pinnedCookie(bucket, cookie.pod, cookie.issuedAt)) ?? bucket.routingCookie ?? null
@@ -326,6 +331,16 @@ async function applyState(bucket: TurnStateStatus, issuedAt: number | null | und
   }
 }
 
+function copyLiveCookie(bucket: TurnStateStatus, pod: string | null | undefined) {
+  const cookie = livePoolCookie(bucket, pod)
+  if (cookie)
+    void copyCookie(bucket, cookie.pod)
+}
+function pinLiveCookie(bucket: TurnStateStatus, pod: string | null | undefined) {
+  const cookie = livePoolCookie(bucket, pod)
+  if (cookie)
+    void applyCookie(bucket, cookie.pod, cookie.issuedAt)
+}
 async function copyCookie(bucket: TurnStateStatus, pod: string) {
   if (copying.value)
     return
@@ -625,11 +640,11 @@ onMounted(async () => {
           <BaseIconButton v-if="canCopy(selection, row.issuedAt, row)" label="复制此 state" :disabled="copying" @click="copyState(selection, row.issuedAt, row)">
             <Copy class="size-4" />
           </BaseIconButton>
-          <BaseIconButton v-if="row.oailbHost" label="复制此 Cookie" :disabled="copying" @click="copyCookie(selection, row.oailbHost)">
+          <BaseIconButton v-if="livePoolCookie(selection, row.oailbHost)" label="复制此 Cookie" :disabled="copying" @click="copyLiveCookie(selection, row.oailbHost)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <span v-if="pinnedCookie(selection, row.oailbHost, row.cookieIssuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
-          <BaseIconButton v-else-if="row.oailbHost && row.cookieIssuedAt != null && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="applyCookie(selection, row.oailbHost, row.cookieIssuedAt)">
+          <span v-if="pinnedCookie(selection, row.oailbHost, livePoolCookie(selection, row.oailbHost)?.issuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
+          <BaseIconButton v-else-if="livePoolCookie(selection, row.oailbHost) && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinLiveCookie(selection, row.oailbHost)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

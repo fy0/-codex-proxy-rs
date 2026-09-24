@@ -75,7 +75,7 @@ impl PgProviderAccountRepository {
         &self,
         pod: &str,
     ) -> Result<Option<RoutingCookie>, CoreStoreError> {
-        let row = sqlx::query("select * from openai_routing_cookies where pod = $1 and value is not null and expires_at > extract(epoch from now())")
+        let row = sqlx::query("select * from openai_routing_cookies where pod = $1 and value is not null and expires_at > extract(epoch from now()) order by observed_at desc limit 1")
             .bind(pod)
             .fetch_optional(&self.pool)
             .await
