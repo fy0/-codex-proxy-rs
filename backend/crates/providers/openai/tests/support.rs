@@ -97,6 +97,7 @@ impl MemoryAccountStore {
                 cookie_override_name: None,
                 cookie_override_value: None,
                 cookie_override_expires_at: None,
+                cookie_override_observation_id: None,
                 current: None,
                 current_issued_at: None,
                 current_length: None,

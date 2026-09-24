@@ -171,6 +171,7 @@ pub trait AccountStore: Send + Sync {
         _name: &str,
         _value: &str,
         _expires_at: i64,
+        _observation_id: i64,
         _context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
         Err(AdminStoreError::new(

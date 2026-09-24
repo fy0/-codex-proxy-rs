@@ -218,8 +218,8 @@ function injectionLabel(bucket: TurnStateStatus) {
     return bucket.active && !expired(bucket) ? `模型桶：${bucket.manualOverride ? '手动应用' : '自动安装'}` : '模型桶：不携带 state'
   return '不强制覆盖客户端 / 会话 state'
 }
-function pinnedCookie(bucket: TurnStateStatus, pod: string | null | undefined, issuedAt: number | null | undefined) {
-  return !!bucket.cookieOverrideName && !!pod && issuedAt != null && bucket.cookieOverridePod === pod && bucket.cookieOverrideIssuedAt === issuedAt
+function pinnedRecord(bucket: TurnStateStatus, observationId: string | null | undefined) {
+  return !!observationId && bucket.cookieOverrideObservationId === observationId
 }
 function canCopy(bucket: TurnStateStatus, issuedAt: number | null | undefined, observation?: TurnStateObservation) {
   if (issuedAt == null || issuedAt <= 0)
@@ -589,6 +589,7 @@ onMounted(async () => {
           <span v-if="selection.cookieOverridePod" class="break-all text-cp-xs text-cp-text-secondary">{{ selection.cookieOverridePod }}</span>
           <span class="text-cp-text-secondary">签发 {{ date(selection.cookieOverrideIssuedAt ?? null) }}</span>
           <span class="text-cp-text-secondary">到期 {{ date(selection.cookieOverrideExpiresAt ?? null) }}</span>
+          <span v-if="selection.cookieOverrideValue" class="basis-full break-all font-mono text-cp-xs">{{ selection.cookieOverrideName }}={{ selection.cookieOverrideValue }}</span>
           <BaseButton variant="destructive" size="sm" :disabled="cookieRemoving" @click="removeCookie(selection)">
             解除固定
           </BaseButton>
@@ -618,8 +619,8 @@ onMounted(async () => {
           <BaseIconButton v-if="row.hasCookie && row.observationId" label="复制此 Cookie" :disabled="copying" @click="copyRecordCookie(selection, row)">
             <Cookie class="size-4" />
           </BaseIconButton>
-          <span v-if="pinnedCookie(selection, row.oailbHost, row.cookieIssuedAt)" class="text-cp-xs text-cp-success-text">当前固定</span>
-          <BaseIconButton v-else-if="row.oailbHost && row.cookieIssuedAt != null && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinRecordCookie(selection, row)">
+          <span v-if="pinnedRecord(selection, row.observationId)" class="text-cp-xs text-cp-success-text">当前固定</span>
+          <BaseIconButton v-else-if="row.hasCookie && row.observationId && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinRecordCookie(selection, row)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>
