@@ -613,6 +613,9 @@ impl AccountStore for PgAdminAccountStore {
         model: &str,
         pod: &str,
         issued_at: Option<i64>,
+        name: &str,
+        value: &str,
+        expires_at: i64,
         context: &MutationContext,
     ) -> AdminStoreResult<AccountUpdateResult> {
         let mut transaction = self.pool.begin().await.map_err(|_| {
@@ -624,11 +627,14 @@ impl AccountStore for PgAdminAccountStore {
         })?;
         // 固定精确到具体一条 Cookie：把它的签发时间一并记下，续约换值后固定即失效。
         // 调用方给 issued_at 时绑定观测到的那条，省略则取池内当前值。
-        let applied = sqlx::query("update account_turn_states s set cookie_override_pod = $3, cookie_override_issued_at = (select c.issued_at from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2) and ($4::bigint is null or c.issued_at = $4 or not exists (select 1 from openai_routing_cookies exact where exact.pod = $3 and exact.value is not null and exact.expires_at > extract(epoch from now()) and lower(exact.reported_model) = lower($2) and exact.issued_at = $4)) order by (c.issued_at is not distinct from $4) desc, c.observed_at desc limit 1), next_probe_at = null where s.account_id = $1 and s.model = $2 and (s.config->>'cookieLockEnabled')::boolean and exists (select 1 from openai_routing_cookies c where c.pod = $3 and c.value is not null and c.expires_at > extract(epoch from now()) and lower(c.reported_model) = lower($2))")
+        let applied = sqlx::query("update account_turn_states set cookie_override_pod = $3, cookie_override_issued_at = $4, cookie_override_name = $5, cookie_override_value = $6, cookie_override_expires_at = $7, next_probe_at = null where account_id = $1 and model = $2 and (config->>'cookieLockEnabled')::boolean and $5 <> '' and $6 <> ''")
             .bind(account_id.as_str())
             .bind(model)
             .bind(pod)
             .bind(issued_at)
+            .bind(name)
+            .bind(value)
+            .bind(expires_at)
             .execute(&mut *transaction)
             .await
             .map_err(|_| {
@@ -688,7 +694,7 @@ impl AccountStore for PgAdminAccountStore {
                 "routing cookie transaction unavailable",
             )
         })?;
-        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, cookie_override_issued_at = null, next_probe_at = null where account_id = $1 and model = $2 and cookie_override_pod is not null")
+        let removed = sqlx::query("update account_turn_states set cookie_override_pod = null, cookie_override_issued_at = null, cookie_override_name = null, cookie_override_value = null, cookie_override_expires_at = null, next_probe_at = null where account_id = $1 and model = $2 and cookie_override_value is not null")
             .bind(account_id.as_str())
             .bind(model)
             .execute(&mut *transaction)

@@ -183,6 +183,9 @@ fn missing_state_policy_defaults_to_allow_and_requires_an_installed_matching_tic
         routing_cookies: Vec::new(),
         cookie_override_pod: None,
         cookie_override_issued_at: None,
+        cookie_override_name: None,
+        cookie_override_value: None,
+        cookie_override_expires_at: None,
         current: None,
         current_issued_at: None,
         current_length: None,
@@ -283,9 +286,12 @@ fn cookie_override_binds_the_exact_cookie_instance() {
         upstream_user_id: account.upstream_user_id().map(str::to_owned),
         model: "upstream-model".to_owned(),
         config: TurnStateConfig::default(),
-        routing_cookies: vec![cookie(now - 100)],
+        routing_cookies: Vec::new(),
         cookie_override_pod: Some("chat.gateway.unified-185.api.openai.com".to_owned()),
         cookie_override_issued_at: Some(now - 100),
+        cookie_override_name: Some("__oailb".to_owned()),
+        cookie_override_value: Some(cookie(now - 100).value),
+        cookie_override_expires_at: Some(now + 3600),
         current: None,
         current_issued_at: None,
         current_length: None,
@@ -296,9 +302,8 @@ fn cookie_override_binds_the_exact_cookie_instance() {
         manual_override: false,
         attached_model: None,
     };
-    assert!(bucket.routing_cookie(now).is_some());
-    // 同 pod 续约换值后签发时间变化，旧固定立即失效而不是跟随新值。
-    bucket.routing_cookies = vec![cookie(now)];
+    let pinned = bucket.routing_cookie(now).expect("pinned cookie");
+    assert_eq!(pinned.value, cookie(now - 100).value);
+    bucket.cookie_override_value = None;
     assert!(bucket.routing_cookie(now).is_none());
-    assert!(!bucket.cookie_is_selectable(&bucket.routing_cookies[0]));
 }

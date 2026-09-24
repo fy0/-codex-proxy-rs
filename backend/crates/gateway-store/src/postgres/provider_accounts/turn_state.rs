@@ -57,6 +57,11 @@ fn bucket(row: sqlx::postgres::PgRow) -> Result<TurnStateBucket, CoreStoreError>
         cookie_override_issued_at: row
             .try_get("cookie_override_issued_at")
             .map_err(unavailable)?,
+        cookie_override_name: row.try_get("cookie_override_name").map_err(unavailable)?,
+        cookie_override_value: row.try_get("cookie_override_value").map_err(unavailable)?,
+        cookie_override_expires_at: row
+            .try_get("cookie_override_expires_at")
+            .map_err(unavailable)?,
         config,
         routing_cookies: Vec::new(),
     })
@@ -328,7 +333,6 @@ impl PgProviderAccountRepository {
     ) -> Result<Vec<TurnStateStatus>, CoreStoreError> {
         let rows = sqlx::query("select s.*, a.name as account_name, a.email as account_email, a.enabled as account_enabled, (a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id) as identity_matches, coalesce((select jsonb_agg((e.detail - 'token' - 'cookieValue') || jsonb_build_object('observationId', e.id::text, 'hasToken', e.detail->>'token' is not null, 'hasCookie', e.detail->>'cookieValue' is not null, 'isInstalled', coalesce(e.detail->>'token' = s.turn_state_override, false)) order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'observation'), '[]'::jsonb) as observations, coalesce((select jsonb_agg(e.detail order by e.id desc) from account_turn_state_events e where e.account_id = s.account_id and e.model = s.model and e.event_kind = 'installation'), '[]'::jsonb) as installations from account_turn_states s join provider_accounts a on a.id = s.account_id where ($1::text is null or s.account_id = $1) order by s.account_id, s.model")
             .bind(account_id).fetch_all(&self.pool).await.map_err(unavailable)?;
-        let cookies = self.load_routing_cookies().await?;
         rows.into_iter()
             .map(|row| {
                 let account_name = row.try_get("account_name").map_err(unavailable)?;
@@ -342,8 +346,7 @@ impl PgProviderAccountRepository {
                 let installations =
                     serde_json::from_value(row.try_get("installations").map_err(unavailable)?)
                         .map_err(unavailable)?;
-                let mut state = bucket(row)?;
-                state.routing_cookies = cookies.clone();
+                let state = bucket(row)?;
                 let installed = state
                     .installed_token(Utc::now().timestamp())
                     .filter(|_| identity_matches);
@@ -399,24 +402,14 @@ impl PgProviderAccountRepository {
                             .unwrap_or_else(|| Utc::now().timestamp()),
                     )
                 };
-                let routing_cookie = routing_cookie.map(|cookie| {
-                    let mut status = cookie.status();
-                    status.allowed = state.config.allows_cookie_gateway(&cookie.pod);
-                    status
-                });
-                let cookie_pool = cookies
-                    .iter()
-                    .map(|cookie| {
-                        let mut status = cookie.status();
-                        status.allowed = state.config.allows_cookie_gateway(&cookie.pod);
-                        status
-                    })
-                    .collect();
+                let routing_cookie = routing_cookie.map(|cookie| cookie.status());
                 Ok(TurnStateStatus {
                     routing_cookie,
-                    cookie_pool,
+                    cookie_pool: Vec::new(),
                     cookie_override_pod: state.cookie_override_pod,
                     cookie_override_issued_at: state.cookie_override_issued_at,
+                    cookie_override_name: state.cookie_override_name,
+                    cookie_override_expires_at: state.cookie_override_expires_at,
                     account_id: state.account_id,
                     account_name,
                     account_email,

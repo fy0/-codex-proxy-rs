@@ -438,13 +438,12 @@ impl TurnStateService {
         else {
             return self.skip(observation, "template_error").await;
         };
-        // state 探测保持裸请求；Cookie 续约只携带池内路由凭证。
+        // state 探测保持裸请求；已固定的 Cookie 临期时原样带上续约。
         let sent_cookie = bucket
             .config
             .cookie_lock_enabled
             .then(|| bucket.renewal_cookie(Utc::now().timestamp()))
-            .flatten()
-            .filter(|cookie| cookie.origin == self.endpoint);
+            .flatten();
         let request_started_at = Utc::now().timestamp_millis();
         let mut outbound = client
             .post(&self.endpoint)
@@ -552,7 +551,7 @@ impl TurnStateService {
                     .is_some_and(|cookie| cookie.is_usable(&bucket.model, Utc::now().timestamp()))
                 && cookie
                     .as_ref()
-                    .is_some_and(|cookie| bucket.cookie_is_selectable(cookie))
+                    .is_some_and(|cookie| bucket.config.allows_cookie_gateway(&cookie.pod))
                 && created_model
                     .as_deref()
                     .is_some_and(|model| model.eq_ignore_ascii_case(&bucket.model));
@@ -570,7 +569,7 @@ impl TurnStateService {
                 "missing_cookie"
             } else if cookie
                 .as_ref()
-                .is_some_and(|cookie| !bucket.cookie_is_selectable(cookie))
+                .is_some_and(|cookie| !bucket.config.allows_cookie_gateway(&cookie.pod))
             {
                 "cookie_gateway_filtered"
             } else if usable {

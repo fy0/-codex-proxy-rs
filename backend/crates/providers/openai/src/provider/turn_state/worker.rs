@@ -93,22 +93,8 @@ impl ScheduledTask for TurnStateTask {
                         }
                         let now = Utc::now().timestamp();
                         if bucket.config.cookie_lock_enabled
+                            && bucket.routing_cookie(now).is_some()
                             && !bucket.cookie_renewal_due(now)
-                            && bucket
-                                .routing_cookies
-                                .iter()
-                                .filter(|cookie| {
-                                    cookie.is_usable(&bucket.model, now)
-                                        && bucket.cookie_is_selectable(cookie)
-                                        && (bucket.cookie_override_pod.is_none()
-                                            || bucket.cookie_override_matches(cookie))
-                                })
-                                .count()
-                                >= if bucket.cookie_override_pod.is_some() {
-                                    1
-                                } else {
-                                    3
-                                }
                         {
                             return;
                         }
@@ -140,13 +126,7 @@ impl ScheduledTask for TurnStateTask {
                         // 以本次探测后的池计算上限，长空闲间隔不能错过续约窗口。
                         if bucket.config.cookie_lock_enabled
                             && let Some(current) = service.current(&account_id, &bucket.model).await
-                            && let Some(cookie) = current
-                                .routing_cookies
-                                .iter()
-                                .filter(|cookie| {
-                                    cookie.is_usable(&bucket.model, Utc::now().timestamp())
-                                })
-                                .min_by_key(|cookie| cookie.expires_at)
+                            && let Some(cookie) = current.routing_cookie(Utc::now().timestamp())
                         {
                             let remaining = cookie.expires_at - Utc::now().timestamp();
                             let before_refresh =

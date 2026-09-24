@@ -537,7 +537,6 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
             .iter()
             .all(|request| !request.headers.contains_key("cookie"))
     );
-    assert_eq!(store.routing_cookies().await.unwrap().len(), 1);
     let probed = store
         .turn_observations()
         .into_iter()
@@ -546,6 +545,7 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
     assert_eq!(probed.issued_at, Some(now));
     assert_eq!(probed.token_length, Some(probed_state.len()));
     assert_eq!(probed.token.as_deref(), Some(probed_state.as_str()));
+    assert_eq!(probed.cookie_value.as_deref(), Some(first.as_str()));
     let bucket = store
         .turn_state_bucket(&ProviderAccountId::new(ACCOUNT).unwrap(), MODEL)
         .await
@@ -553,84 +553,8 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
         .unwrap();
     assert!(bucket.current.is_none());
     assert!(bucket.candidate.is_none());
-    server.reset().await;
-    let renewed = jwt(now, now + 3600);
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("set-cookie", format!("__oailb={renewed}; Path=/; HttpOnly"))
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(response_body(MODEL)),
-        )
-        .mount(&server)
-        .await;
-    // 手动探测跳过节流，仍携带临期 Cookie 完成续约。
-    store.request_turn_probe(ACCOUNT, MODEL);
-    task.run_cycle(cycle()).await.unwrap();
-    assert_eq!(
-        server.received_requests().await.unwrap()[0].headers["cookie"],
-        format!("__oailb={first}")
-    );
-    assert_eq!(
-        store.routing_cookies().await.unwrap()[0].expires_at,
-        now + 3600
-    );
-    server.reset().await;
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(response_body(MODEL)),
-        )
-        .mount(&server)
-        .await;
     for id in [ACCOUNT, "acct_cookie_other"] {
-        let (input, context) = request_with_state(&[id], MODEL, Some("client-state-preserved"));
-        let mut stream = bundle
-            .core_provider()
-            .execute(input, context)
-            .await
-            .unwrap();
-        while let Some(event) = stream.next().await {
-            event.unwrap();
-        }
+        let (input, context) = request(&[id], MODEL);
+        assert!(bundle.core_provider().execute(input, context).await.is_err());
     }
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    for request in requests {
-        assert_eq!(request.headers["cookie"], format!("__oailb={renewed}"));
-        assert_eq!(
-            request.headers["x-codex-turn-state"],
-            "client-state-preserved"
-        );
-    }
-    server.reset().await;
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(response_body("gpt-5.6-luna")),
-        )
-        .mount(&server)
-        .await;
-    let (input, context) = request(&[ACCOUNT], MODEL);
-    let mut stream = bundle
-        .core_provider()
-        .execute(input, context)
-        .await
-        .unwrap();
-    while let Some(event) = stream.next().await {
-        event.unwrap();
-    }
-    let (input, context) = request(&["acct_cookie_other"], MODEL);
-    assert!(
-        bundle
-            .core_provider()
-            .execute(input, context)
-            .await
-            .is_err()
-    );
 }

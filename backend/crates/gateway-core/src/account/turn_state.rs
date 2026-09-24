@@ -362,8 +362,11 @@ pub struct TurnStateBucket {
     pub config: TurnStateConfig,
     pub routing_cookies: Vec<super::RoutingCookie>,
     pub cookie_override_pod: Option<String>,
-    /// 固定对应的 Cookie 签发时间；与 pod 一起唯一确定池内一条 Cookie。
     pub cookie_override_issued_at: Option<i64>,
+    /// 固定的是某一条探测记录上的 Cookie 正文，后续请求直接回放。
+    pub cookie_override_name: Option<String>,
+    pub cookie_override_value: Option<String>,
+    pub cookie_override_expires_at: Option<i64>,
     pub current: Option<TurnStateToken>,
     pub current_issued_at: Option<i64>,
     pub current_length: Option<usize>,
@@ -377,37 +380,36 @@ pub struct TurnStateBucket {
 }
 
 impl TurnStateBucket {
-    /// 固定精确到具体一条 Cookie（pod + 签发时间）：续约换新值后旧固定随之失效。
-    pub fn cookie_override_matches(&self, cookie: &super::RoutingCookie) -> bool {
-        self.cookie_override_pod.as_deref() == Some(cookie.pod.as_str())
-            && self.cookie_override_issued_at == Some(cookie.issued_at)
+    /// 已固定的那一条探测 Cookie。有正文就回放到后续请求，直到解除或到期。
+    pub fn routing_cookie(&self, now: i64) -> Option<super::RoutingCookie> {
+        let name = self
+            .cookie_override_name
+            .as_deref()
+            .filter(|name| !name.is_empty())?;
+        let value = self
+            .cookie_override_value
+            .as_deref()
+            .filter(|value| !value.is_empty())?;
+        let expires_at = self.cookie_override_expires_at?;
+        if now >= expires_at {
+            return None;
+        }
+        Some(super::RoutingCookie {
+            origin: String::new(),
+            pod: self.cookie_override_pod.clone().unwrap_or_default(),
+            name: name.to_owned(),
+            value: value.to_owned(),
+            issued_at: self.cookie_override_issued_at.unwrap_or(0),
+            expires_at,
+            observed_at: 0,
+            reported_model: self.model.clone(),
+        })
     }
 
-    pub fn cookie_is_selectable(&self, cookie: &super::RoutingCookie) -> bool {
-        self.config.allows_cookie_gateway(&cookie.pod) || self.cookie_override_matches(cookie)
-    }
-
-    pub fn routing_cookie(&self, now: i64) -> Option<&super::RoutingCookie> {
-        self.routing_cookies
-            .iter()
-            .filter(|cookie| {
-                cookie.is_usable(&self.model, now)
-                    && self.cookie_is_selectable(cookie)
-                    && (self.cookie_override_pod.is_none() || self.cookie_override_matches(cookie))
-            })
-            .max_by_key(|cookie| (cookie.expires_at, cookie.observed_at))
-    }
-
-    pub fn renewal_cookie(&self, now: i64) -> Option<&super::RoutingCookie> {
-        self.routing_cookies
-            .iter()
-            .filter(|cookie| {
-                cookie.is_usable(&self.model, now)
-                    && self.cookie_is_selectable(cookie)
-                    && (self.cookie_override_pod.is_none() || self.cookie_override_matches(cookie))
-                    && cookie.expires_at <= now + self.config.cookie_refresh_before_seconds as i64
-            })
-            .min_by_key(|cookie| cookie.expires_at)
+    pub fn renewal_cookie(&self, now: i64) -> Option<super::RoutingCookie> {
+        let cookie = self.routing_cookie(now)?;
+        (cookie.expires_at <= now + self.config.cookie_refresh_before_seconds as i64)
+            .then_some(cookie)
     }
 
     pub fn cookie_renewal_due(&self, now: i64) -> bool {
@@ -487,8 +489,9 @@ pub struct TurnStateStatus {
     pub routing_cookie: Option<super::RoutingCookieStatus>,
     pub cookie_pool: Vec<super::RoutingCookieStatus>,
     pub cookie_override_pod: Option<String>,
-    /// 固定绑定的 Cookie 签发时间，随 pod 一起对外展示。
     pub cookie_override_issued_at: Option<i64>,
+    pub cookie_override_name: Option<String>,
+    pub cookie_override_expires_at: Option<i64>,
     pub business_status: TurnStateBusinessStatus,
     pub account_enabled: bool,
     pub hunt_attempts: u64,

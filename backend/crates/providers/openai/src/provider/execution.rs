@@ -607,7 +607,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let cookie_bucket = if cookie_lock {
             if let Some(service) = &turn_state { service.current(lease.account().id(), upstream_model.as_str()).await } else { None }
         } else { None };
-        let sent_cookie = cookie_bucket.as_ref().and_then(|bucket| bucket.routing_cookie(chrono::Utc::now().timestamp())).cloned();
+        let sent_cookie = cookie_bucket.as_ref().and_then(|bucket| bucket.routing_cookie(chrono::Utc::now().timestamp()));
         if cookie_lock && !context.is_diagnostic_required_account()
             && lease.turn_state().is_some_and(|bucket| bucket.config.missing_state_policy == gateway_core::account::MissingTurnStatePolicy::Pause)
             && sent_cookie.is_none() {

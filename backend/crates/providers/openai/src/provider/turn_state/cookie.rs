@@ -50,7 +50,7 @@ impl TurnStateService {
             "missing_cookie"
         } else if cookie
             .as_ref()
-            .is_some_and(|cookie| !bucket.cookie_is_selectable(cookie))
+            .is_some_and(|cookie| !bucket.config.allows_cookie_gateway(&cookie.pod))
         {
             "cookie_gateway_filtered"
         } else if model.eq_ignore_ascii_case(requested_model) {
