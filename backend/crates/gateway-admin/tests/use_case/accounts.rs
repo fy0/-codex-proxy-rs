@@ -1403,6 +1403,7 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
             UpdateAccount {
                 notes: None,
                 turn_state_override: None,
+                basispoints_enabled: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_test".to_owned(),
@@ -1443,6 +1444,7 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
             UpdateAccount {
                 notes: None,
                 turn_state_override: None,
+                basispoints_enabled: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_test".to_owned(),
@@ -1488,6 +1490,7 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
             BatchUpdateAccounts {
                 model_access: Default::default(),
                 turn_state_override: None,
+                basispoints_enabled: None,
                 outbound_proxy: None,
                 account_ids: vec!["acct_openai".to_owned(), "acct_xai".to_owned()],
                 enabled: Some(false),
@@ -2527,6 +2530,7 @@ pub(super) fn account_record(kind: &str) -> AccountRecord {
     AccountRecord {
         notes: None,
         turn_state_override: None,
+        basispoints_enabled: false,
         model_access: Default::default(),
         outbound_proxy: None,
         id: "acct_test".to_owned(),

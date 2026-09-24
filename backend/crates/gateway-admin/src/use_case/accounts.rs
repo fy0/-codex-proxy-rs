@@ -1008,6 +1008,15 @@ impl AccountsService for DefaultAccountsService {
         let account_id = ProviderAccountId::new(command.account_id.clone())
             .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
         let (stored, provider) = self.provider_for_account(&account_id).await?;
+        // Basis Points 通道依赖 ChatGPT OAuth 身份；其他认证或其他 Provider 没有对应上游。
+        if command.basispoints_enabled == Some(true)
+            && (stored.account.provider_kind.as_str() != "openai"
+                || stored.account.authentication_kind != "oauth")
+        {
+            return Err(AdminError::invalid(
+                "Basis Points 通道仅支持 OAuth 认证的 OpenAI 账号",
+            ));
+        }
         let enabled = command.enabled;
         // 前端每次保存都会带上该字段，只有值真正变化才需要断开池化连接。
         let turn_state_changed = command.turn_state_override.as_deref().is_some_and(|new| {
@@ -1064,6 +1073,7 @@ impl AccountsService for DefaultAccountsService {
                     outbound_proxy: None,
                     // 空值与显式清除统一经 nullif 落为 NULL。
                     turn_state_override: Some(command.turn_state.unwrap_or_default()),
+                    basispoints_enabled: None,
                 },
                 context,
             )

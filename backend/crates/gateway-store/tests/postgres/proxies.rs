@@ -171,6 +171,7 @@ fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
     UpdateAccount {
         notes: None,
         turn_state_override: None,
+        basispoints_enabled: None,
         model_access: Default::default(),
         account_id: account_id.to_owned(),
         enabled: true,
@@ -824,6 +825,7 @@ async fn legacy_urls_join_one_catalog_entry_and_invalid_batch_rolls_back() {
                 BatchUpdateAccounts {
                     model_access: Default::default(),
                     turn_state_override: None,
+                    basispoints_enabled: None,
                     account_ids: vec!["acct_one".to_owned(), "acct_missing".to_owned()],
                     enabled: Some(false),
                     concurrency_limit: Some(None),

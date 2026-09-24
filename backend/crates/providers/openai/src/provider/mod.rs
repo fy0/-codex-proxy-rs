@@ -596,7 +596,10 @@ impl Provider for CodexProvider {
             AttemptTransport::Retry(retry_index) => retry_index.get(),
             AttemptTransport::Default | AttemptTransport::Fallback => 0,
         };
-        let events = cold_response_stream(ColdResponse {
+        // Basis Points 仅接受 OAuth Bearer 凭据；API key 账号即使误开开关也走原通道。
+        let basispoints_route =
+            lease.account().basispoints_enabled() && lease.authentication().oauth().is_some();
+        let cold = ColdResponse {
             client: self
                 .client
                 .for_account(lease.account())
@@ -621,7 +624,12 @@ impl Provider for CodexProvider {
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
             session_capture,
-        });
+        };
+        let events = if basispoints_route {
+            cold_bps_response_stream(cold)
+        } else {
+            cold_response_stream(cold)
+        };
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {
             stream.with_filtered_account_feedback(

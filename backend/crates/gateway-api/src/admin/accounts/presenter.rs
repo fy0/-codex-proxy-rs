@@ -81,6 +81,7 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
         name: account.name,
         notes: account.notes,
         turn_state_override: account.turn_state_override,
+        basispoints_enabled: account.basispoints_enabled,
         provider: account.provider_kind.to_string(),
         groups: account
             .groups

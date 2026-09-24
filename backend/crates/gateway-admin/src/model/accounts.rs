@@ -109,6 +109,8 @@ pub struct AccountRecord {
     pub notes: Option<String>,
     /// 管理员配置的 x-codex-turn-state 强制覆盖；`None` 表示不覆盖。
     pub turn_state_override: Option<String>,
+    /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
+    pub basispoints_enabled: bool,
     pub email: Option<String>,
     pub upstream_user_id: Option<String>,
     pub upstream_account_id: Option<String>,
@@ -251,6 +253,8 @@ pub struct UpdateAccount {
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
     /// `None` 保留原值；`Some("")` 清除覆盖。
     pub turn_state_override: Option<String>,
+    /// `None` 保留原值。
+    pub basispoints_enabled: Option<bool>,
 }
 
 /// 账号更新结果。
@@ -272,6 +276,8 @@ pub struct BatchUpdateAccounts {
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
     /// `None` 不修改；`Some("")` 清除覆盖。
     pub turn_state_override: Option<String>,
+    /// `None` 不修改。
+    pub basispoints_enabled: Option<bool>,
 }
 
 /// 单账号 turn state 强制覆盖命令；`None` 清除覆盖。
