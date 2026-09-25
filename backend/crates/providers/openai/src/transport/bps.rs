@@ -506,6 +506,22 @@ fn translate_input_items(raw_input: &Value, allowed: &HashMap<String, ToolSpec<'
         if item_type == "item_reference" {
             continue;
         }
+        if item_type == "message" {
+            let mut copy = item;
+            // 上游白名单要求 assistant 历史用 output_text；客户端按输入格式
+            // 回放 input_text 会被 422，这里统一归一化。
+            if copy.get("role").map(string_value) == Some("assistant")
+                && let Some(content) = copy.get_mut("content").and_then(Value::as_array_mut)
+            {
+                for part in content.iter_mut().filter_map(Value::as_object_mut) {
+                    if part.get("type").map(string_value) == Some("input_text") {
+                        part.insert("type".to_owned(), Value::String("output_text".to_owned()));
+                    }
+                }
+            }
+            result.push(Value::Object(copy));
+            continue;
+        }
         result.push(Value::Object(item));
     }
     result
@@ -660,17 +676,18 @@ pub(crate) fn prepare_request_body(
         "reasoning_effort".to_owned(),
         Value::String(reasoning_effort_from_source(source)),
     );
-    // 未指定或为空时省略可选字段，不发送服务端拒绝的空数组。
-    if let Some(policy) = source
-        .get("context_management")
-        .filter(|value| !value.is_null())
-        && policy.as_array().is_none_or(|entries| !entries.is_empty())
-    {
-        output.insert("context_management".to_owned(), policy.clone());
-    }
-    if let Some(tier) = source.get("service_tier") {
-        output.insert("service_tier".to_owned(), tier.clone());
-    }
+    // context_management 属于上游要求的白名单字段：客户端给了就透传，
+    // 缺省回退到实测可用的 compaction 默认值；service_tier/metadata 额外键
+    // 未在上游白名单验证通过，不透传（参考实现的透传未覆盖 422 死路清单）。
+    let context_management = match source.get("context_management") {
+        Some(policy)
+            if !policy.is_null() && policy.as_array().is_none_or(|entries| !entries.is_empty()) =>
+        {
+            policy.clone()
+        }
+        _ => json!([{"type": "compaction", "compact_threshold": 200000}]),
+    };
+    output.insert("context_management".to_owned(), context_management);
     let conversation = explicit_conversation_key(source);
     if !conversation.is_empty() {
         output.insert(
@@ -685,25 +702,6 @@ pub(crate) fn prepare_request_body(
     };
     let (turn_fingerprint, iteration) = turn_state(source.get("input").unwrap_or(&Value::Null));
     let mut metadata = Map::new();
-    if let Some(raw) = source.get("metadata").and_then(Value::as_object) {
-        for (key, value) in raw {
-            if key == "turn_id" || key == "task_id" || key == "agent_iteration" {
-                continue;
-            }
-            let text = match value {
-                Value::String(text) => Some(text.clone()),
-                // serde_json 数字/布尔的 to_string 即其 JSON 文本形态。
-                Value::Bool(_) | Value::Number(_) => Some(value.to_string()),
-                _ => None,
-            };
-            if let Some(text) = text {
-                metadata.insert(
-                    key.chars().take(64).collect(),
-                    Value::String(text.chars().take(512).collect()),
-                );
-            }
-        }
-    }
     metadata.insert(
         "task_id".to_owned(),
         Value::String(uuid_v5(&format!("cpa-oai-basispoints/{conversation}"))),

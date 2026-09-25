@@ -599,6 +599,11 @@ impl Provider for CodexProvider {
         // Basis Points 仅接受 OAuth Bearer 凭据；API key 账号即使误开开关也走原通道。
         let basispoints_route =
             lease.account().basispoints_enabled() && lease.authentication().oauth().is_some();
+        // BPS 固定 store:false，没有服务端续接点：带 previous_response_id 的
+        // 请求只能由客户端重放完整输入，否则上游只见增量、每轮都是新会话。
+        if basispoints_route && upstream_request.previous_response_id().is_some() {
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
         let cold = ColdResponse {
             client: self
                 .client
