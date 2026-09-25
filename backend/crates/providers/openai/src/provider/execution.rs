@@ -614,7 +614,17 @@ pub(super) fn cold_bps_response_stream(response: ColdResponse) -> EventStream {
             })?;
         let cancellation = context.cancellation().clone();
         let trace = context.trace();
-        let upstream_body = bps::prepare_request_body(request.body());
+        // tool_choice 强制要求客户端工具而目录为空时前置拒绝，不发往 BPS。
+        let upstream_body = match bps::prepare_request_body(request.body()) {
+            Ok(body) => body,
+            Err(_) => {
+                Err(provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                ))?;
+                return;
+            }
+        };
         // 账号级位置优先于请求级，与 align_structured_location_fields 的顺序一致。
         let timezone = active_account
             .request_location()
@@ -717,8 +727,11 @@ pub(super) fn cold_bps_response_stream(response: ColdResponse) -> EventStream {
         let stream_bytes = match response.terminal {
             BpsTerminal::Response { incomplete, response } => {
                 let mut terminal = response;
-                bps::transform_response(&mut terminal, request.body());
-                bps::synthetic_sse(&terminal, incomplete)
+                // 还原失败的 transport 调用视为上游违约，走合成失败事件。
+                match bps::transform_response(&mut terminal, request.body()) {
+                    Ok(()) => bps::synthetic_sse(&terminal, incomplete),
+                    Err(event) => bps::terminal_event_sse(&event),
+                }
             }
             BpsTerminal::Failure(event) => bps::terminal_event_sse(&event),
         };
