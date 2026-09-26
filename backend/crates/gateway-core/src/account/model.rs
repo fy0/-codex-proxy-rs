@@ -746,7 +746,6 @@ pub struct ProviderAccount {
     outbound_proxy: Option<super::OutboundProxy>,
     request_location: Option<super::RequestLocation>,
     turn_state_override: Option<String>,
-    basispoints_enabled: bool,
 }
 
 impl ProviderAccount {
@@ -785,7 +784,6 @@ impl ProviderAccount {
             outbound_proxy: None,
             request_location: None,
             turn_state_override: None,
-            basispoints_enabled: false,
         }
     }
 
@@ -847,18 +845,6 @@ impl ProviderAccount {
     #[must_use]
     pub fn turn_state_override(&self) -> Option<&str> {
         self.turn_state_override.as_deref()
-    }
-
-    /// 管理员开启的 Basis Points 上游通道；只对使用 OAuth 的 OpenAI 账号生效。
-    #[must_use]
-    pub const fn with_basispoints_enabled(mut self, enabled: bool) -> Self {
-        self.basispoints_enabled = enabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn basispoints_enabled(&self) -> bool {
-        self.basispoints_enabled
     }
 
     #[must_use]

@@ -172,7 +172,6 @@ const {
   editingAccount,
   notes: editingNotes,
   turnStateOverride: editingTurnStateOverride,
-  basispointsEnabled: editingBasispointsEnabled,
   schedulingEnabled,
   concurrencyLimit: editingConcurrencyLimit,
   weight: editingWeight,
@@ -409,7 +408,6 @@ const {
       v-model:api-key="editingApiKey"
       v-model:notes="editingNotes"
       v-model:turn-state-override="editingTurnStateOverride"
-      v-model:basispoints-enabled="editingBasispointsEnabled"
       v-model:enabled="schedulingEnabled"
       v-model:concurrency-limit="editingConcurrencyLimit"
       v-model:weight="editingWeight"

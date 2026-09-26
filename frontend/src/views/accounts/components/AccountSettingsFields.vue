@@ -20,7 +20,6 @@ withDefaults(defineProps<{
   preserveModelAccess?: boolean
   proxyError?: string
   showTurnState?: boolean
-  showBasispoints?: boolean
 }>(), { preserveProxy: true })
 
 const modelAccess = defineModel<AccountModelAccess | undefined>('modelAccess', { required: true })
@@ -31,7 +30,6 @@ const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
 const turnStateOverride = defineModel<string>('turnStateOverride', { default: '' })
-const basispointsEnabled = defineModel<boolean>('basispointsEnabled', { default: false })
 const copyText = useCopyText()
 </script>
 
@@ -81,19 +79,6 @@ const copyText = useCopyText()
       />
     </BaseFormItem>
     <AccountProxyField v-model:mode="proxyMode" v-model:proxy-id="proxyId" :preserve="preserveProxy" :error="proxyError" :endpoint="endpoint" :account-id="accountId" :disabled="disabled" />
-    <div v-if="showBasispoints" class="grid gap-2">
-      <div class="flex min-h-6 items-center justify-between gap-3">
-        <span class="text-cp leading-none font-medium text-cp-text-secondary">Basis Points 上游通道</span>
-        <BaseSwitch
-          v-model="basispointsEnabled"
-          label="切换 Basis Points 上游通道"
-          :disabled="disabled"
-        />
-      </div>
-      <p class="m-0 text-cp-xs text-cp-text-secondary">
-        开启后该账号的 Responses 请求改走 bps.openai.com（Excel 客户端画像），不再使用标准 Codex 上游；仅对 OAuth 账号生效。
-      </p>
-    </div>
     <BaseFormItem v-if="showTurnState" label="账号通用 x-codex-turn-state">
       <div class="flex min-w-0 items-center gap-2">
         <BaseInput

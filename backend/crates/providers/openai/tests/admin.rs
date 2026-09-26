@@ -1386,7 +1386,6 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
     AccountRecord {
         notes: None,
         turn_state_override: None,
-        basispoints_enabled: false,
         model_access: Default::default(),
         outbound_proxy: None,
         id: account.id().to_string(),

@@ -124,7 +124,6 @@ export interface Account {
   name: string
   notes: string | null
   turnStateOverride: string | null
-  basispointsEnabled: boolean
   provider: string
   resourceRef: string
   email: string | null
@@ -380,7 +379,6 @@ interface AccountUpdateParam {
   accountId: string
   notes?: string
   turnStateOverride?: string
-  basispointsEnabled?: boolean
   enabled: boolean
   concurrencyLimit: number | null
   weight: number

@@ -38,7 +38,6 @@ const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
 const turnStateOverride = defineModel<string>('turnStateOverride', { required: true })
-const basispointsEnabled = defineModel<boolean>('basispointsEnabled', { required: true })
 </script>
 
 <template>
@@ -88,9 +87,7 @@ const basispointsEnabled = defineModel<boolean>('basispointsEnabled', { required
         v-model:proxy-mode="proxyMode"
         v-model:proxy-id="proxyId"
         v-model:turn-state-override="turnStateOverride"
-        v-model:basispoints-enabled="basispointsEnabled"
         show-turn-state
-        :show-basispoints="account.provider === 'openai' && account.authenticationKind === 'oauth'"
         :groups="groups"
         :groups-loading="groupsLoading"
         :disabled="saving"
