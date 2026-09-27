@@ -759,7 +759,7 @@ fn bps_alias_should_not_fall_back_to_unsupported_providers() {
     let models = snapshot
         .public_models_for_provider(&xai)
         .iter()
-        .map(PublicModelId::as_str)
+        .map(|model| model.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     assert!(!models.contains("gpt-6-astra-bps"));
 }

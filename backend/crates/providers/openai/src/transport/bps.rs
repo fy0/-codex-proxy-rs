@@ -454,7 +454,7 @@ fn item_text(value: &Value) -> String {
             let mut text = String::new();
             for part in parts {
                 match part {
-                    Value::String(text) => text.push_str(text),
+                    Value::String(part_text) => text.push_str(part_text),
                     Value::Object(part) => {
                         if let Some(t) = part.get("text").and_then(Value::as_str) {
                             text.push_str(t);
@@ -853,7 +853,7 @@ fn cached_attachment(digest: &str) -> Option<String> {
         .get(digest)?
         .get("file_id")
         .and_then(Value::as_str)
-        .to_owned();
+        .map(str::to_owned)?;
     cache.touch(digest);
     Some(file_id)
 }
