@@ -82,6 +82,7 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
         notes: account.notes,
         turn_state_override: account.turn_state_override,
         basispoints_enabled: account.basispoints_enabled,
+        bps_concurrency_limit: account.bps_concurrency_limit.map(|limit| limit.get()),
         provider: account.provider_kind.to_string(),
         groups: account
             .groups

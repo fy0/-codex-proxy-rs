@@ -616,6 +616,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         notes: None,
         turn_state_override: None,
         basispoints_enabled: false,
+        bps_concurrency_limit: None,
         model_access: Default::default(),
         outbound_proxy: None,
         id: account.id().to_string(),
@@ -652,6 +653,7 @@ impl ProviderLeasePort for TestLeases {
         _: &'a gateway_core::policy::ClientApiKeyId,
         _: &'a gateway_core::routing::ProviderKind,
         accounts: &'a [ProviderAccountId],
+        _: &'a [gateway_core::routing::UpstreamChannel],
     ) -> BoxFuture<
         'a,
         Result<gateway_core::provider_ports::ProviderSchedulingState, ProviderStoreError>,
@@ -666,6 +668,7 @@ impl ProviderLeasePort for TestLeases {
                         AccountRuntimeSignals {
                             turn_state: Default::default(),
                             in_flight: 0,
+                            bps_in_flight: 0,
                             last_started_at: None,
                             quota_reset_at: None,
                             quota_remaining_rank: None,
@@ -1191,6 +1194,7 @@ mod errors {
             _: &'a ClientApiKeyId,
             _: &'a ProviderKind,
             _: &'a [ProviderAccountId],
+            _: &'a [gateway_core::routing::UpstreamChannel],
         ) -> BoxFuture<
             'a,
             Result<gateway_core::provider_ports::ProviderSchedulingState, ProviderStoreError>,

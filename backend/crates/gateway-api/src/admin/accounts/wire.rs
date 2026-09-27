@@ -67,6 +67,9 @@ pub struct BatchUpdateAccountsRequest {
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable_limit")]
     pub concurrency_limit: Option<Option<u64>>,
+    /// 缺省不修改；`null` 清除 BPS 子池上限。
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_limit")]
+    pub bps_concurrency_limit: Option<Option<u64>>,
     pub weight: Option<u64>,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<String>>,
@@ -116,9 +119,13 @@ impl BatchUpdateAccountsRequest {
         self.concurrency_limit
             .map(parse_concurrency_limit)
             .transpose()?;
+        self.bps_concurrency_limit
+            .map(parse_concurrency_limit)
+            .transpose()?;
         self.weight.map(parse_account_weight).transpose()?;
         if self.enabled.is_none()
             && self.concurrency_limit.is_none()
+            && self.bps_concurrency_limit.is_none()
             && self.weight.is_none()
             && self.group_ids.is_none()
             && self.model_access.is_none()
@@ -138,6 +145,10 @@ impl BatchUpdateAccountsRequest {
             enabled: self.enabled,
             concurrency_limit: self
                 .concurrency_limit
+                .map(parse_concurrency_limit)
+                .transpose()?,
+            bps_concurrency_limit: self
+                .bps_concurrency_limit
                 .map(parse_concurrency_limit)
                 .transpose()?,
             weight: self.weight.map(parse_account_weight).transpose()?,
@@ -276,6 +287,8 @@ pub struct AccountView {
     pub turn_state_override: Option<String>,
     /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
     pub basispoints_enabled: bool,
+    /// 账号内 BPS 子池上限；`null` 表示不单独限制。
+    pub bps_concurrency_limit: Option<u32>,
     pub provider: String,
     pub groups: Vec<AccountGroupRefView>,
     pub resource_ref: String,

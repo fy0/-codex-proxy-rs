@@ -140,6 +140,7 @@ export interface Account {
   errorMessage: string | null
   enabled: boolean
   concurrencyLimit: number | null
+  bpsConcurrencyLimit: number | null
   weight: number
   modelAccess: AccountModelAccess
   accessTokenExpiresAt: string | null
@@ -383,6 +384,7 @@ interface AccountUpdateParam {
   basispointsEnabled?: boolean
   enabled: boolean
   concurrencyLimit: number | null
+  bpsConcurrencyLimit: number | null
   weight: number
   modelAccess?: AccountModelAccess
   groupIds: string[]
@@ -394,6 +396,7 @@ interface AccountBatchUpdateParam {
   accountIds: string[]
   enabled?: boolean
   concurrencyLimit?: number | null
+  bpsConcurrencyLimit?: number | null
   weight?: number
   modelAccess?: AccountModelAccess
   groupIds?: string[]

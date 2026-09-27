@@ -472,6 +472,7 @@ mod provider {
                 notes: None,
                 turn_state_override: None,
                 basispoints_enabled: false,
+                bps_concurrency_limit: None,
                 model_access: Default::default(),
                 id: "acct_error_test".to_owned(),
                 provider_kind: ProviderKind::new(provider).unwrap(),

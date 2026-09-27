@@ -120,6 +120,7 @@ impl ProviderLeasePort for RefreshLeases {
         _: &'a ClientApiKeyId,
         _: &'a ProviderKind,
         _: &'a [ProviderAccountId],
+        _: &'a [gateway_core::routing::UpstreamChannel],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async { panic!("scheduled credential refresh does not load scheduling state") })
     }

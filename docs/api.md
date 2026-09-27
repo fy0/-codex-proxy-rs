@@ -364,7 +364,7 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 更新指定 OpenAI 账号的 OAuth token 或 API Key 上游设置 |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, turnStateOverride?, basispointsEnabled?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, bpsConcurrencyLimit, weight, groupIds, notes?, turnStateOverride?, basispointsEnabled?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、BPS 子池上限（`null` 清除）、权重（1–100）、所属分组与出站代理 |
 | `POST` | `/api/admin/accounts/turn-state-override` | `{ accountId, turnStateOverride }` | 单独设置账号级 `x-codex-turn-state` 强制覆盖；`null` 或空白串清除，非空值须为合法 HTTP header 值（≤1024 字节）。非空时优先于桶内自动 state，清空后恢复桶内票，不解除缺票暂停 |
 | `GET` | `/api/admin/accounts/turn-state` | 可选 `accountId` | 按账号、上游模型返回轮换配置、令牌元数据、观测和安装历史，不返回令牌正文 |
 | `POST` | `/api/admin/accounts/turn-state/configure` | `{ accountId, model, config }` | 配置 OpenAI OAuth 账号的一个模型桶，返回账号 ID 与配置版本 |
@@ -376,7 +376,7 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/turn-state/cookie-remove` | `{ accountId, model }` | 取消该模型桶的 Cookie 固定；没有固定值时返回 409，不改变 Cookie 锁定或探测开关 |
 | `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt, observationId? }` | 按需读取仍有效的已安装票、当前候选或指定观测记录的票，返回正文和签发时间，响应禁止缓存 |
 | `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、CLI 版本和时区日期，不发送上游请求 |
-| `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
+| `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, bpsConcurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
 | `GET` | `/api/admin/accounts/quota-forecast` | `accountId` | 按需读取周/月容量预测、源窗口剩余估算与采样依据，不刷新上游额度 |
@@ -1061,6 +1061,10 @@ HTTP 请求头及新建 WS 的握手提示按当时的最终出站档位构造�
 命中别名的请求不再串联普通 `modelMappings`，未列出的模型即使映射到同一上游也保持默认 Codex 通道。
 该通道要求账号开启 `basispointsEnabled` 且为 OAuth 认证的 OpenAI 账号；请求固定 `store=false`，
 不支持 `previous_response_id` 服务端续接（由客户端重放完整输入）。
+
+`bpsConcurrencyLimit` 是账号级 BPS 子池并发上限，仅在账号更新/批量更新中设置：`null` 或省略时不单独
+限制，BPS 请求只受账号总并发约束。设置后 BPS 请求同时占用账号总槽与子池槽，任一耗尽都会被拒绝；
+普通 Codex 请求不占用子池。子池计数由 Redis 租约执行，跨网关实例生效。
 
 `maxWaitingPerKey` 与 `maxWaitingPerAccount` 是全局统一的排队容量，取值 0～1,000，默认 0（关闭）；
 每个 Key、每个账号各自独立计数，没有单对象覆盖字段。执行并发为 5、最大排队数为 5 时，

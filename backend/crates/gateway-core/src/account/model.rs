@@ -747,6 +747,7 @@ pub struct ProviderAccount {
     request_location: Option<super::RequestLocation>,
     turn_state_override: Option<String>,
     basispoints_enabled: bool,
+    bps_concurrency_limit: Option<AccountConcurrencyLimit>,
 }
 
 impl ProviderAccount {
@@ -786,6 +787,7 @@ impl ProviderAccount {
             request_location: None,
             turn_state_override: None,
             basispoints_enabled: false,
+            bps_concurrency_limit: None,
         }
     }
 
@@ -859,6 +861,21 @@ impl ProviderAccount {
     #[must_use]
     pub const fn basispoints_enabled(&self) -> bool {
         self.basispoints_enabled
+    }
+
+    /// Basis Points 子池上限：`None` 时 BPS 请求只受账号总并发约束。
+    #[must_use]
+    pub const fn with_bps_concurrency_limit(
+        mut self,
+        limit: Option<AccountConcurrencyLimit>,
+    ) -> Self {
+        self.bps_concurrency_limit = limit;
+        self
+    }
+
+    #[must_use]
+    pub const fn bps_concurrency_limit(&self) -> Option<AccountConcurrencyLimit> {
+        self.bps_concurrency_limit
     }
 
     #[must_use]

@@ -372,6 +372,7 @@ mod batch_update {
             "accountId": "acct_test",
             "enabled": true,
             "concurrencyLimit": 4294967295_u64,
+            "bpsConcurrencyLimit": null,
             "weight": 100,
             "groupIds": []
         }))
@@ -382,6 +383,17 @@ mod batch_update {
             serde_json::from_value::<UpdateAccountRequest>(json!({
                 "accountId": "acct_test",
                 "enabled": true,
+                "bpsConcurrencyLimit": null,
+                "weight": 1,
+                "groupIds": []
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UpdateAccountRequest>(json!({
+                "accountId": "acct_test",
+                "enabled": true,
+                "concurrencyLimit": null,
                 "weight": 1,
                 "groupIds": []
             }))
@@ -401,7 +413,7 @@ fn single_update_should_accept_optional_unicode_and_multiline_notes() {
         json!("备".repeat(500)),
     ] {
         let request: UpdateAccountRequest = serde_json::from_value(json!({
-            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null,
+            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null, "bpsConcurrencyLimit": null,
             "weight": 1, "groupIds": [], "notes": notes
         }))
         .unwrap();
@@ -419,7 +431,7 @@ fn single_update_should_reject_oversized_notes_and_control_characters() {
         "备注\u{001b}".to_owned(),
     ] {
         let request: UpdateAccountRequest = serde_json::from_value(json!({
-            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null,
+            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null, "bpsConcurrencyLimit": null,
             "weight": 1, "groupIds": [], "notes": notes
         }))
         .unwrap();
@@ -611,6 +623,7 @@ mod actions {
                 "accountId": "acct_api",
                 "enabled": true,
                 "concurrencyLimit": null,
+                "bpsConcurrencyLimit": null,
                 "weight": 1,
                 "groupIds": []
             }

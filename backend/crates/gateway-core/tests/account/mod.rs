@@ -23,6 +23,7 @@ use gateway_core::account::{
 };
 use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
+    UpstreamChannel,
 };
 
 fn account(id: &str) -> ProviderAccount {
@@ -50,6 +51,7 @@ fn candidate(id: &str, in_flight: u32, remaining: Option<u64>) -> AccountCandida
         signals: AccountRuntimeSignals {
             turn_state: Default::default(),
             in_flight,
+            bps_in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
             quota_remaining_rank: remaining,
@@ -111,6 +113,7 @@ fn context(strategy: RotationStrategy) -> AccountSelectionContext {
         round_robin_cursor: 0,
         eligibility: AccountEligibilityPolicy::Enforce,
         account_scope: None,
+        channel: UpstreamChannel::Default,
     }
 }
 
@@ -224,6 +227,7 @@ fn diagnostic_selection_bypasses_all_local_account_eligibility() {
         signals: AccountRuntimeSignals {
             turn_state: Default::default(),
             in_flight: 0,
+            bps_in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
             quota_remaining_rank: None,
@@ -243,6 +247,7 @@ fn diagnostic_selection_bypasses_all_local_account_eligibility() {
         signals: AccountRuntimeSignals {
             turn_state: Default::default(),
             in_flight: 0,
+            bps_in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
             quota_remaining_rank: None,
@@ -537,6 +542,39 @@ fn selector_should_fall_back_when_a_higher_weight_account_reaches_its_override()
 }
 
 #[test]
+fn basispoints_sub_pool_should_block_only_channel_requests() {
+    // BPS 子池嵌套在账号总槽内：BPS 请求同时受两层约束，普通请求不感知子池占用。
+    let limit = AccountConcurrencyLimit::new(1).expect("bps limit");
+    let mut saturated = candidate("acct_bps", 1, Some(100));
+    saturated.account = saturated.account.with_bps_concurrency_limit(Some(limit));
+    saturated.signals.bps_in_flight = 1;
+    let mut bps_context = context(RotationStrategy::Smart);
+    bps_context.channel = UpstreamChannel::BasisPoints;
+    assert!(
+        AccountSelector
+            .select(std::slice::from_ref(&saturated), &bps_context)
+            .is_none()
+    );
+
+    let selected = AccountSelector
+        .select(
+            std::slice::from_ref(&saturated),
+            &context(RotationStrategy::Smart),
+        )
+        .expect("default channel ignores the BPS sub-pool");
+    assert_eq!(selected.candidate().account.id().as_str(), "acct_bps");
+
+    // 子池有额度但账号总槽占满时，BPS 请求仍被拒绝。
+    let mut full = candidate("acct_full", 3, Some(100));
+    full.account = full.account.with_bps_concurrency_limit(Some(limit));
+    assert!(
+        AccountSelector
+            .select(std::slice::from_ref(&full), &bps_context)
+            .is_none()
+    );
+}
+
+#[test]
 fn smart_selector_should_balance_signals_instead_of_using_lexicographic_load() {
     let mut healthy = candidate("acct_healthy", 1, Some(100));
     healthy.signals.failure_rate_basis_points = Some(0);
@@ -647,6 +685,7 @@ fn provider_quota_overlay_should_preserve_store_concurrency_facts() {
     let signals = AccountRuntimeSignals {
         turn_state: Default::default(),
         in_flight: 2,
+        bps_in_flight: 0,
         last_started_at: Some(last_started_at),
         quota_reset_at: None,
         quota_remaining_rank: None,

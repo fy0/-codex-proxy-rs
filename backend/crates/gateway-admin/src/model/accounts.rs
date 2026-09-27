@@ -111,6 +111,8 @@ pub struct AccountRecord {
     pub turn_state_override: Option<String>,
     /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
     pub basispoints_enabled: bool,
+    /// 账号内 BPS 子池上限；`None` 时 BPS 请求只受账号总并发约束。
+    pub bps_concurrency_limit: Option<AccountConcurrencyLimit>,
     pub email: Option<String>,
     pub upstream_user_id: Option<String>,
     pub upstream_account_id: Option<String>,
@@ -255,6 +257,8 @@ pub struct UpdateAccount {
     pub turn_state_override: Option<String>,
     /// `None` 保留原值。
     pub basispoints_enabled: Option<bool>,
+    /// 账号内 BPS 子池上限；整体替换语义，`None` 清除上限。
+    pub bps_concurrency_limit: Option<AccountConcurrencyLimit>,
 }
 
 /// 账号更新结果。
@@ -278,6 +282,8 @@ pub struct BatchUpdateAccounts {
     pub turn_state_override: Option<String>,
     /// `None` 不修改。
     pub basispoints_enabled: Option<bool>,
+    /// `None` 不修改；`Some(None)` 清除 BPS 子池上限。
+    pub bps_concurrency_limit: Option<Option<AccountConcurrencyLimit>>,
 }
 
 /// 单账号 turn state 强制覆盖命令；`None` 清除覆盖。

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::concurrency::ConcurrencyQueuePolicy;
 use crate::identity::ProviderKind;
+use crate::routing::UpstreamChannel;
 
 use super::{AccountStatus, ProviderAccount, ProviderAccountId};
 
@@ -103,6 +104,8 @@ impl AccountSelectionPolicy {
 pub struct AccountRuntimeSignals {
     pub turn_state: super::TurnStateAvailability,
     pub in_flight: u32,
+    /// Basis Points 子池的在途请求数；只在请求按 BPS 通道选择时由存储填充。
+    pub bps_in_flight: u32,
     pub last_started_at: Option<SystemTime>,
     pub quota_reset_at: Option<SystemTime>,
     /// Provider 归一化的剩余额度基点：0 耗尽，10_000 全部可用。
@@ -411,6 +414,8 @@ pub struct AccountSelectionContext {
     pub round_robin_cursor: u64,
     pub eligibility: AccountEligibilityPolicy,
     pub account_scope: Option<std::sync::Arc<crate::account::scope::FrozenAccountScope>>,
+    /// 本次请求的上行通道；非默认通道参与账号内子池的并发约束。
+    pub channel: UpstreamChannel,
 }
 
 /// 选择账号时是否执行本地调度资格投影。
@@ -676,6 +681,13 @@ impl AccountSelector {
                 .account
                 .effective_concurrency(context.policy.max_concurrent_per_account())
                 .get()
+        {
+            return Some(AccountSchedulingBlocker::ConcurrencyLimit);
+        }
+        // BPS 子池嵌套在账号总槽内：专用通道请求另受账号的 BPS 上限约束。
+        if context.channel == UpstreamChannel::BasisPoints
+            && let Some(limit) = candidate.account.bps_concurrency_limit()
+            && candidate.signals.bps_in_flight >= limit.get()
         {
             return Some(AccountSchedulingBlocker::ConcurrencyLimit);
         }

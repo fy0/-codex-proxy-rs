@@ -528,6 +528,16 @@ impl UpstreamChannel {
             Self::BasisPoints => "basispoints",
         }
     }
+
+    /// `as_str` 的逆映射；存储层把通道名编入资源键时需要它还原。
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "default" => Some(Self::Default),
+            "basispoints" => Some(Self::BasisPoints),
+            _ => None,
+        }
+    }
 }
 
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。

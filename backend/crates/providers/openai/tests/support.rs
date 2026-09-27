@@ -965,6 +965,7 @@ impl ProviderLeasePort for TestLeaseCoordinator {
         _client_api_key_id: &'a ClientApiKeyId,
         _provider_kind: &'a ProviderKind,
         accounts: &'a [ProviderAccountId],
+        _signal_channels: &'a [gateway_core::routing::UpstreamChannel],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
             let signals = accounts
@@ -976,6 +977,7 @@ impl ProviderLeasePort for TestLeaseCoordinator {
                         AccountRuntimeSignals {
                             turn_state: Default::default(),
                             in_flight: 0,
+                            bps_in_flight: 0,
                             last_started_at: None,
                             quota_reset_at: None,
                             quota_remaining_rank: None,

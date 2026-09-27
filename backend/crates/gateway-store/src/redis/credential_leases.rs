@@ -15,7 +15,7 @@ use gateway_core::provider_ports::{
     ProviderRefreshCapacityRequest, ProviderSchedulingLeaseRequest, ProviderSchedulingState,
     ProviderStoreError, ProviderStoreErrorKind,
 };
-use gateway_core::routing::ProviderKind;
+use gateway_core::routing::{ProviderKind, UpstreamChannel};
 use redis::{Script, aio::ConnectionManager};
 use uuid::Uuid;
 
@@ -462,8 +462,33 @@ impl RedisCredentialLeaseRepository {
     }
 }
 
+/// 通道子池的资源 ID；与账号池共用 `ProviderAccount` 作用域，`\0` 分隔通道名。
+fn channel_resource_id(account_id: &str, channel: UpstreamChannel) -> String {
+    format!("{account_id}\0channel:{}", channel.as_str())
+}
+
+fn empty_signals() -> AccountRuntimeSignals {
+    AccountRuntimeSignals {
+        turn_state: Default::default(),
+        in_flight: 0,
+        bps_in_flight: 0,
+        last_started_at: None,
+        quota_reset_at: None,
+        quota_remaining_rank: None,
+        cooldown: None,
+        failure_rate_basis_points: None,
+        first_output_latency_ms: None,
+    }
+}
+
+/// 账号总槽与通道子槽的复合 lease；Drop 时两段各自尽力释放。
+struct SchedulingLeaseGuards {
+    account: CredentialLeaseGuard,
+    channel: CredentialLeaseGuard,
+}
+
 /// Store-owned 的通用 Provider lease 能力；具体 Provider 不感知 Redis。
-pub(crate) struct RedisProviderLeaseCoordinator {
+pub struct RedisProviderLeaseCoordinator {
     repository: RedisCredentialLeaseRepository,
     process_id: String,
     sequence: AtomicU64,
@@ -471,7 +496,7 @@ pub(crate) struct RedisProviderLeaseCoordinator {
 
 impl RedisProviderLeaseCoordinator {
     #[must_use]
-    pub(crate) fn new(repository: RedisCredentialLeaseRepository) -> Self {
+    pub fn new(repository: RedisCredentialLeaseRepository) -> Self {
         Self {
             repository,
             process_id: format!("gateway_{}", Uuid::now_v7().simple()),
@@ -498,40 +523,56 @@ impl RedisProviderLeaseCoordinator {
     async fn load_signals(
         &self,
         accounts: &[ProviderAccountId],
+        signal_channels: &[UpstreamChannel],
     ) -> Result<BTreeMap<ProviderAccountId, AccountRuntimeSignals>, ProviderStoreError> {
-        let ids = accounts
-            .iter()
-            .map(|account| account.as_str().to_owned())
-            .collect::<Vec<_>>();
+        let mut ids = Vec::with_capacity(accounts.len() * (1 + signal_channels.len()));
+        for account in accounts {
+            ids.push(account.as_str().to_owned());
+        }
+        for channel in signal_channels {
+            if channel.is_default() {
+                continue;
+            }
+            for account in accounts {
+                ids.push(channel_resource_id(account.as_str(), *channel));
+            }
+        }
         let signals = self
             .repository
             .credential_runtime_signals(&ids)
             .await
             .map_err(|_| provider_unavailable("load scheduling signals"))?;
-        signals
-            .into_iter()
-            .map(|signal| {
-                let account = ProviderAccountId::new(signal.resource_id).map_err(|_| {
-                    ProviderStoreError::new(
-                        ProviderStoreErrorKind::InvalidData,
-                        "decode scheduling signals",
-                    )
-                })?;
-                Ok((
-                    account,
-                    AccountRuntimeSignals {
-                        turn_state: Default::default(),
-                        in_flight: signal.in_flight,
-                        last_started_at: signal.last_started_at.map(Into::into),
-                        quota_reset_at: None,
-                        quota_remaining_rank: None,
-                        cooldown: None,
-                        failure_rate_basis_points: None,
-                        first_output_latency_ms: None,
-                    },
-                ))
-            })
-            .collect()
+        let mut map = BTreeMap::new();
+        for signal in signals {
+            let (account_id, channel) = match signal.resource_id.split_once('\0') {
+                Some((account_id, suffix)) => (
+                    account_id,
+                    suffix
+                        .strip_prefix("channel:")
+                        .and_then(UpstreamChannel::parse),
+                ),
+                None => (signal.resource_id.as_str(), None),
+            };
+            let account = ProviderAccountId::new(account_id).map_err(|_| {
+                ProviderStoreError::new(
+                    ProviderStoreErrorKind::InvalidData,
+                    "decode scheduling signals",
+                )
+            })?;
+            let entry = map.entry(account).or_insert_with(empty_signals);
+            match channel {
+                // 账号总槽信号：在途数与启动间隔都挂在主桶上。
+                None => {
+                    entry.in_flight = signal.in_flight;
+                    entry.last_started_at = signal.last_started_at.map(Into::into);
+                }
+                Some(UpstreamChannel::BasisPoints) => {
+                    entry.bps_in_flight = signal.in_flight;
+                }
+                Some(UpstreamChannel::Default) => {}
+            }
+        }
+        Ok(map)
     }
 
     async fn acquire_scheduling(
@@ -563,8 +604,44 @@ impl RedisProviderLeaseCoordinator {
             .await
             .map_err(|_| provider_unavailable("acquire scheduling lease"))?;
         Ok(match acquisition {
-            CredentialBoundedLeaseAcquisition::Acquired(guard) => {
-                ProviderLeaseAcquisition::Acquired(Box::new(guard))
+            CredentialBoundedLeaseAcquisition::Acquired(account_guard) => {
+                // 嵌套子池：专用通道请求在账号总槽之外再占一个按通道计数的
+                // 子槽；子池占满时归还账号槽并向上游报告 Busy。
+                match (request.upstream_channel(), request.channel_max_concurrent()) {
+                    (channel, Some(cap)) if !channel.is_default() => {
+                        match self
+                            .repository
+                            .try_acquire_bounded_lease(&CredentialBoundedLeaseRequest {
+                                scope: CredentialLeaseScope::ProviderAccount,
+                                resource_id: channel_resource_id(
+                                    request.account_id().as_str(),
+                                    channel,
+                                ),
+                                owner_id: self.owner_id("request"),
+                                max_concurrent: cap.get(),
+                                // 启动间隔已由账号租约执行，子池只做并发计数。
+                                request_interval: Duration::ZERO,
+                                ttl,
+                            })
+                            .await
+                            .map_err(|_| provider_unavailable("acquire channel lease"))?
+                        {
+                            CredentialBoundedLeaseAcquisition::Acquired(channel_guard) => {
+                                ProviderLeaseAcquisition::Acquired(Box::new(
+                                    SchedulingLeaseGuards {
+                                        account: account_guard,
+                                        channel: channel_guard,
+                                    },
+                                ))
+                            }
+                            CredentialBoundedLeaseAcquisition::Busy { retry_after } => {
+                                let _ = account_guard.release().await;
+                                ProviderLeaseAcquisition::Busy { retry_after }
+                            }
+                        }
+                    }
+                    _ => ProviderLeaseAcquisition::Acquired(Box::new(account_guard)),
+                }
             }
             CredentialBoundedLeaseAcquisition::Busy { retry_after } => {
                 ProviderLeaseAcquisition::Busy { retry_after }
@@ -605,9 +682,10 @@ impl ProviderLeasePort for RedisProviderLeaseCoordinator {
         client_api_key_id: &'a ClientApiKeyId,
         provider_kind: &'a ProviderKind,
         accounts: &'a [ProviderAccountId],
+        signal_channels: &'a [UpstreamChannel],
     ) -> futures::future::BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
-            let signals = self.load_signals(accounts).await?;
+            let signals = self.load_signals(accounts, signal_channels).await?;
             let round_robin_cursor = self
                 .next_scheduling_cursor(client_api_key_id, provider_kind)
                 .await?;

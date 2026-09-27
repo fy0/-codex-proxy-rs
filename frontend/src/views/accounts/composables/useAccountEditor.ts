@@ -7,7 +7,7 @@ import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError } from '../utils/modelAccess'
-import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
+import { concurrencyLimitInput, parseAccountSchedulingForm, parseOptionalConcurrencyLimit } from '../utils/schedulingForm'
 import { apiKeyAccountError, emptyApiKeyAccountForm } from '../utils/upstreamApiKey'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
@@ -24,6 +24,7 @@ export function useAccountEditor(options: {
   const basispointsEnabled = shallowRef(false)
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
+  const bpsConcurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
   const modelAccess = ref<AccountModelAccess | undefined>()
   const proxyMode = shallowRef('preserve')
@@ -74,6 +75,7 @@ export function useAccountEditor(options: {
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
+    bpsConcurrencyLimit.value = concurrencyLimitInput(account.bpsConcurrencyLimit)
     weight.value = String(account.weight)
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
@@ -105,12 +107,17 @@ export function useAccountEditor(options: {
       return
     }
     const scheduling = parseAccountSchedulingForm(concurrencyLimit.value, weight.value)
+    const bpsLimit = parseOptionalConcurrencyLimit(bpsConcurrencyLimit.value)
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
       toast.warning('请选择已通过测试的代理')
       return
     }
     if (!scheduling.valid) {
       toast.warning(scheduling.message)
+      return
+    }
+    if (!bpsLimit.valid) {
+      toast.warning(bpsLimit.message)
       return
     }
 
@@ -125,6 +132,7 @@ export function useAccountEditor(options: {
         outboundProxyId: proxyMode.value === 'preserve' ? undefined : proxyMode.value === 'direct' ? '' : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
+        bpsConcurrencyLimit: bpsLimit.value,
         weight: scheduling.values.weight,
         modelAccess: modelAccess.value,
         groupIds: [...new Set(selectedGroupIds.value)],
@@ -161,6 +169,7 @@ export function useAccountEditor(options: {
     proxyId.value = ''
     schedulingEnabled.value = true
     concurrencyLimit.value = ''
+    bpsConcurrencyLimit.value = ''
     weight.value = '1'
     modelAccess.value = undefined
     selectedGroupIds.value = []
@@ -177,6 +186,7 @@ export function useAccountEditor(options: {
     basispointsEnabled,
     schedulingEnabled,
     concurrencyLimit,
+    bpsConcurrencyLimit,
     weight,
     modelAccess,
     proxyMode,
