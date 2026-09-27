@@ -481,10 +481,10 @@ fn empty_signals() -> AccountRuntimeSignals {
     }
 }
 
-/// 账号总槽与通道子槽的复合 lease；Drop 时两段各自尽力释放。
+/// 账号总槽与通道子槽的复合 lease；字段只为持有，Drop 时两段各自尽力释放。
 struct SchedulingLeaseGuards {
-    account: CredentialLeaseGuard,
-    channel: CredentialLeaseGuard,
+    _account: CredentialLeaseGuard,
+    _channel: CredentialLeaseGuard,
 }
 
 /// Store-owned 的通用 Provider lease 能力；具体 Provider 不感知 Redis。
@@ -629,8 +629,8 @@ impl RedisProviderLeaseCoordinator {
                             CredentialBoundedLeaseAcquisition::Acquired(channel_guard) => {
                                 ProviderLeaseAcquisition::Acquired(Box::new(
                                     SchedulingLeaseGuards {
-                                        account: account_guard,
-                                        channel: channel_guard,
+                                        _account: account_guard,
+                                        _channel: channel_guard,
                                     },
                                 ))
                             }
