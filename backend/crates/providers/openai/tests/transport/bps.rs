@@ -1,5 +1,6 @@
+use provider_openai::transport::CodexClientError;
 use provider_openai::transport::bps::{
-    parse_terminal, prepare_request_body, synthetic_sse, transform_response,
+    input_budget_rejection, parse_terminal, prepare_request_body, synthetic_sse, transform_response,
 };
 use serde_json::{Map, Value, json};
 
@@ -284,4 +285,73 @@ fn parse_terminal_should_accept_a_plain_json_response() {
     let response = parse_terminal("{\"status\":\"completed\",\"id\":\"resp_7\"}", false)
         .expect("terminal response");
     assert_eq!(response.get("id").and_then(Value::as_str), Some("resp_7"));
+}
+
+#[test]
+fn prepare_should_pin_context_management_over_client_value() {
+    let request = source(json!({
+        "input": [{"type": "message", "role": "user", "content": "hi"}],
+        "context_management": [{"type": "compaction", "compact_threshold": 42}],
+    }));
+    let body = prepare_request_body(&request, "gpt-6-astra");
+
+    assert_eq!(
+        body.get("context_management"),
+        Some(&json!([{"type": "compaction", "compact_threshold": 200000}]))
+    );
+}
+
+#[test]
+fn prepare_should_strip_token_budget_leaks_from_developer_messages() {
+    let request = source(json!({
+        "input": [
+            {"type": "message", "role": "developer",
+             "content": "You have 42 tokens left in this context window"},
+            {"type": "message", "role": "developer", "content": [
+                {"type": "input_text", "text": "<context_window>64000</context_window>"},
+                {"type": "input_text", "text": "keep me"},
+            ]},
+            {"type": "message", "role": "user",
+             "content": "tokens left in this context window stays: non-developer role"},
+        ],
+    }));
+    let body = prepare_request_body(&request, "gpt-6-astra");
+    let input = body.get("input").and_then(Value::as_array).expect("input");
+
+    let developers: Vec<&Value> = input
+        .iter()
+        .filter(|item| item.get("role").and_then(Value::as_str) == Some("developer"))
+        .collect();
+    // prologue 的目录消息 + 剥除后的第二条 developer；第一条整条丢弃。
+    assert_eq!(developers.len(), 2);
+    assert_eq!(
+        developers[1].get("content"),
+        Some(&json!([{"type": "input_text", "text": "keep me"}]))
+    );
+    // 泄露标记不出现在任何 output 分片；user 角色不剥除。
+    let serialized = dumps(&Value::Array(input.clone()));
+    assert!(serialized.contains("keep me"));
+    assert!(serialized.contains("non-developer role"));
+    assert!(
+        !developers
+            .iter()
+            .any(|item| dumps(item).contains("context_window"))
+    );
+}
+
+#[test]
+fn input_budget_rejection_should_reject_only_oversized_input() {
+    let small = json!([{"type": "message", "role": "user", "content": "hi"}]);
+    assert!(input_budget_rejection(&small).is_none());
+
+    let large = json!([{
+        "type": "message",
+        "role": "user",
+        "content": "x".repeat(1_000_000),
+    }]);
+    let error = input_budget_rejection(&large).expect("rejection");
+    let CodexClientError::Upstream { status, .. } = error else {
+        panic!("expected upstream-shaped rejection, got {error}");
+    };
+    assert_eq!(status.as_u16(), 400);
 }

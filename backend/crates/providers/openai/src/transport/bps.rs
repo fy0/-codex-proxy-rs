@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use reqwest::StatusCode;
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN,
@@ -39,6 +40,11 @@ const MAX_ATTACHMENT_RESPONSE_BYTES: usize = 1 << 20;
 const NATIVE_CALL_CACHE_CAP: usize = 512;
 /// 附件 sha256 → openai_file_id 缓存上限（LRU）。
 const ATTACHMENT_CACHE_CAP: usize = 256;
+/// 本地拒收的输入 token 上限（估算值）：上游窗口约 272k tokens，远超上限的
+/// 请求既没用也是异常指纹。参考实现可通过 BPS_MAX_INPUT_TOKENS 调整。
+const BPS_MAX_INPUT_TOKENS: usize = 300_000;
+/// 输入 token 估算的保守下界：3 字节/token，适配混合中英文文本。
+const BYTES_PER_TOKEN: usize = 3;
 /// 与参考实现一致的上游整体超时。
 const BPS_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(300);
 /// 与参考实现一致的附件上传超时。
@@ -470,8 +476,23 @@ fn message_item(role: &str, text: &str) -> Value {
     })
 }
 
+/// codex 会把本地配置的上下文窗口预算泄露进 developer 片段（"You have N
+/// tokens left in this context window"、`<context_window>`/`<context_window_guidance>`
+/// 标签）。真实 Excel 插件不会发出这些内容；剥除以免非标准窗口大小成为指纹。
+fn leaks_token_budget(text: &str) -> bool {
+    const MARKERS: [&str; 5] = [
+        "<context_window>",
+        "</context_window>",
+        "<context_window_guidance>",
+        "</context_window_guidance>",
+        "tokens left in this context window",
+    ];
+    MARKERS.iter().any(|marker| text.contains(marker))
+}
+
 /// 按角色归一化 content 分片类型；不认识的 dict 分片改写为占位文本。
-fn translate_message_item(item: &Map<String, Value>) -> Value {
+/// developer 消息命中 token_budget 泄露标记或归一化后无内容时丢弃整条。
+fn translate_message_item(item: &Map<String, Value>) -> Option<Value> {
     let mut item = item.clone();
     item.remove("internal_chat_message_metadata_passthrough");
     let role = string_value(item.get("role").unwrap_or(&Value::Null));
@@ -482,6 +503,9 @@ fn translate_message_item(item: &Map<String, Value>) -> Value {
     };
     match item.get("content").cloned() {
         Some(Value::String(text)) => {
+            if role == "developer" && leaks_token_budget(&text) {
+                return None;
+            }
             item.insert(
                 "content".to_owned(),
                 json!([{"type": content_type, "text": text}]),
@@ -514,11 +538,21 @@ fn translate_message_item(item: &Map<String, Value>) -> Value {
                     other => fixed.push(other),
                 }
             }
+            if role == "developer" {
+                fixed.retain(|part| {
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .is_none_or(|text| !leaks_token_budget(text))
+                });
+            }
+            if fixed.is_empty() {
+                return None;
+            }
             item.insert("content".to_owned(), Value::Array(fixed));
         }
         _ => {}
     }
-    Value::Object(item)
+    Some(Value::Object(item))
 }
 
 /// 翻译 input 数组：原生 transport 回放、客户端工具调用封套、工具输出归一化。
@@ -652,7 +686,9 @@ fn translate_input_items(raw_input: &Value, allowed: &HashMap<String, ToolSpec<'
             continue;
         }
         if item_type == "message" || item.contains_key("role") {
-            result.push(translate_message_item(&item));
+            if let Some(message) = translate_message_item(&item) {
+                result.push(message);
+            }
             continue;
         }
         result.push(Value::Object(item));
@@ -666,8 +702,13 @@ fn translate_input_items(raw_input: &Value, allowed: &HashMap<String, ToolSpec<'
 
 fn normalize_effort(value: &Value) -> &'static str {
     let mut effort = string_value(value).to_lowercase();
-    if matches!(effort.as_str(), "x-high" | "extra-high" | "extra_high") {
+    if matches!(
+        effort.as_str(),
+        "x-high" | "extra-high" | "extra_high" | "max" | "ultra" | "xxhigh" | "xx-high"
+    ) {
         effort = "xhigh".to_owned();
+    } else if matches!(effort.as_str(), "minimal" | "minimum" | "none") {
+        effort = "low".to_owned();
     }
     match effort.as_str() {
         "low" => "low",
@@ -776,6 +817,8 @@ pub fn prepare_request_body(
     let mut model = upstream_model.trim().to_owned();
     if let Some(stripped) = model.strip_suffix("-excel") {
         model = stripped.to_owned();
+    } else if let Some(stripped) = model.strip_suffix("-bps") {
+        model = stripped.to_owned();
     }
     if model.is_empty() {
         model = BPS_DEFAULT_MODEL.to_owned();
@@ -796,13 +839,12 @@ pub fn prepare_request_body(
         "reasoning_effort".to_owned(),
         Value::String(reasoning_effort(source).to_owned()),
     );
-    // context_management 属于上游白名单字段：客户端给了数组就原样透传，
-    // 缺省回退到实测可用的 compaction 默认值；service_tier/其它键不透传。
-    let context_management = match source.get("context_management") {
-        Some(policy) if policy.is_array() => policy.clone(),
-        _ => json!([{"type": "compaction", "compact_threshold": 200000}]),
-    };
-    output.insert("context_management".to_owned(), context_management);
+    // 钉死为 Excel 插件的原生值：客户端自带的 context_management（如调过的
+    // compact_threshold）会让请求在上游呈现非标准暴露面，一律不透传。
+    output.insert(
+        "context_management".to_owned(),
+        json!([{"type": "compaction", "compact_threshold": 200000}]),
+    );
     if !explicit_conversation_key(source).is_empty() {
         output.insert(
             "prompt_cache_key".to_owned(),
@@ -1504,6 +1546,42 @@ fn bps_headers(
     Ok(headers)
 }
 
+/// 超限输入的本地拒收错误；`None` 表示在估算预算内。
+///
+/// 参考实现以 input 数组序列化字节数 ÷ 3 估算 token，超过阈值直接 400，
+/// 不发给上游。借 `Upstream` + `client_response` 形态把合成的 400 原样交给
+/// 客户端，`BeforePayload` 表明业务 payload 未发出。
+pub fn input_budget_rejection(input: &Value) -> Option<CodexClientError> {
+    let input_bytes = serde_json::to_vec(input).ok()?.len();
+    let est_tokens = input_bytes / BYTES_PER_TOKEN;
+    if est_tokens <= BPS_MAX_INPUT_TOKENS {
+        return None;
+    }
+    let message =
+        format!("estimated input tokens {est_tokens} exceed limit {BPS_MAX_INPUT_TOKENS}");
+    let body = json!({"error": {"message": message, "type": "input_too_large"}}).to_string();
+    Some(CodexClientError::Upstream {
+        status: StatusCode::BAD_REQUEST,
+        body: body.clone(),
+        client_response: Some(Box::new(CodexClientVisibleUpstreamResponse::new(
+            StatusCode::BAD_REQUEST,
+            Some(b"application/json".to_vec()),
+            Vec::new(),
+            Bytes::from(body),
+        ))),
+        retry_after_seconds: None,
+        diagnostics: Box::new(CodexUpstreamDiagnostics {
+            status_code: Some(StatusCode::BAD_REQUEST.as_u16()),
+            ..CodexUpstreamDiagnostics::default()
+        }),
+        set_cookie_headers: Vec::new(),
+        rate_limit_headers: Vec::new(),
+        transport: CodexBackendTransport::HttpSse,
+        transport_metrics: Box::new(CodexTransportMetrics::default()),
+        send_phase: CodexUpstreamSendPhase::BeforePayload,
+    })
+}
+
 /// BPS 整流后的响应；body 已完整读取并提取出终态 response 对象。
 pub(crate) struct CodexBackendBpsResponse {
     pub(crate) response: Map<String, Value>,
@@ -1542,6 +1620,10 @@ impl CodexBackendClient {
         }
         if images > 0 {
             tracing::info!(images, "Basis Points image attachments uploaded");
+        }
+        if let Some(rejection) = input_budget_rejection(body.get("input").unwrap_or(&Value::Null)) {
+            tracing::warn!(error = %rejection, "Basis Points request rejected: input over local budget");
+            return Err(rejection);
         }
         let headers = bps_headers(&identity, stream)?;
         let body_bytes = serde_json::to_vec(&body).map_err(CodexClientError::RequestBodyEncode)?;
