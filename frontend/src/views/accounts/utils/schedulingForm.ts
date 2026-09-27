@@ -41,3 +41,20 @@ export function parseAccountSchedulingForm(
 export function concurrencyLimitInput(value: number | null) {
   return value === null ? '' : String(value)
 }
+
+type OptionalLimitParseResult
+  = | { valid: true, value: number | null }
+    | { valid: false, message: string }
+
+// 可选并发上限：留空为 null（不限制），否则须为 1 到 u32 上限的整数。
+export function parseOptionalConcurrencyLimit(limit: string): OptionalLimitParseResult {
+  const text = limit.trim()
+  const value = text === '' ? null : Number(text)
+  if (
+    value !== null
+    && (!Number.isSafeInteger(value) || value < 1 || value > MAX_ACCOUNT_CONCURRENCY)
+  ) {
+    return { valid: false, message: `并发上限必须留空，或为 1 到 ${MAX_ACCOUNT_CONCURRENCY} 的整数` }
+  }
+  return { valid: true, value }
+}

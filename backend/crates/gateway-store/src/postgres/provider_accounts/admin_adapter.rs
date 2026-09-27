@@ -1178,12 +1178,19 @@ impl AccountStore for PgAdminAccountStore {
         if command.turn_state_override.is_some() {
             changed_fields.push("turn_state_override".to_owned());
         }
+        if command.basispoints_enabled.is_some() {
+            changed_fields.push("basispoints_enabled".to_owned());
+        }
+        // 单账号更新为整体替换语义，BPS 子池上限始终入审计字段。
+        changed_fields.push("bps_concurrency_limit".to_owned());
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: vec![command.account_id.clone()],
                 notes: command.notes,
                 turn_state_override: command.turn_state_override,
+                basispoints_enabled: command.basispoints_enabled,
+                bps_concurrency_limit: Some(command.bps_concurrency_limit),
                 enabled: Some(command.enabled),
                 concurrency_limit: Some(command.concurrency_limit),
                 weight: Some(command.weight),
@@ -1348,12 +1355,20 @@ impl AccountStore for PgAdminAccountStore {
         if command.turn_state_override.is_some() {
             changed_fields.push("turn_state_override".to_owned());
         }
+        if command.basispoints_enabled.is_some() {
+            changed_fields.push("basispoints_enabled".to_owned());
+        }
+        if command.bps_concurrency_limit.is_some() {
+            changed_fields.push("bps_concurrency_limit".to_owned());
+        }
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: command.account_ids,
                 notes: None,
                 turn_state_override: command.turn_state_override,
+                basispoints_enabled: command.basispoints_enabled,
+                bps_concurrency_limit: command.bps_concurrency_limit,
                 enabled: command.enabled,
                 concurrency_limit: command.concurrency_limit,
                 weight: command.weight,

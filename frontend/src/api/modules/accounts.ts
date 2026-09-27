@@ -124,6 +124,7 @@ export interface Account {
   name: string
   notes: string | null
   turnStateOverride: string | null
+  basispointsEnabled: boolean
   provider: string
   resourceRef: string
   email: string | null
@@ -139,6 +140,7 @@ export interface Account {
   errorMessage: string | null
   enabled: boolean
   concurrencyLimit: number | null
+  bpsConcurrencyLimit: number | null
   weight: number
   modelAccess: AccountModelAccess
   accessTokenExpiresAt: string | null
@@ -379,8 +381,10 @@ interface AccountUpdateParam {
   accountId: string
   notes?: string
   turnStateOverride?: string
+  basispointsEnabled?: boolean
   enabled: boolean
   concurrencyLimit: number | null
+  bpsConcurrencyLimit: number | null
   weight: number
   modelAccess?: AccountModelAccess
   groupIds: string[]
@@ -392,6 +396,7 @@ interface AccountBatchUpdateParam {
   accountIds: string[]
   enabled?: boolean
   concurrencyLimit?: number | null
+  bpsConcurrencyLimit?: number | null
   weight?: number
   modelAccess?: AccountModelAccess
   groupIds?: string[]

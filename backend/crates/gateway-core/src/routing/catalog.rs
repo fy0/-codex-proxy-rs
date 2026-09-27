@@ -8,7 +8,8 @@ use crate::identity::ProviderKind;
 use crate::operation::RawJsonPayload;
 
 use super::{
-    ModelCapabilities, ModelPresentation, PublicModelId, PublicModelProfile, UpstreamModelId,
+    ModelCapabilities, ModelPresentation, PublicModelId, PublicModelProfile, UpstreamChannel,
+    UpstreamModelId,
 };
 
 /// Provider 客户端目录条目；缺少原生协议正文时使用已编译的通用画像。
@@ -116,6 +117,15 @@ pub trait ProviderCatalogPort: Send + Sync {
     /// 目录是否完整到足以根据缺项拒绝请求；发现型目录交由上游验证模型名。
     fn model_catalog_is_exhaustive(&self, _provider: &ProviderKind) -> bool {
         true
+    }
+
+    /// Provider 是否实现指定上行通道；默认实现只支持默认传输。
+    fn supports_upstream_channel(
+        &self,
+        _provider: &ProviderKind,
+        channel: UpstreamChannel,
+    ) -> bool {
+        channel.is_default()
     }
 
     /// 返回全部已注册 Provider 的目录代次；注册集合在初始化后保持不变。

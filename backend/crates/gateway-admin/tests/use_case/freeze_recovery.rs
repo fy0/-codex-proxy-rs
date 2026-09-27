@@ -30,6 +30,7 @@ fn runtime_settings(enabled: bool, probe_enabled: bool, adaptive: bool) -> Runti
         request_location: Default::default(),
         config_revision: revision(1),
         model_mappings: Default::default(),
+        bps_model_mappings: Default::default(),
         refresh_margin_seconds: 300,
         refresh_concurrency: 2,
         max_concurrent_per_account: 5,

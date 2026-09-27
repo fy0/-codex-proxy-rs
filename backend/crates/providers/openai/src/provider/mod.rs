@@ -34,7 +34,7 @@ use gateway_core::operation::{
 use gateway_core::provider_ports::ProviderSessionAffinityKey;
 use gateway_core::routing::{
     ModelCapabilities, ModelPresentation, ProviderCandidate, ProviderCatalogGeneration,
-    ProviderKind, ProviderModelCapabilities, UpstreamModelId,
+    ProviderKind, ProviderModelCapabilities, UpstreamChannel, UpstreamModelId,
 };
 use gateway_core::task::{
     DaemonRestartPolicy, DaemonTask, ScheduledTask, WorkerContribution, WorkerCycleContext,
@@ -292,6 +292,15 @@ impl Provider for CodexProvider {
         false
     }
 
+    /// Codex 同时实现默认传输与 Basis Points 白名单通道；通道是否命中由
+    /// 路由快照按请求模型名决定，这里只声明能力。
+    fn supports_upstream_channel(&self, channel: UpstreamChannel) -> bool {
+        matches!(
+            channel,
+            UpstreamChannel::Default | UpstreamChannel::BasisPoints
+        )
+    }
+
     async fn query_model_capabilities(
         &self,
     ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
@@ -399,12 +408,16 @@ impl Provider for CodexProvider {
         let cyber_policy_session_key =
             derive_codex_cyber_policy_session_key(&upstream_request, context.client_api_key_ref());
 
-        let requires_websocket = transport_requirement(&upstream_request).requires_websocket()
-            || (context.continuation_attempt() == ContinuationAttempt::Native
-                && (previous_session.as_ref().is_some_and(|state| {
-                    state.continuation_scope == OpenAiContinuationScope::ConnectionLocal
-                }) || matches!(context.continuation(), Some(ContinuationBinding::Pinned(binding))
-                        if binding.scope() == NativeContinuationScope::ConnectionLocal)));
+        // BPS 通道由路由快照按请求名精确命中后冻结在候选上；不能从解析后的
+        // 上游模型名反推，否则普通映射到同一上游模型的请求会被错误改道。
+        let basispoints_route = candidate.upstream_channel() == UpstreamChannel::BasisPoints;
+        let requires_websocket = !basispoints_route
+            && (transport_requirement(&upstream_request).requires_websocket()
+                || (context.continuation_attempt() == ContinuationAttempt::Native
+                    && (previous_session.as_ref().is_some_and(|state| {
+                        state.continuation_scope == OpenAiContinuationScope::ConnectionLocal
+                    }) || matches!(context.continuation(), Some(ContinuationBinding::Pinned(binding))
+                            if binding.scope() == NativeContinuationScope::ConnectionLocal))));
         let selection_started_at = Instant::now();
         let lease = self
             .selector
@@ -418,6 +431,7 @@ impl Provider for CodexProvider {
                 cyber_policy_session_key.as_ref(),
                 session_affinity.as_ref(),
                 requires_websocket,
+                basispoints_route,
             )
             .await
             .map_err(map_selection_error)?;
@@ -552,7 +566,10 @@ impl Provider for CodexProvider {
             && session_affinity
                 .as_ref()
                 .is_some_and(|affinity| self.session_transport_recovery.uses_http(affinity.key()));
-        let transport = if requirement.requires_websocket() {
+        // BPS 只走 HTTP 整流；要求 WebSocket 的默认路由保持既有升级。
+        let transport = if basispoints_route {
+            CodexProviderTransport::HttpOnly
+        } else if requirement.requires_websocket() {
             CodexProviderTransport::PreferWebSocket
         } else if context.transport() == AttemptTransport::Fallback || session_http_fallback {
             CodexProviderTransport::HttpOnly
@@ -596,7 +613,12 @@ impl Provider for CodexProvider {
             AttemptTransport::Retry(retry_index) => retry_index.get(),
             AttemptTransport::Default | AttemptTransport::Fallback => 0,
         };
-        let events = cold_response_stream(ColdResponse {
+        // BPS 固定 store:false，没有服务端续接点：带 previous_response_id 的
+        // 请求只能由客户端重放完整输入，否则上游只见增量、每轮都是新会话。
+        if basispoints_route && upstream_request.previous_response_id().is_some() {
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
+        let cold = ColdResponse {
             client: self
                 .client
                 .for_account(lease.account())
@@ -621,7 +643,12 @@ impl Provider for CodexProvider {
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
             session_capture,
-        });
+        };
+        let events = if basispoints_route {
+            cold_bps_response_stream(cold)
+        } else {
+            cold_response_stream(cold)
+        };
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {
             stream.with_filtered_account_feedback(

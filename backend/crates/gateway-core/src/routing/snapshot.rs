@@ -20,7 +20,7 @@ use super::{
     AccountGroupId, ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities,
     ProviderCandidate, ProviderCatalogGeneration, ProviderCatalogPort, ProviderKind, ProviderModel,
     PublicModelId, RoutingContext, RoutingGroupSnapshot, RoutingPlan, RuntimeAccount,
-    RuntimeAccountDirectory, UpstreamModelId,
+    RuntimeAccountDirectory, UpstreamChannel, UpstreamModelId,
 };
 
 const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
@@ -39,6 +39,7 @@ pub struct SnapshotSettingsFacts {
     request_interval_ms: u64,
     rotation_strategy: String,
     model_mappings: BTreeMap<String, String>,
+    bps_model_mappings: BTreeMap<String, String>,
     min_codex_desktop_version: Option<String>,
     min_codex_cli_version: Option<String>,
 }
@@ -47,6 +48,12 @@ impl SnapshotSettingsFacts {
     #[must_use]
     pub const fn with_disable_fast(mut self, disable_fast: bool) -> Self {
         self.disable_fast = disable_fast;
+        self
+    }
+
+    #[must_use]
+    pub fn with_bps_model_mappings(mut self, mappings: BTreeMap<String, String>) -> Self {
+        self.bps_model_mappings = mappings;
         self
     }
 
@@ -101,6 +108,7 @@ impl SnapshotSettingsFacts {
             request_interval_ms,
             rotation_strategy: rotation_strategy.into(),
             model_mappings,
+            bps_model_mappings: BTreeMap::new(),
             min_codex_desktop_version,
             min_codex_cli_version,
         }
@@ -432,6 +440,15 @@ async fn compile_runtime_snapshot(
         timeout: queue_timeout,
     };
     let model_mappings = facts.settings.model_mappings;
+    let bps_model_mappings = facts.settings.bps_model_mappings;
+    // 专用通道的候选只发给声明支持的 Provider；编译时冻结支持集合。
+    let bps_providers = provider_kinds
+        .iter()
+        .filter(|provider| {
+            catalogs.supports_upstream_channel(provider, UpstreamChannel::BasisPoints)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let min_client_versions = CodexClientMinVersions::new(
         facts
             .settings
@@ -533,6 +550,7 @@ async fn compile_runtime_snapshot(
             .with_responses_max_decompressed_body_bytes(decompressed_body_limit)
             .with_client_queue_policy(client_queue_policy)
             .with_model_mappings(model_mappings)
+            .with_bps_model_mappings(bps_model_mappings, bps_providers)
             .with_account_directory(account_directory)
             .with_exhaustive_provider_catalogs(exhaustive_provider_catalogs)
             .with_min_codex_client_versions(min_client_versions)
@@ -553,6 +571,8 @@ pub struct RuntimeSnapshot {
     provider_model_presentations:
         Arc<BTreeMap<ProviderKind, BTreeMap<UpstreamModelId, super::ModelPresentation>>>,
     model_mappings: Arc<BTreeMap<String, String>>,
+    bps_model_mappings: Arc<BTreeMap<String, String>>,
+    bps_providers: Arc<BTreeSet<ProviderKind>>,
     provider_catalog_generations: Arc<BTreeMap<ProviderKind, ProviderCatalogGeneration>>,
     exhaustive_provider_catalogs: Arc<BTreeSet<ProviderKind>>,
     account_directory: Arc<RuntimeAccountDirectory>,
@@ -680,6 +700,8 @@ impl RuntimeSnapshot {
             provider_models: Arc::new(model_map),
             provider_model_presentations: Arc::new(presentation_map),
             model_mappings: Arc::new(BTreeMap::new()),
+            bps_model_mappings: Arc::new(BTreeMap::new()),
+            bps_providers: Arc::new(BTreeSet::new()),
             provider_catalog_generations: Arc::new(BTreeMap::new()),
             exhaustive_provider_catalogs: Arc::new(exhaustive_provider_catalogs),
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
@@ -691,6 +713,18 @@ impl RuntimeSnapshot {
     #[must_use]
     pub fn with_model_mappings(mut self, mappings: BTreeMap<String, String>) -> Self {
         self.model_mappings = Arc::new(mappings);
+        self
+    }
+
+    /// BPS 别名映射与支持该通道的 Provider 一起冻结；键是公开模型名，值是 BPS 上游模型。
+    #[must_use]
+    pub fn with_bps_model_mappings(
+        mut self,
+        mappings: BTreeMap<String, String>,
+        providers: BTreeSet<ProviderKind>,
+    ) -> Self {
+        self.bps_model_mappings = Arc::new(mappings);
+        self.bps_providers = Arc::new(providers);
         self
     }
 
@@ -757,6 +791,13 @@ impl RuntimeSnapshot {
                 .keys()
                 .filter_map(|model| PublicModelId::new(model.clone()).ok()),
         );
+        if self.bps_providers.contains(provider) {
+            models.extend(
+                self.bps_model_mappings
+                    .keys()
+                    .filter_map(|model| PublicModelId::new(model.clone()).ok()),
+            );
+        }
         models.into_iter().collect()
     }
 
@@ -786,6 +827,18 @@ impl RuntimeSnapshot {
                 profiles.insert(public_model, presentation.clone());
             }
         }
+        if self.bps_providers.contains(provider) {
+            for (alias, target) in self.bps_model_mappings.iter() {
+                let Some(presentation) = presentations.iter().find_map(|(model, presentation)| {
+                    (model.as_str() == target).then_some(presentation)
+                }) else {
+                    continue;
+                };
+                if let Ok(public_model) = PublicModelId::new(alias.clone()) {
+                    profiles.insert(public_model, presentation.clone());
+                }
+            }
+        }
         profiles
             .into_iter()
             .map(|(model, presentation)| super::PublicModelProfile::new(model, presentation))
@@ -812,7 +865,7 @@ impl RuntimeSnapshot {
                 self.public_models_for_provider(provider)
                     .into_iter()
                     .filter(|model| {
-                        scope.allows_provider_model(provider, &self.mapped_model(model.as_str()))
+                        scope.allows_provider_model(provider, &self.routed_model(model.as_str()))
                     })
             })
             .collect::<BTreeSet<_>>()
@@ -830,7 +883,7 @@ impl RuntimeSnapshot {
         for provider in scope.provider_kinds() {
             for profile in self.public_model_profiles_for_provider(provider) {
                 if !scope
-                    .allows_provider_model(provider, &self.mapped_model(profile.model().as_str()))
+                    .allows_provider_model(provider, &self.routed_model(profile.model().as_str()))
                 {
                     continue;
                 }
@@ -858,7 +911,7 @@ impl RuntimeSnapshot {
         if !self.exhaustive_provider_catalogs.contains(provider) {
             return true;
         }
-        let upstream_model = self.mapped_model(public_model.as_str());
+        let upstream_model = self.routed_model(public_model.as_str());
         self.provider_models
             .get(provider)
             .is_some_and(|models| models.keys().any(|model| model.as_str() == upstream_model))
@@ -872,8 +925,18 @@ impl RuntimeSnapshot {
     ) -> bool {
         scope.provider_kinds().iter().any(|provider| {
             self.contains_public_model_for_provider(public_model, provider)
-                && scope.allows_provider_model(provider, &self.mapped_model(public_model.as_str()))
+                && scope.allows_provider_model(provider, &self.routed_model(public_model.as_str()))
         })
+    }
+
+    /// 请求模型的最终路由目标：BPS 别名只按请求名精确命中且不串联普通映射，
+    /// 其余走 `mapped_model` 的普通别名链。
+    #[must_use]
+    fn routed_model(&self, requested: &str) -> String {
+        self.bps_model_mappings
+            .get(requested)
+            .cloned()
+            .unwrap_or_else(|| self.mapped_model(requested))
     }
 
     #[must_use]
@@ -933,13 +996,24 @@ impl RuntimeSnapshot {
                 continue;
             }
             let requested_model = public_model.as_str();
-            let mapped_model = self.mapped_model(requested_model);
-            let upstream_model = if self.model_mappings.contains_key(requested_model) {
-                UpstreamModelId::new(mapped_model)
+            // BPS 别名只按请求名精确命中，命中后不再套用普通映射，并把通道冻结到候选。
+            let bps_target = self.bps_model_mappings.get(requested_model);
+            let upstream_channel = if bps_target.is_some() {
+                UpstreamChannel::BasisPoints
             } else {
-                UpstreamModelId::from_client_wire(mapped_model)
+                UpstreamChannel::Default
+            };
+            let mapped_model = self.routed_model(requested_model);
+            if !upstream_channel.is_default() && !self.bps_providers.contains(provider) {
+                continue;
             }
-            .map_err(|_| RoutingError::InvalidIdentifier)?;
+            let upstream_model =
+                if self.model_mappings.contains_key(requested_model) || bps_target.is_some() {
+                    UpstreamModelId::new(mapped_model)
+                } else {
+                    UpstreamModelId::from_client_wire(mapped_model)
+                }
+                .map_err(|_| RoutingError::InvalidIdentifier)?;
             let emulated_features = match self
                 .provider_models
                 .get(provider)
@@ -957,6 +1031,7 @@ impl RuntimeSnapshot {
             candidates.push(ProviderCandidate {
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
+                upstream_channel,
                 emulated_features,
                 account_scope: Arc::clone(&account_scope),
             });
@@ -973,7 +1048,7 @@ impl RuntimeSnapshot {
             {
                 return Err(RoutingError::ModelNotFound {
                     model: public_model.as_str().to_owned(),
-                    mapped_model: self.mapped_model(public_model.as_str()),
+                    mapped_model: self.routed_model(public_model.as_str()),
                 });
             }
             return Err(RoutingError::NoCapableProvider {
@@ -1021,6 +1096,7 @@ impl RuntimeSnapshot {
         let candidate = ProviderCandidate {
             provider: provider.clone(),
             upstream_model: None,
+            upstream_channel: UpstreamChannel::Default,
             emulated_features: BTreeSet::new(),
             account_scope: Arc::clone(&account_scope),
         };

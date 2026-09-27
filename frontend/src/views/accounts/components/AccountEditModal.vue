@@ -38,6 +38,8 @@ const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
 const turnStateOverride = defineModel<string>('turnStateOverride', { required: true })
+const basispointsEnabled = defineModel<boolean>('basispointsEnabled', { required: true })
+const bpsConcurrencyLimit = defineModel<string>('bpsConcurrencyLimit', { required: true })
 </script>
 
 <template>
@@ -87,7 +89,10 @@ const turnStateOverride = defineModel<string>('turnStateOverride', { required: t
         v-model:proxy-mode="proxyMode"
         v-model:proxy-id="proxyId"
         v-model:turn-state-override="turnStateOverride"
+        v-model:basispoints-enabled="basispointsEnabled"
+        v-model:bps-concurrency-limit="bpsConcurrencyLimit"
         show-turn-state
+        :show-basispoints="account.provider === 'openai' && account.authenticationKind === 'oauth'"
         :groups="groups"
         :groups-loading="groupsLoading"
         :disabled="saving"

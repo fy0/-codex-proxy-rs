@@ -7,7 +7,7 @@ import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError } from '../utils/modelAccess'
-import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
+import { concurrencyLimitInput, parseAccountSchedulingForm, parseOptionalConcurrencyLimit } from '../utils/schedulingForm'
 import { apiKeyAccountError, emptyApiKeyAccountForm } from '../utils/upstreamApiKey'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
@@ -21,8 +21,10 @@ export function useAccountEditor(options: {
   const editingAccountId = shallowRef<string | null>(null)
   const notes = shallowRef('')
   const turnStateOverride = shallowRef('')
+  const basispointsEnabled = shallowRef(false)
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
+  const bpsConcurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
   const modelAccess = ref<AccountModelAccess | undefined>()
   const proxyMode = shallowRef('preserve')
@@ -68,10 +70,12 @@ export function useAccountEditor(options: {
     editingAccountId.value = account.id
     notes.value = account.notes ?? ''
     turnStateOverride.value = account.turnStateOverride ?? ''
+    basispointsEnabled.value = account.basispointsEnabled
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
+    bpsConcurrencyLimit.value = concurrencyLimitInput(account.bpsConcurrencyLimit)
     weight.value = String(account.weight)
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
@@ -103,6 +107,7 @@ export function useAccountEditor(options: {
       return
     }
     const scheduling = parseAccountSchedulingForm(concurrencyLimit.value, weight.value)
+    const bpsLimit = parseOptionalConcurrencyLimit(bpsConcurrencyLimit.value)
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
       toast.warning('请选择已通过测试的代理')
       return
@@ -111,15 +116,23 @@ export function useAccountEditor(options: {
       toast.warning(scheduling.message)
       return
     }
+    if (!bpsLimit.valid) {
+      toast.warning(bpsLimit.message)
+      return
+    }
 
     await saveAction.run(async () => {
+      const isBasispointsAccount = editingAccount.value?.provider === 'openai'
+        && editingAccount.value?.authenticationKind === 'oauth'
       const settings = {
         accountId,
         notes: notes.value,
         turnStateOverride: turnStateOverride.value.trim(),
+        basispointsEnabled: isBasispointsAccount ? basispointsEnabled.value : undefined,
         outboundProxyId: proxyMode.value === 'preserve' ? undefined : proxyMode.value === 'direct' ? '' : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
+        bpsConcurrencyLimit: bpsLimit.value,
         weight: scheduling.values.weight,
         modelAccess: modelAccess.value,
         groupIds: [...new Set(selectedGroupIds.value)],
@@ -151,10 +164,12 @@ export function useAccountEditor(options: {
     editingAccountId.value = null
     notes.value = ''
     turnStateOverride.value = ''
+    basispointsEnabled.value = false
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = true
     concurrencyLimit.value = ''
+    bpsConcurrencyLimit.value = ''
     weight.value = '1'
     modelAccess.value = undefined
     selectedGroupIds.value = []
@@ -168,8 +183,10 @@ export function useAccountEditor(options: {
     editingAccount,
     notes,
     turnStateOverride,
+    basispointsEnabled,
     schedulingEnabled,
     concurrencyLimit,
+    bpsConcurrencyLimit,
     weight,
     modelAccess,
     proxyMode,

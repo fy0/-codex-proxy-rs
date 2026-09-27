@@ -263,6 +263,7 @@ impl ProviderLeasePort for TestRefreshLeases {
         _: &'a gateway_core::policy::ClientApiKeyId,
         _: &'a gateway_core::routing::ProviderKind,
         _: &'a [gateway_core::account::ProviderAccountId],
+        _: &'a [gateway_core::routing::UpstreamChannel],
     ) -> futures::future::BoxFuture<
         'a,
         Result<gateway_core::provider_ports::ProviderSchedulingState, ProviderStoreError>,

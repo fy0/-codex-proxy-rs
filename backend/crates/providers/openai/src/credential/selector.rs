@@ -18,7 +18,7 @@ use gateway_core::provider_ports::{
     ProviderSchedulingLeaseRequest, ProviderSessionAffinityKey, ProviderSessionAffinityPort,
     ProviderSessionExclusionPort, ProviderSessionExclusions, ProviderStoreError,
 };
-use gateway_core::routing::ProviderKind;
+use gateway_core::routing::{ProviderKind, UpstreamChannel};
 use secrecy::ExposeSecret;
 use thiserror::Error;
 use url::Url;
@@ -101,6 +101,8 @@ pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
 
 struct CredentialSelectionInput<'a> {
     requires_websocket: bool,
+    /// BPS 通道只接受管理员显式开启 Basis Points 的 OAuth 账号。
+    requires_basispoints: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -294,6 +296,7 @@ impl CodexCredentialSelector {
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket: false,
+            requires_basispoints: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -309,9 +312,11 @@ impl CodexCredentialSelector {
         cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         session_affinity_observation: Option<&CodexSessionAffinity>,
         requires_websocket: bool,
+        requires_basispoints: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket,
+            requires_basispoints,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -335,6 +340,7 @@ impl CodexCredentialSelector {
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket: false,
+            requires_basispoints: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -408,6 +414,14 @@ impl CodexCredentialSelector {
                         continue;
                     }
                 }
+                // BPS 把 OAuth Bearer 发给 bps.openai.com，必须同时满足管理员
+                // 在该账号上显式开启 Basis Points；API key 凭据结构上不可用。
+                if request.requires_basispoints
+                    && (!account.basispoints_enabled()
+                        || account.authentication_kind() != super::CODEX_AUTHENTICATION_KIND_OAUTH)
+                {
+                    continue;
+                }
                 eligible.push(account);
             }
             let accounts = eligible;
@@ -449,12 +463,19 @@ impl CodexCredentialSelector {
                     .routing_cookies
                     .retain(|cookie| cookie.origin == request.request_url.as_str());
             }
+            // BPS 请求需要账号内子池的在途信号；默认通道不额外读取通道桶。
+            let signal_channels: &[UpstreamChannel] = if request.requires_basispoints {
+                &[UpstreamChannel::BasisPoints]
+            } else {
+                &[]
+            };
             let scheduling = self
                 .leases
                 .load_state(
                     request.attempt.client_api_key_ref(),
                     &self.provider_kind,
                     &account_ids,
+                    signal_channels,
                 )
                 .await?;
             let round_robin_cursor = scheduling.round_robin_cursor();
@@ -471,6 +492,7 @@ impl CodexCredentialSelector {
                         .unwrap_or(AccountRuntimeSignals {
                             turn_state: Default::default(),
                             in_flight: 0,
+                            bps_in_flight: 0,
                             last_started_at: None,
                             quota_reset_at: None,
                             quota_remaining_rank: None,
@@ -562,6 +584,11 @@ impl CodexCredentialSelector {
             let mut shortest_retry = None;
             let base_excluded = excluded.clone();
             let policy = request.attempt.account_selection_policy();
+            let required_channel = if request.requires_basispoints {
+                UpstreamChannel::BasisPoints
+            } else {
+                UpstreamChannel::Default
+            };
 
             loop {
                 let preferred = pinned_account
@@ -580,6 +607,7 @@ impl CodexCredentialSelector {
                         AccountEligibilityPolicy::Enforce
                     },
                     account_scope: request.attempt.account_scope().cloned(),
+                    channel: required_channel,
                 };
                 let wait_context = AccountSelectionContext {
                     excluded_accounts: base_excluded.clone(),
@@ -652,6 +680,17 @@ impl CodexCredentialSelector {
                             account.effective_concurrency(policy.max_concurrent_per_account()),
                             policy.request_interval(),
                             request.attempt.deadline(),
+                        )
+                        .with_channel_limit(
+                            required_channel,
+                            // BPS 子池上限来自账号配置；普通请求不挂通道约束。
+                            if required_channel == UpstreamChannel::BasisPoints {
+                                account
+                                    .bps_concurrency_limit()
+                                    .map(|limit| limit.into_non_zero())
+                            } else {
+                                None
+                            },
                         ),
                     ))
                     .await?

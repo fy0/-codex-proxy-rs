@@ -232,6 +232,11 @@ pub struct UpdateAccountRequest {
     pub notes: Option<String>,
     /// `None` 保留原值；`Some("")` 或空白串清除覆盖。
     pub turn_state_override: Option<String>,
+    /// `None` 保留原值；仅对 OAuth 认证的 OpenAI 账号生效。
+    pub basispoints_enabled: Option<bool>,
+    /// 账号内 BPS 子池上限；`null` 清除上限，仅对 OAuth 认证的 OpenAI 账号生效。
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub bps_concurrency_limit: Option<u64>,
     pub enabled: bool,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub concurrency_limit: Option<u64>,
@@ -246,6 +251,7 @@ impl UpdateAccountRequest {
         validate_account_notes(self.notes.as_deref())?;
         validate_turn_state_override(self.turn_state_override.as_deref())?;
         parse_concurrency_limit(self.concurrency_limit)?;
+        parse_concurrency_limit(self.bps_concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
         Ok(())
@@ -261,6 +267,8 @@ impl UpdateAccountRequest {
             account_id: self.account_id,
             notes: self.notes,
             turn_state_override: self.turn_state_override,
+            basispoints_enabled: self.basispoints_enabled,
+            bps_concurrency_limit: parse_concurrency_limit(self.bps_concurrency_limit)?,
             enabled: self.enabled,
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,

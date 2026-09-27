@@ -34,6 +34,7 @@ pub struct RuntimeSettings {
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub model_mappings: BTreeMap<String, String>,
+    pub bps_model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
     pub usage_retention_days: u32,
@@ -70,6 +71,7 @@ impl fmt::Debug for RuntimeSettings {
             .field("request_location_enabled", &self.request_location_enabled)
             .field("request_location", &self.request_location)
             .field("model_mappings", &self.model_mappings)
+            .field("bps_model_mappings", &self.bps_model_mappings)
             .field("min_codex_desktop_version", &self.min_codex_desktop_version)
             .field("min_codex_cli_version", &self.min_codex_cli_version)
             .field("usage_retention_days", &self.usage_retention_days)
@@ -124,6 +126,7 @@ pub struct RuntimeSettingsUpdate {
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub model_mappings: BTreeMap<String, String>,
+    pub bps_model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
     pub usage_retention_days: u32,
@@ -151,6 +154,7 @@ impl fmt::Debug for RuntimeSettingsUpdate {
             .field("request_location_enabled", &self.request_location_enabled)
             .field("request_location", &self.request_location)
             .field("model_mappings", &self.model_mappings)
+            .field("bps_model_mappings", &self.bps_model_mappings)
             .finish_non_exhaustive()
     }
 }
@@ -173,6 +177,7 @@ impl RuntimeSettingsUpdate {
             || !(60..=3_600).contains(&self.account_auto_freeze_window_seconds)
             || !(300..=604_800).contains(&self.account_auto_freeze_duration_seconds)
             || !valid_model_mappings(&self.model_mappings)
+            || !valid_model_mappings(&self.bps_model_mappings)
             || !valid_client_version(self.min_codex_desktop_version.as_deref())
             || !valid_client_version(self.min_codex_cli_version.as_deref())
             || !valid_probe_model(self.account_auto_freeze_probe_model.as_deref())
@@ -241,7 +246,7 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     account_auto_freeze_enabled, account_auto_freeze_threshold,
                     account_auto_freeze_window_seconds, account_auto_freeze_duration_seconds,
                     account_auto_freeze_probe_enabled, account_auto_freeze_probe_model,
-                    account_auto_freeze_adaptive_concurrency
+                    account_auto_freeze_adaptive_concurrency, bps_model_mappings_json
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -303,7 +308,7 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 account_auto_freeze_enabled, account_auto_freeze_threshold,
                 account_auto_freeze_window_seconds, account_auto_freeze_duration_seconds,
                 account_auto_freeze_probe_enabled, account_auto_freeze_probe_model,
-                account_auto_freeze_adaptive_concurrency
+                account_auto_freeze_adaptive_concurrency, bps_model_mappings_json
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -352,6 +357,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
                      request_location_enabled = $24,
                      responses_max_decompressed_body_bytes = $25,
                      disable_fast = coalesce($26, disable_fast),
+                     bps_model_mappings_json = $27,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -394,6 +400,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
             .map_err(|_| invalid_numeric())?,
     )
     .bind(update.disable_fast)
+    .bind(sqlx::types::Json(&update.bps_model_mappings))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -454,6 +461,7 @@ struct RuntimeSettingsRow {
     request_location_enabled: bool,
     request_location_json: sqlx::types::Json<gateway_core::account::RequestLocation>,
     model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
+    bps_model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
     usage_retention_days: i64,
     ops_event_retention_days: i64,
     audit_retention_days: i64,
@@ -490,6 +498,7 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
             .normalized()
             .map_err(|_| invalid_location())?,
         model_mappings: row.model_mappings_json.0,
+        bps_model_mappings: row.bps_model_mappings_json.0,
         usage_retention_days: to_u32(row.usage_retention_days)?,
         ops_event_retention_days: to_u32(row.ops_event_retention_days)?,
         audit_retention_days: to_u32(row.audit_retention_days)?,

@@ -8,6 +8,7 @@ pub use crate::account::scope::{
     FrozenAccountScope, RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory,
 };
 pub use crate::identity::ProviderKind;
+pub use crate::upstream::UpstreamChannel;
 pub use catalog::{
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
     ProviderModelCapabilities, ProviderModelContent, ProviderModelDescriptor,
@@ -507,6 +508,7 @@ pub struct RoutingContext {
 pub struct ProviderCandidate {
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
+    upstream_channel: UpstreamChannel,
     emulated_features: BTreeSet<Feature>,
     account_scope: Arc<FrozenAccountScope>,
 }
@@ -520,6 +522,12 @@ impl ProviderCandidate {
     #[must_use]
     pub const fn upstream_model(&self) -> Option<&UpstreamModelId> {
         self.upstream_model.as_ref()
+    }
+
+    /// 返回冻结的上行通道；Provider 据此决定是否替换端点与协议翻译。
+    #[must_use]
+    pub const fn upstream_channel(&self) -> UpstreamChannel {
+        self.upstream_channel
     }
 
     #[must_use]

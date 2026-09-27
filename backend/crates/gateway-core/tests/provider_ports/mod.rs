@@ -90,6 +90,7 @@ fn scheduling_state_preserves_provider_neutral_signals() {
         AccountRuntimeSignals {
             turn_state: Default::default(),
             in_flight: 2,
+            bps_in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
             quota_remaining_rank: Some(7),

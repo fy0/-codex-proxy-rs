@@ -38,6 +38,8 @@ pub struct RuntimeSettingsView {
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub model_mappings: ModelMappings,
+    /// Basis Points 别名映射：仅列出的公开模型名走 BPS 通道，值是 BPS 上游模型。
+    pub bps_model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
@@ -70,6 +72,9 @@ pub struct UpdateRuntimeSettingsRequest {
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub model_mappings: ModelMappings,
+    /// 缺省按空映射处理；保留旧客户端兼容性。
+    #[serde(default)]
+    pub bps_model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
@@ -99,7 +104,8 @@ impl UpdateRuntimeSettingsRequest {
         self.request_location
             .validate()
             .map_err(|_| WireValidationError::new("requestLocation"))?;
-        validate_model_mappings(&self.model_mappings)?;
+        validate_model_mappings(&self.model_mappings, "modelMappings")?;
+        validate_model_mappings(&self.bps_model_mappings, "bpsModelMappings")?;
         for (value, field) in [
             (self.max_waiting_per_key, "maxWaitingPerKey"),
             (self.max_waiting_per_account, "maxWaitingPerAccount"),
@@ -183,7 +189,8 @@ impl UpdateRuntimeSettingsRequest {
                 .request_location
                 .normalized()
                 .map_err(|_| WireValidationError::new("requestLocation"))?,
-            model_mappings: domain_model_mappings(self.model_mappings)?,
+            model_mappings: domain_model_mappings(self.model_mappings, "modelMappings")?,
+            bps_model_mappings: domain_model_mappings(self.bps_model_mappings, "bpsModelMappings")?,
             refresh_margin_seconds: self.refresh_margin_seconds,
             refresh_concurrency: u32::try_from(self.refresh_concurrency)
                 .map_err(|_| WireValidationError::new("settingsRefreshConcurrencyOverflow"))?,
@@ -223,6 +230,7 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             request_location_enabled: settings.request_location_enabled,
             request_location: settings.request_location,
             model_mappings: wire_model_mappings(settings.model_mappings),
+            bps_model_mappings: wire_model_mappings(settings.bps_model_mappings),
             refresh_margin_seconds: settings.refresh_margin_seconds,
             refresh_concurrency: u64::from(settings.refresh_concurrency),
             max_concurrent_per_account: u64::from(settings.max_concurrent_per_account),
@@ -489,13 +497,16 @@ fn require_positive_i64(value: u64, field: &'static str) -> Result<(), WireValid
     Ok(())
 }
 
-fn validate_model_mappings(mappings: &ModelMappings) -> Result<(), WireValidationError> {
+fn validate_model_mappings(
+    mappings: &ModelMappings,
+    field: &'static str,
+) -> Result<(), WireValidationError> {
     if mappings.len() > 512 {
-        return Err(WireValidationError::new("modelMappings"));
+        return Err(WireValidationError::new(field));
     }
     for (requested, upstream) in mappings {
         if !valid_model_name(requested, 256) || !valid_model_name(upstream, 256) {
-            return Err(WireValidationError::new("modelMappings"));
+            return Err(WireValidationError::new(field));
         }
     }
     Ok(())
@@ -503,15 +514,14 @@ fn validate_model_mappings(mappings: &ModelMappings) -> Result<(), WireValidatio
 
 fn domain_model_mappings(
     mappings: ModelMappings,
+    field: &'static str,
 ) -> Result<DomainModelMappings, WireValidationError> {
     mappings
         .into_iter()
         .map(|(requested, upstream)| {
             Ok((
-                PublicModelId::new(requested)
-                    .map_err(|_| WireValidationError::new("modelMappings"))?,
-                UpstreamModelId::new(upstream)
-                    .map_err(|_| WireValidationError::new("modelMappings"))?,
+                PublicModelId::new(requested).map_err(|_| WireValidationError::new(field))?,
+                UpstreamModelId::new(upstream).map_err(|_| WireValidationError::new(field))?,
             ))
         })
         .collect()

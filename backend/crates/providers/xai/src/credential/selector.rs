@@ -181,6 +181,8 @@ impl GrokAccountSessionSelector {
                     request.client_api_key_id(),
                     &self.provider_kind,
                     &account_ids,
+                    // xAI 没有专用上行通道，不读取通道子池信号。
+                    &[],
                 )
                 .await
                 .map_err(|_| GrokSessionSelectorError::Unavailable)?;
@@ -229,6 +231,7 @@ impl GrokAccountSessionSelector {
                 round_robin_cursor: scheduling.round_robin_cursor(),
                 eligibility: request.eligibility(),
                 account_scope: (!diagnostic).then(|| Arc::clone(request.account_scope())),
+                channel: gateway_core::routing::UpstreamChannel::Default,
             };
             let wait_candidates = AccountSelector.wait_candidates(&candidates, &context);
             let capacity_context = context.clone();

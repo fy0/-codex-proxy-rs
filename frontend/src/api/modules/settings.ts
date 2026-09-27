@@ -9,6 +9,7 @@ export interface RuntimeSettings {
   requestLocationEnabled: boolean
   requestLocation: RequestLocation
   modelMappings: Record<string, string>
+  bpsModelMappings: Record<string, string>
   refreshMarginSeconds: number
   refreshConcurrency: number
   maxConcurrentPerAccount: number

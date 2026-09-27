@@ -44,6 +44,9 @@ fn update_body() -> Value {
             "gpt-5.4": "gpt-5.5",
             "grok-latest": "grok-4.5"
         },
+        "bpsModelMappings": {
+            "gpt-6-astra-bps": "gpt-6-astra"
+        },
         "refreshMarginSeconds": 1800,
         "refreshConcurrency": 4,
         "maxConcurrentPerAccount": 5,
@@ -117,6 +120,10 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
                 UpstreamModelId::new("grok-4.5").expect("upstream model"),
             ),
         ]),
+        bps_model_mappings: BTreeMap::from_iter([(
+            PublicModelId::new("gpt-6-astra-bps").expect("public model"),
+            UpstreamModelId::new("gpt-6-astra").expect("upstream model"),
+        )]),
         refresh_margin_seconds: 1800,
         refresh_concurrency: 4,
         max_concurrent_per_account: 5,
@@ -154,6 +161,9 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "modelMappings": {
                 "gpt-5.4": "gpt-5.5",
                 "grok-latest": "grok-4.5"
+            },
+            "bpsModelMappings": {
+                "gpt-6-astra-bps": "gpt-6-astra"
             },
             "refreshMarginSeconds": 1800,
             "refreshConcurrency": 4,
@@ -217,6 +227,17 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
             })
             .collect::<Result<BTreeMap<_, _>, gateway_core::error::IdentifierError>>()
             .expect("valid model mappings"),
+        bps_model_mappings: request
+            .bps_model_mappings
+            .iter()
+            .map(|(public, upstream)| {
+                Ok((
+                    PublicModelId::new(public.clone())?,
+                    UpstreamModelId::new(upstream.clone())?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, gateway_core::error::IdentifierError>>()
+            .expect("valid BPS model mappings"),
         refresh_margin_seconds: request.refresh_margin_seconds,
         refresh_concurrency: u32::try_from(request.refresh_concurrency).expect("u32"),
         max_concurrent_per_account: u32::try_from(request.max_concurrent_per_account).expect("u32"),
@@ -286,9 +307,15 @@ async fn settings_get_should_preserve_global_model_mappings() {
         (
             data["modelMappings"]["coding-default"].as_str(),
             data["modelMappings"]["grok-latest"].as_str(),
+            data["bpsModelMappings"]["gpt-6-astra-bps"].as_str(),
             data["rotationStrategy"].as_str()
         ),
-        (Some("gpt-5.4"), Some("grok-4.5"), Some("smart"))
+        (
+            Some("gpt-5.4"),
+            Some("grok-4.5"),
+            Some("gpt-6-astra"),
+            Some("smart")
+        )
     );
 }
 
@@ -309,6 +336,7 @@ async fn settings_post_should_replace_global_model_mappings() {
     assert!(data.get("configRevision").is_none());
     assert_eq!(data["modelMappings"]["gpt-5.4"], "gpt-5.5");
     assert_eq!(data["modelMappings"]["grok-latest"], "grok-4.5");
+    assert_eq!(data["bpsModelMappings"]["gpt-6-astra-bps"], "gpt-6-astra");
 }
 
 #[tokio::test]

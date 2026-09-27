@@ -1051,6 +1051,7 @@ impl ProviderLeasePort for DiagnosticLeasePort {
         _: &'a ClientApiKeyId,
         _: &'a ProviderKind,
         account_ids: &'a [gateway_core::account::ProviderAccountId],
+        _: &'a [gateway_core::routing::UpstreamChannel],
     ) -> futures::future::BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
             Ok(ProviderSchedulingState::new(
@@ -1063,6 +1064,7 @@ impl ProviderLeasePort for DiagnosticLeasePort {
                             AccountRuntimeSignals {
                                 turn_state: Default::default(),
                                 in_flight: 0,
+                                bps_in_flight: 0,
                                 last_started_at: None,
                                 quota_reset_at: None,
                                 quota_remaining_rank: None,

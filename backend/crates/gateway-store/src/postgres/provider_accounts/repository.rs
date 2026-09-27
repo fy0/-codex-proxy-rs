@@ -114,7 +114,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                     access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
-                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at, turn_state_override
+                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at, turn_state_override, basispoints_enabled, bps_concurrency_limit
              from provider_accounts
              left join (select id as location_proxy_id, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
                on outbound_proxy_id = location_proxy_id
@@ -151,10 +151,12 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
                has_refresh_token, access_token_expires_at, next_refresh_at, enabled,
                concurrency_limit, weight, model_access_json, credential_state, provider_quota_json,
-               credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at
+               credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at,
+               bps_concurrency_limit
              ) values (
                $18, $19, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13,
-               $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17)
+               $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17),
+               $21
              )",
         )
         .bind(account.id)
@@ -177,6 +179,11 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(account.outbound_proxy.as_ref().map(|proxy| proxy.expose_url()))
         .bind(proxy_id)
         .bind(account.model_access.as_ref().map(sqlx::types::Json))
+        .bind(
+            account
+                .bps_concurrency_limit
+                .map(|limit| i64::from(limit.get())),
+        )
         .execute(&mut *transaction)
         .await
         .map_err(|_| postgres_unavailable("insert provider account"))?;
@@ -599,6 +606,21 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     )
                     .await?;
                 }
+                if let Some(enabled) = settings.basispoints_enabled {
+                    update_provider_accounts_basispoints_in_transaction(
+                        &mut transaction,
+                        ids,
+                        enabled,
+                    )
+                    .await?;
+                }
+                // 单账号更新是整体替换语义：上限始终按提交值覆盖，`None` 表示清除。
+                update_provider_accounts_bps_limit_in_transaction(
+                    &mut transaction,
+                    ids,
+                    settings.bps_concurrency_limit,
+                )
+                .await?;
             }
             append_admin_audit_event_in_transaction(
                 &mut transaction,
@@ -661,6 +683,22 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     &mut transaction,
                     &command.account_ids,
                     turn_state,
+                )
+                .await?;
+            }
+            if let Some(enabled) = command.basispoints_enabled {
+                update_provider_accounts_basispoints_in_transaction(
+                    &mut transaction,
+                    &command.account_ids,
+                    enabled,
+                )
+                .await?;
+            }
+            if let Some(limit) = command.bps_concurrency_limit {
+                update_provider_accounts_bps_limit_in_transaction(
+                    &mut transaction,
+                    &command.account_ids,
+                    limit,
                 )
                 .await?;
             }
@@ -782,6 +820,37 @@ async fn update_provider_account_turn_state_in_transaction(
     Ok(())
 }
 
+async fn update_provider_accounts_basispoints_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_ids: &[String],
+    enabled: bool,
+) -> StoreResult<()> {
+    sqlx::query("update provider_accounts set basispoints_enabled = $2 where id = any($1::text[])")
+        .bind(account_ids)
+        .bind(enabled)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| postgres_unavailable("update provider account basispoints flag"))?;
+    Ok(())
+}
+
+/// `None` 清除子池上限，回到只受账号总并发约束的行为。
+async fn update_provider_accounts_bps_limit_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_ids: &[String],
+    limit: Option<AccountConcurrencyLimit>,
+) -> StoreResult<()> {
+    sqlx::query(
+        "update provider_accounts set bps_concurrency_limit = $2 where id = any($1::text[])",
+    )
+    .bind(account_ids)
+    .bind(limit.map(|limit| i64::from(limit.get())))
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| postgres_unavailable("update provider account bps concurrency limit"))?;
+    Ok(())
+}
+
 async fn replace_account_group_assignments_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     account_ids: &[String],
@@ -849,10 +918,12 @@ pub(crate) async fn upsert_provider_account_in_transaction(
            upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
            has_refresh_token, access_token_expires_at, next_refresh_at, enabled,
            concurrency_limit, weight, model_access_json, credential_state, provider_quota_json,
-           credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at
+           credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at,
+           bps_concurrency_limit
          ) values (
            $18, $19, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13,
-           $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17)
+           $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17),
+           $21
          )
          on conflict (
            provider_kind,
@@ -905,6 +976,11 @@ pub(crate) async fn upsert_provider_account_in_transaction(
     .bind(account.outbound_proxy.as_ref().map(|proxy| proxy.expose_url()))
     .bind(proxy_id)
     .bind(account.model_access.as_ref().map(sqlx::types::Json))
+    .bind(
+        account
+            .bps_concurrency_limit
+            .map(|limit| i64::from(limit.get())),
+    )
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {

@@ -407,6 +407,7 @@ impl SettingsStore for MemorySettingsStore {
             request_location: command.request_location,
             config_revision: next_revision(settings.config_revision),
             model_mappings: command.model_mappings,
+            bps_model_mappings: command.bps_model_mappings,
             refresh_margin_seconds: command.refresh_margin_seconds,
             refresh_concurrency: command.refresh_concurrency,
             max_concurrent_per_account: command.max_concurrent_per_account,
@@ -1277,12 +1278,17 @@ fn test_runtime_settings() -> RuntimeSettings {
             UpstreamModelId::new("grok-4.5").expect("upstream model"),
         ),
     ]);
+    let bps_mappings: ModelMappings = BTreeMap::from([(
+        PublicModelId::new("gpt-6-astra-bps").expect("public model"),
+        UpstreamModelId::new("gpt-6-astra").expect("upstream model"),
+    )]);
     RuntimeSettings {
         disable_fast: false,
         request_location_enabled: false,
         request_location: Default::default(),
         config_revision: Revision::new(7).expect("revision"),
         model_mappings: mappings,
+        bps_model_mappings: bps_mappings,
         refresh_margin_seconds: 3_600,
         refresh_concurrency: 2,
         max_concurrent_per_account: 3,

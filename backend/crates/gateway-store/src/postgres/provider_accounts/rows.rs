@@ -128,6 +128,10 @@ pub struct ProviderAccountSummary {
     pub notes: Option<String>,
     /// 管理员配置的 x-codex-turn-state 强制覆盖；`None` 表示不覆盖。
     pub turn_state_override: Option<String>,
+    /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
+    pub basispoints_enabled: bool,
+    /// 账号内 BPS 子池上限；`None` 时 BPS 请求只受账号总并发约束。
+    pub bps_concurrency_limit: Option<AccountConcurrencyLimit>,
     pub email: Option<String>,
     pub upstream_user_id: Option<String>,
     pub upstream_account_id: Option<String>,
@@ -188,6 +192,7 @@ pub struct NewProviderAccount {
     pub next_refresh_at: Option<DateTime<Utc>>,
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
+    pub bps_concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub credential_state: CredentialState,
@@ -332,6 +337,10 @@ pub struct BatchUpdateProviderAccountsAdmin {
     pub group_ids: Option<Vec<AccountGroupId>>,
     /// `None` 不修改；`Some("")` 清除覆盖。
     pub turn_state_override: Option<String>,
+    /// `None` 不修改。
+    pub basispoints_enabled: Option<bool>,
+    /// `None` 不修改；`Some(None)` 清除 BPS 子池上限。
+    pub bps_concurrency_limit: Option<Option<AccountConcurrencyLimit>>,
     pub audit: AdminAuditEvent,
 }
 
@@ -398,7 +407,7 @@ pub(crate) const ACCOUNT_SELECT: &str = "select location_country, location_regio
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
-            credential_observed_at, quota_observed_at, created_at, updated_at, turn_state_override
+            credential_observed_at, quota_observed_at, created_at, updated_at, turn_state_override, basispoints_enabled, bps_concurrency_limit
      from provider_accounts
      left join (select id as location_proxy_id, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
        on outbound_proxy_id = location_proxy_id
@@ -409,7 +418,7 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select location_country, locatio
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
-            credential_observed_at, quota_observed_at, created_at, updated_at, turn_state_override
+            credential_observed_at, quota_observed_at, created_at, updated_at, turn_state_override, basispoints_enabled, bps_concurrency_limit
      from provider_accounts
      left join (select id as location_proxy_id, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
        on outbound_proxy_id = location_proxy_id
@@ -421,7 +430,7 @@ pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select location_country, loc
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
-            credential_observed_at, quota_observed_at, created_at, updated_at, turn_state_override
+            credential_observed_at, quota_observed_at, created_at, updated_at, turn_state_override, basispoints_enabled, bps_concurrency_limit
      from provider_accounts
      left join (select id as location_proxy_id, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
        on outbound_proxy_id = location_proxy_id
@@ -497,6 +506,8 @@ pub(crate) fn core_account_from_summary(
     .with_outbound_proxy(summary.outbound_proxy)
     .with_request_location(summary.request_location)
     .with_turn_state_override(summary.turn_state_override)
+    .with_basispoints_enabled(summary.basispoints_enabled)
+    .with_bps_concurrency_limit(summary.bps_concurrency_limit)
     .with_refresh_schedule(
         summary.has_refresh_token,
         summary.next_refresh_at.map(Into::into),
@@ -550,6 +561,14 @@ pub(crate) fn account_summary_from_row(
                 .ok_or_else(|| invalid("invalid concurrency_limit"))
         })
         .transpose()?;
+    let bps_concurrency_limit = get::<Option<i64>>(&row, "bps_concurrency_limit")?
+        .map(|value| {
+            u32::try_from(value)
+                .ok()
+                .and_then(AccountConcurrencyLimit::new)
+                .ok_or_else(|| invalid("invalid bps_concurrency_limit"))
+        })
+        .transpose()?;
     let weight = u16::try_from(get::<i16>(&row, "weight")?)
         .ok()
         .and_then(AccountWeight::new)
@@ -567,6 +586,8 @@ pub(crate) fn account_summary_from_row(
         name: get(&row, "name")?,
         notes: get(&row, "notes")?,
         turn_state_override: get(&row, "turn_state_override")?,
+        basispoints_enabled: get(&row, "basispoints_enabled")?,
+        bps_concurrency_limit,
         email: get(&row, "email")?,
         upstream_user_id: get(&row, "upstream_user_id")?,
         upstream_account_id: get(&row, "upstream_account_id")?,

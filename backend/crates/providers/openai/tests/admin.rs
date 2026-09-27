@@ -1386,6 +1386,8 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
     AccountRecord {
         notes: None,
         turn_state_override: None,
+        basispoints_enabled: false,
+        bps_concurrency_limit: None,
         model_access: Default::default(),
         outbound_proxy: None,
         id: account.id().to_string(),
@@ -2097,6 +2099,7 @@ mod errors {
             _: &'a ClientApiKeyId,
             _: &'a ProviderKind,
             _: &'a [ProviderAccountId],
+            _: &'a [gateway_core::routing::UpstreamChannel],
         ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
             panic!("manual refresh does not use scheduling leases")
         }

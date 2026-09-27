@@ -14,7 +14,7 @@ use crate::account::{
 };
 use crate::identity::ProviderKind;
 use crate::policy::ClientApiKeyId;
-use crate::routing::UpstreamModelId;
+use crate::routing::{UpstreamChannel, UpstreamModelId};
 use crate::validation::{IdentifierError, validate_text};
 
 const MAX_PENDING_FLOW_TTL: Duration = Duration::from_secs(30 * 60);
@@ -86,6 +86,8 @@ pub struct ProviderSchedulingLeaseRequest {
     max_concurrent: NonZeroU32,
     request_interval: Duration,
     deadline: SystemTime,
+    upstream_channel: UpstreamChannel,
+    channel_max_concurrent: Option<NonZeroU32>,
 }
 
 impl ProviderSchedulingLeaseRequest {
@@ -105,7 +107,21 @@ impl ProviderSchedulingLeaseRequest {
             max_concurrent,
             request_interval,
             deadline,
+            upstream_channel: UpstreamChannel::Default,
+            channel_max_concurrent: None,
         }
+    }
+
+    /// 为非默认通道挂接账号内子池上限；`None` 时只走账号总槽。
+    #[must_use]
+    pub const fn with_channel_limit(
+        mut self,
+        channel: UpstreamChannel,
+        channel_max_concurrent: Option<NonZeroU32>,
+    ) -> Self {
+        self.upstream_channel = channel;
+        self.channel_max_concurrent = channel_max_concurrent;
+        self
     }
 
     #[must_use]
@@ -136,6 +152,17 @@ impl ProviderSchedulingLeaseRequest {
     #[must_use]
     pub const fn deadline(&self) -> SystemTime {
         self.deadline
+    }
+
+    #[must_use]
+    pub const fn upstream_channel(&self) -> UpstreamChannel {
+        self.upstream_channel
+    }
+
+    /// 非默认通道在账号内的独立并发上限；只对 `upstream_channel` 生效。
+    #[must_use]
+    pub const fn channel_max_concurrent(&self) -> Option<NonZeroU32> {
+        self.channel_max_concurrent
     }
 }
 
@@ -170,11 +197,14 @@ pub enum ProviderLeaseRequest {
 }
 
 pub trait ProviderLeasePort: Send + Sync {
+    /// `signal_channels` 声明本次选择需要读取的非默认通道子池信号；
+    /// 空切片时存储可以跳过通道桶读取。
     fn load_state<'a>(
         &'a self,
         client_api_key_id: &'a ClientApiKeyId,
         provider_kind: &'a ProviderKind,
         accounts: &'a [ProviderAccountId],
+        signal_channels: &'a [UpstreamChannel],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>>;
 
     fn try_acquire(
