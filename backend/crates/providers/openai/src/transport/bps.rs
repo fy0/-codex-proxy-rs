@@ -138,10 +138,11 @@ fn iter_tool_specs<'a>(tools: &'a Value, namespace: &str, out: &mut Vec<ToolSpec
                 tool_type,
                 spec: tool,
             });
-        } else if tool_type == "namespace" && !name.is_empty() {
-            if let Some(nested) = tool.get("tools") {
-                iter_tool_specs(nested, name, out);
-            }
+        } else if tool_type == "namespace"
+            && !name.is_empty()
+            && let Some(nested) = tool.get("tools")
+        {
+            iter_tool_specs(nested, name, out);
         }
     }
 }
@@ -167,8 +168,6 @@ fn tool_sources(source: &Map<String, Value>) -> Vec<&Value> {
 }
 
 struct ClientToolSpecs<'a> {
-    /// 以目录全名索引。
-    by_key: HashMap<String, ToolSpec<'a>>,
     /// 同时以全名与裸名索引（首个声明优先，等价 setdefault）。
     by_name: HashMap<String, ToolSpec<'a>>,
 }
@@ -176,32 +175,21 @@ struct ClientToolSpecs<'a> {
 /// `tool_choice == "none"` 时目录为空；其它取值不做过滤（参考实现把
 /// allowed_tools/指定工具的约束交给目录文案与上游，不做结构化裁剪）。
 fn client_tool_specs(source: &Map<String, Value>) -> ClientToolSpecs<'_> {
-    let empty = || ClientToolSpecs {
-        by_key: HashMap::new(),
-        by_name: HashMap::new(),
-    };
-    if string_value(source.get("tool_choice").unwrap_or(&Value::Null)).eq_ignore_ascii_case("none")
+    let mut by_name: HashMap<String, ToolSpec> = HashMap::new();
+    if !string_value(source.get("tool_choice").unwrap_or(&Value::Null)).eq_ignore_ascii_case("none")
     {
-        return empty();
-    }
-    let mut by_key: HashMap<String, ToolSpec> = HashMap::new();
-    for tools in tool_sources(source) {
-        let mut specs = Vec::new();
-        iter_tool_specs(tools, "", &mut specs);
-        for spec in specs {
-            by_key.entry(spec.key.clone()).or_insert(spec);
+        for tools in tool_sources(source) {
+            let mut specs = Vec::new();
+            iter_tool_specs(tools, "", &mut specs);
+            for spec in specs {
+                by_name
+                    .entry(spec.key.clone())
+                    .or_insert_with(|| spec.clone());
+                by_name.entry(spec.name.clone()).or_insert(spec);
+            }
         }
     }
-    let mut by_name: HashMap<String, ToolSpec> = HashMap::new();
-    for spec in by_key.values() {
-        by_name
-            .entry(spec.key.clone())
-            .or_insert_with(|| (*spec).clone());
-        by_name
-            .entry(spec.name.clone())
-            .or_insert_with(|| (*spec).clone());
-    }
-    ClientToolSpecs { by_key, by_name }
+    ClientToolSpecs { by_name }
 }
 
 impl Clone for ToolSpec<'_> {
