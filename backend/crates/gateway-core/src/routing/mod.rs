@@ -8,6 +8,7 @@ pub use crate::account::scope::{
     FrozenAccountScope, RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory,
 };
 pub use crate::identity::ProviderKind;
+pub use crate::upstream::UpstreamChannel;
 pub use catalog::{
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
     ProviderModelCapabilities, ProviderModelContent, ProviderModelDescriptor,
@@ -500,44 +501,6 @@ pub struct RoutingContext {
     /// 管理端 connection test 显式限制的 Provider；普通请求留空。
     pub required_provider: Option<ProviderKind>,
     pub blocked_providers: BTreeSet<ProviderKind>,
-}
-
-/// 模型级上行通道。
-///
-/// 普通映射只改上游模型名；专用通道同时决定目标端点与协议翻译，必须由设置
-/// 显式指定的公开模型名命中，不能从解析后的上游模型名反推。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum UpstreamChannel {
-    /// Provider 默认传输。
-    #[default]
-    Default,
-    /// Basis Points（bps.openai.com）白名单 schema 通道。
-    BasisPoints,
-}
-
-impl UpstreamChannel {
-    #[must_use]
-    pub const fn is_default(self) -> bool {
-        matches!(self, Self::Default)
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::BasisPoints => "basispoints",
-        }
-    }
-
-    /// `as_str` 的逆映射；存储层把通道名编入资源键时需要它还原。
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "default" => Some(Self::Default),
-            "basispoints" => Some(Self::BasisPoints),
-            _ => None,
-        }
-    }
 }
 
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::concurrency::ConcurrencyQueuePolicy;
 use crate::identity::ProviderKind;
-use crate::routing::UpstreamChannel;
+use crate::upstream::UpstreamChannel;
 
 use super::{AccountStatus, ProviderAccount, ProviderAccountId};
 
