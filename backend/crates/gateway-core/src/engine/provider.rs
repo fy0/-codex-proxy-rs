@@ -490,6 +490,11 @@ pub trait Provider: Send + Sync {
         true
     }
 
+    /// Provider 是否实现指定上行通道；默认实现只接受默认传输。
+    fn supports_upstream_channel(&self, channel: crate::routing::UpstreamChannel) -> bool {
+        channel.is_default()
+    }
+
     /// 解释 Provider 差异化观测字段；不参与路由和传输。
     fn request_observation(
         &self,
@@ -661,6 +666,16 @@ impl ProviderCatalogPort for ProviderRegistry {
         self.providers
             .get(provider)
             .is_none_or(|provider| provider.model_catalog_is_exhaustive())
+    }
+
+    fn supports_upstream_channel(
+        &self,
+        provider: &ProviderKind,
+        channel: crate::routing::UpstreamChannel,
+    ) -> bool {
+        self.providers
+            .get(provider)
+            .is_some_and(|provider| provider.supports_upstream_channel(channel))
     }
 
     fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {

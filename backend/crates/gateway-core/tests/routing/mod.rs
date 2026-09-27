@@ -14,7 +14,7 @@ use gateway_core::routing::{
     AccountGroupId, AccountRoutingScopeKind, ClientRoutingScope, ConfigRevision,
     FrozenAccountScope, ModelCapabilities, ProviderKind, ProviderModel, PublicModelId,
     RoutingContext, RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory, RuntimeSnapshot,
-    UpstreamModelId,
+    UpstreamChannel, UpstreamModelId,
 };
 
 mod snapshot;
@@ -653,6 +653,115 @@ fn alias_should_only_be_available_from_a_provider_with_its_mapped_model() {
             &ProviderKind::new("xai").expect("provider"),
         )
     );
+}
+
+/// BPS 别名只在声明通道支持的 Provider 上产出候选，且通道冻结在候选上；
+/// 测试目录中 BPS 上游模型必须可见，否则按完整目录语义过滤。
+#[test]
+fn bps_alias_should_freeze_the_basispoints_channel_on_supporting_providers() {
+    let openai = ProviderKind::new("openai").expect("provider");
+    let snapshot = snapshot()
+        .with_model_mappings(BTreeMap::new())
+        .with_bps_model_mappings(
+            BTreeMap::from([("gpt-6-astra-bps".to_owned(), "gpt-5.5".to_owned())]),
+            BTreeSet::from([openai.clone()]),
+        );
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("gpt-6-astra-bps").expect("model"),
+            &operation(),
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+        )
+        .expect("bps alias routes to the supporting provider");
+
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(plan.candidates()[0].provider(), &openai);
+    assert_eq!(
+        plan.candidates()[0].upstream_channel(),
+        UpstreamChannel::BasisPoints
+    );
+    assert_eq!(
+        plan.candidates()[0]
+            .upstream_model()
+            .expect("model route candidate")
+            .as_str(),
+        "gpt-5.5"
+    );
+}
+
+/// BPS 别名按请求名精确命中；映射到同一上游模型的普通别名仍是默认通道，
+/// 不会被反推成 Basis Points。
+#[test]
+fn ordinary_mapping_to_a_bps_upstream_should_keep_the_default_channel() {
+    let openai = ProviderKind::new("openai").expect("provider");
+    let snapshot = snapshot()
+        .with_model_mappings(BTreeMap::from([(
+            "gpt-5.6-sol".to_owned(),
+            "gpt-5.5".to_owned(),
+        )]))
+        .with_bps_model_mappings(
+            BTreeMap::from([("gpt-6-astra-bps".to_owned(), "gpt-5.5".to_owned())]),
+            BTreeSet::from([openai.clone()]),
+        );
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("gpt-5.6-sol").expect("model"),
+            &operation(),
+            snapshot.all_account_scope(),
+            &RoutingContext {
+                required_provider: Some(openai),
+                ..RoutingContext::default()
+            },
+        )
+        .expect("ordinary alias stays on the default channel");
+
+    assert_eq!(
+        plan.candidates()[0].upstream_channel(),
+        UpstreamChannel::Default
+    );
+    assert_eq!(
+        plan.candidates()[0]
+            .upstream_model()
+            .expect("model route candidate")
+            .as_str(),
+        "gpt-5.5"
+    );
+}
+
+/// 未声明 BPS 支持的 Provider 不产出该别名的候选；别名只发布给支持通道的
+/// Provider，对其它 Provider 按模型不存在处理而不是静默降级到默认通道。
+#[test]
+fn bps_alias_should_not_fall_back_to_unsupported_providers() {
+    let openai = ProviderKind::new("openai").expect("provider");
+    let xai = ProviderKind::new("xai").expect("provider");
+    let snapshot = snapshot().with_bps_model_mappings(
+        BTreeMap::from([("gpt-6-astra-bps".to_owned(), "grok-4.5".to_owned())]),
+        BTreeSet::from([openai]),
+    );
+    let error = snapshot
+        .plan(
+            &PublicModelId::new("gpt-6-astra-bps").expect("model"),
+            &operation(),
+            snapshot.all_account_scope(),
+            &RoutingContext {
+                required_provider: Some(xai.clone()),
+                ..RoutingContext::default()
+            },
+        )
+        .expect_err("xAI does not implement the Basis Points channel");
+
+    assert!(matches!(
+        error,
+        gateway_core::error::RoutingError::ModelNotFound { .. }
+    ));
+    // BPS 别名只对支持通道的 Provider 出现在公开模型清单中。
+    let models = snapshot
+        .public_models_for_provider(&xai)
+        .iter()
+        .map(PublicModelId::as_str)
+        .collect::<BTreeSet<_>>();
+    assert!(!models.contains("gpt-6-astra-bps"));
 }
 
 #[test]

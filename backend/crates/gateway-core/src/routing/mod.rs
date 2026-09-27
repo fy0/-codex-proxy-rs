@@ -502,11 +502,40 @@ pub struct RoutingContext {
     pub blocked_providers: BTreeSet<ProviderKind>,
 }
 
+/// 模型级上行通道。
+///
+/// 普通映射只改上游模型名；专用通道同时决定目标端点与协议翻译，必须由设置
+/// 显式指定的公开模型名命中，不能从解析后的上游模型名反推。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UpstreamChannel {
+    /// Provider 默认传输。
+    #[default]
+    Default,
+    /// Basis Points（bps.openai.com）白名单 schema 通道。
+    BasisPoints,
+}
+
+impl UpstreamChannel {
+    #[must_use]
+    pub const fn is_default(self) -> bool {
+        matches!(self, Self::Default)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::BasisPoints => "basispoints",
+        }
+    }
+}
+
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
+    upstream_channel: UpstreamChannel,
     emulated_features: BTreeSet<Feature>,
     account_scope: Arc<FrozenAccountScope>,
 }
@@ -520,6 +549,12 @@ impl ProviderCandidate {
     #[must_use]
     pub const fn upstream_model(&self) -> Option<&UpstreamModelId> {
         self.upstream_model.as_ref()
+    }
+
+    /// 返回冻结的上行通道；Provider 据此决定是否替换端点与协议翻译。
+    #[must_use]
+    pub const fn upstream_channel(&self) -> UpstreamChannel {
+        self.upstream_channel
     }
 
     #[must_use]

@@ -54,6 +54,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     .responses_max_decompressed_body_bytes,
                 rotation_strategy: command.rotation_strategy.as_str().to_owned(),
                 model_mappings: store_model_mappings(command.model_mappings),
+                bps_model_mappings: store_model_mappings(command.bps_model_mappings),
                 min_codex_desktop_version: command.min_codex_desktop_version,
                 min_codex_cli_version: command.min_codex_cli_version,
                 usage_retention_days: command.usage_retention_days,
@@ -78,6 +79,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     "request_location_enabled".to_owned(),
                     "request_location_json".to_owned(),
                     "model_mappings_json".to_owned(),
+                    "bps_model_mappings_json".to_owned(),
                     "refresh_margin_seconds".to_owned(),
                     "refresh_concurrency".to_owned(),
                     "max_concurrent_per_account".to_owned(),
@@ -162,33 +164,15 @@ pub(crate) fn admin_runtime_settings(
                 "rotation strategy is invalid",
             )
         })?;
-    let model_mappings = settings
-        .model_mappings
-        .into_iter()
-        .map(|(public, upstream)| {
-            let public = gateway_core::routing::PublicModelId::new(public).map_err(|_| {
-                AdminStoreError::new(
-                    AdminStoreErrorKind::Invalid,
-                    "runtime settings",
-                    "public model mapping is invalid",
-                )
-            })?;
-            let upstream = gateway_core::routing::UpstreamModelId::new(upstream).map_err(|_| {
-                AdminStoreError::new(
-                    AdminStoreErrorKind::Invalid,
-                    "runtime settings",
-                    "upstream model mapping is invalid",
-                )
-            })?;
-            Ok((public, upstream))
-        })
-        .collect::<AdminStoreResult<ModelMappings>>()?;
+    let model_mappings = admin_model_mappings(settings.model_mappings)?;
+    let bps_model_mappings = admin_model_mappings(settings.bps_model_mappings)?;
     Ok(AdminRuntimeSettings {
         config_revision: admin_revision(settings.config_revision)?,
         disable_fast: settings.disable_fast,
         request_location_enabled: settings.request_location_enabled,
         request_location: settings.request_location,
         model_mappings,
+        bps_model_mappings,
         refresh_margin_seconds: settings.refresh_margin_seconds,
         refresh_concurrency: settings.refresh_concurrency,
         max_concurrent_per_account: settings.max_concurrent_per_account,
@@ -212,6 +196,31 @@ pub(crate) fn admin_runtime_settings(
         account_auto_freeze_adaptive_concurrency: settings.account_auto_freeze_adaptive_concurrency,
         updated_at: settings.updated_at,
     })
+}
+
+fn admin_model_mappings(
+    mappings: std::collections::BTreeMap<String, String>,
+) -> AdminStoreResult<ModelMappings> {
+    mappings
+        .into_iter()
+        .map(|(public, upstream)| {
+            let public = gateway_core::routing::PublicModelId::new(public).map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Invalid,
+                    "runtime settings",
+                    "public model mapping is invalid",
+                )
+            })?;
+            let upstream = gateway_core::routing::UpstreamModelId::new(upstream).map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Invalid,
+                    "runtime settings",
+                    "upstream model mapping is invalid",
+                )
+            })?;
+            Ok((public, upstream))
+        })
+        .collect()
 }
 
 pub(crate) fn store_model_mappings(

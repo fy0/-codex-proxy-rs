@@ -19,6 +19,7 @@ export function useSettingsForm() {
   const saving = saveAction.loading
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
+  const bpsMappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const savedRequestLocation = shallowRef<RequestLocation>()
   const form = reactive({
     disableFast: false,
@@ -53,6 +54,7 @@ export function useSettingsForm() {
     return {
       form: { ...form, requestLocation: { ...form.requestLocation } },
       mappings: mappings.value.map(row => ({ ...row })),
+      bpsMappings: bpsMappings.value.map(row => ({ ...row })),
     }
   }
 
@@ -65,6 +67,7 @@ export function useSettingsForm() {
       return
     Object.assign(form, saved.value.form, { requestLocation: { ...saved.value.form.requestLocation } })
     mappings.value = saved.value.mappings.map(row => ({ ...row }))
+    bpsMappings.value = saved.value.bpsMappings.map(row => ({ ...row }))
   }
 
   function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'concurrencyWaitTimeoutSeconds' | 'responsesMaxDecompressedBodyMiB' | 'accountAutoFreezeThreshold' | 'accountAutoFreezeWindowSeconds' | 'accountAutoFreezeDurationSeconds') {
@@ -132,6 +135,10 @@ export function useSettingsForm() {
       requestedModel,
       upstreamModel: String(upstreamModel),
     }))
+    bpsMappings.value = Object.entries(data.bpsModelMappings || {}).map(([requestedModel, upstreamModel]) => ({
+      requestedModel,
+      upstreamModel: String(upstreamModel),
+    }))
     saved.value = snapshot()
   }
 
@@ -167,9 +174,27 @@ export function useSettingsForm() {
     mappings.value = rows
   }
 
-  function mappingPayload() {
+  function addBpsMapping() {
+    bpsMappings.value = [...bpsMappings.value, { requestedModel: '', upstreamModel: '' }]
+  }
+
+  function updateBpsMapping(index: number, key: 'requestedModel' | 'upstreamModel', value: string) {
+    const rows = [...bpsMappings.value]
+    if (!rows[index])
+      return
+    rows[index] = { ...rows[index], [key]: value }
+    bpsMappings.value = rows
+  }
+
+  function removeBpsMapping(index: number) {
+    const rows = [...bpsMappings.value]
+    rows.splice(index, 1)
+    bpsMappings.value = rows
+  }
+
+  function rowsPayload(rows: Array<{ requestedModel: string, upstreamModel: string }>) {
     const entries: Record<string, string> = {}
-    for (const row of mappings.value) {
+    for (const row of rows) {
       const requested = row.requestedModel.trim()
       const upstream = row.upstreamModel.trim()
       if (!requested || !upstream)
@@ -232,7 +257,8 @@ export function useSettingsForm() {
         disableFast: form.disableFast,
         requestLocationEnabled: form.requestLocationEnabled,
         requestLocation,
-        modelMappings: mappingPayload(),
+        modelMappings: rowsPayload(mappings.value),
+        bpsModelMappings: rowsPayload(bpsMappings.value),
         refreshMarginSeconds,
         refreshConcurrency,
         maxConcurrentPerAccount,
@@ -276,6 +302,10 @@ export function useSettingsForm() {
     addMapping,
     updateMapping,
     removeMapping,
+    bpsMappings,
+    addBpsMapping,
+    updateBpsMapping,
+    removeBpsMapping,
     refreshMarginSecondsValue,
     refreshConcurrencyValue,
     maxConcurrentPerAccountValue,

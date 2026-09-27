@@ -44,6 +44,10 @@ const {
   addMapping,
   updateMapping,
   removeMapping,
+  bpsMappings,
+  addBpsMapping,
+  updateBpsMapping,
+  removeBpsMapping,
   refreshMarginSecondsValue,
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
@@ -175,6 +179,15 @@ onMounted(() => {
           @add-mapping="addMapping"
           @update-mapping="updateMapping"
           @remove-mapping="removeMapping"
+        />
+        <ModelAliasesCard
+          title="Basis Points 模型别名"
+          description="仅列出的请求模型走 Basis Points 通道（需账号开启 Basis Points），映射值为 BPS 上游模型"
+          :mappings="bpsMappings"
+          :loading="loading"
+          @add-mapping="addBpsMapping"
+          @update-mapping="updateBpsMapping"
+          @remove-mapping="removeBpsMapping"
         />
         <RotationStrategyCard v-model="form.rotationStrategy" :options="rotationOptions" />
       </fieldset>

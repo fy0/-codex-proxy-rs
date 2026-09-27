@@ -33,6 +33,7 @@ pub struct SnapshotRuntimeSettings {
     pub responses_max_decompressed_body_bytes: u64,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
+    pub bps_model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
 }
@@ -169,7 +170,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.max_waiting_per_key,
                 data.settings.max_waiting_per_account,
                 data.settings.concurrency_wait_timeout_seconds,
-            );
+            )
+            .with_bps_model_mappings(data.settings.bps_model_mappings);
             let client_policies = data
                 .client_api_keys
                 .into_iter()
@@ -261,12 +263,13 @@ async fn load_settings(
             bool,
             i64,
             bool,
+            sqlx::types::Json<BTreeMap<String, String>>,
         ),
     >(
         "select config_revision, refresh_margin_seconds, refresh_concurrency,
                 max_concurrent_per_account, request_interval_ms, rotation_strategy,
                 model_mappings_json, min_codex_desktop_version,
-                min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, request_location_json, request_location_enabled, responses_max_decompressed_body_bytes, disable_fast
+                min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, request_location_json, request_location_enabled, responses_max_decompressed_body_bytes, disable_fast, bps_model_mappings_json
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -289,6 +292,7 @@ async fn load_settings(
             request_interval_ms: to_u64(row.4)?,
             rotation_strategy: row.5,
             model_mappings: row.6.0,
+            bps_model_mappings: row.16.0,
             min_codex_desktop_version: row.7,
             min_codex_cli_version: row.8,
             max_waiting_per_key: to_u32(row.9)?,

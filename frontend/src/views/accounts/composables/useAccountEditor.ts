@@ -21,6 +21,7 @@ export function useAccountEditor(options: {
   const editingAccountId = shallowRef<string | null>(null)
   const notes = shallowRef('')
   const turnStateOverride = shallowRef('')
+  const basispointsEnabled = shallowRef(false)
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
@@ -68,6 +69,7 @@ export function useAccountEditor(options: {
     editingAccountId.value = account.id
     notes.value = account.notes ?? ''
     turnStateOverride.value = account.turnStateOverride ?? ''
+    basispointsEnabled.value = account.basispointsEnabled
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
@@ -113,10 +115,13 @@ export function useAccountEditor(options: {
     }
 
     await saveAction.run(async () => {
+      const isBasispointsAccount = editingAccount.value?.provider === 'openai'
+        && editingAccount.value?.authenticationKind === 'oauth'
       const settings = {
         accountId,
         notes: notes.value,
         turnStateOverride: turnStateOverride.value.trim(),
+        basispointsEnabled: isBasispointsAccount ? basispointsEnabled.value : undefined,
         outboundProxyId: proxyMode.value === 'preserve' ? undefined : proxyMode.value === 'direct' ? '' : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
@@ -151,6 +156,7 @@ export function useAccountEditor(options: {
     editingAccountId.value = null
     notes.value = ''
     turnStateOverride.value = ''
+    basispointsEnabled.value = false
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = true
@@ -168,6 +174,7 @@ export function useAccountEditor(options: {
     editingAccount,
     notes,
     turnStateOverride,
+    basispointsEnabled,
     schedulingEnabled,
     concurrencyLimit,
     weight,

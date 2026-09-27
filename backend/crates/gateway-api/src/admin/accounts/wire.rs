@@ -148,6 +148,7 @@ impl BatchUpdateAccountsRequest {
                 .map(validate_wire_group_ids)
                 .transpose()?,
             turn_state_override: None,
+            basispoints_enabled: None,
         })
     }
 }
@@ -273,6 +274,8 @@ pub struct AccountView {
     pub notes: Option<String>,
     /// 管理员配置的 x-codex-turn-state 强制覆盖；`null` 表示不覆盖。
     pub turn_state_override: Option<String>,
+    /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
+    pub basispoints_enabled: bool,
     pub provider: String,
     pub groups: Vec<AccountGroupRefView>,
     pub resource_ref: String,

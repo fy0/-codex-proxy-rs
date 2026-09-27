@@ -65,6 +65,7 @@ async fn settings_should_reject_zero_refresh_margin_before_store_call() {
                 request_location_enabled: false,
                 request_location: Default::default(),
                 model_mappings: Default::default(),
+                bps_model_mappings: Default::default(),
                 refresh_margin_seconds: 0,
                 refresh_concurrency: 1,
                 max_concurrent_per_account: 1,

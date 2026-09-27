@@ -758,6 +758,7 @@ impl SettingsStore for FixtureSettingsStore {
             request_location: Default::default(),
             config_revision: Revision::new(1).expect("revision"),
             model_mappings: Default::default(),
+            bps_model_mappings: Default::default(),
             refresh_margin_seconds: 300,
             refresh_concurrency: 2,
             max_concurrent_per_account: 1,

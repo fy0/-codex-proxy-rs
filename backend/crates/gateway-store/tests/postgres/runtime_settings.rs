@@ -26,6 +26,10 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
             ("gpt-5.4".to_owned(), "gpt-5.5".to_owned()),
             ("grok-latest".to_owned(), "grok-4.5".to_owned()),
         ]),
+        bps_model_mappings: BTreeMap::from([(
+            "gpt-6-astra-bps".to_owned(),
+            "gpt-6-astra".to_owned(),
+        )]),
         min_codex_desktop_version: None,
         min_codex_cli_version: None,
         usage_retention_days: 31,

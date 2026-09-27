@@ -22,6 +22,8 @@ pub struct RuntimeSettings {
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub model_mappings: ModelMappings,
+    /// Basis Points 别名映射：仅列出的公开模型名走 BPS 通道，值是 BPS 上游模型。
+    pub bps_model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
@@ -53,6 +55,8 @@ pub struct ReplaceRuntimeSettings {
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub model_mappings: ModelMappings,
+    /// Basis Points 别名映射：仅列出的公开模型名走 BPS 通道，值是 BPS 上游模型。
+    pub bps_model_mappings: ModelMappings,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,

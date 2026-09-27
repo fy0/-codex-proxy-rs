@@ -101,6 +101,8 @@ pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
 
 struct CredentialSelectionInput<'a> {
     requires_websocket: bool,
+    /// BPS 通道只接受管理员显式开启 Basis Points 的 OAuth 账号。
+    requires_basispoints: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -294,6 +296,7 @@ impl CodexCredentialSelector {
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket: false,
+            requires_basispoints: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -309,9 +312,11 @@ impl CodexCredentialSelector {
         cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         session_affinity_observation: Option<&CodexSessionAffinity>,
         requires_websocket: bool,
+        requires_basispoints: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket,
+            requires_basispoints,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -335,6 +340,7 @@ impl CodexCredentialSelector {
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket: false,
+            requires_basispoints: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -407,6 +413,14 @@ impl CodexCredentialSelector {
                     {
                         continue;
                     }
+                }
+                // BPS 把 OAuth Bearer 发给 bps.openai.com，必须同时满足管理员
+                // 在该账号上显式开启 Basis Points；API key 凭据结构上不可用。
+                if request.requires_basispoints
+                    && (!account.basispoints_enabled()
+                        || account.authentication_kind() != super::CODEX_AUTHENTICATION_KIND_OAUTH)
+                {
+                    continue;
                 }
                 eligible.push(account);
             }

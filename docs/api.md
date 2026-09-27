@@ -364,7 +364,7 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 更新指定 OpenAI 账号的 OAuth token 或 API Key 上游设置 |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, turnStateOverride?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, turnStateOverride?, basispointsEnabled?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号备注、调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
 | `POST` | `/api/admin/accounts/turn-state-override` | `{ accountId, turnStateOverride }` | 单独设置账号级 `x-codex-turn-state` 强制覆盖；`null` 或空白串清除，非空值须为合法 HTTP header 值（≤1024 字节）。非空时优先于桶内自动 state，清空后恢复桶内票，不解除缺票暂停 |
 | `GET` | `/api/admin/accounts/turn-state` | 可选 `accountId` | 按账号、上游模型返回轮换配置、令牌元数据、观测和安装历史，不返回令牌正文 |
 | `POST` | `/api/admin/accounts/turn-state/configure` | `{ accountId, model, config }` | 配置 OpenAI OAuth 账号的一个模型桶，返回账号 ID 与配置版本 |
@@ -1017,6 +1017,7 @@ disableFast
 requestLocationEnabled
 requestLocation
 modelMappings
+bpsModelMappings
 refreshMarginSeconds
 refreshConcurrency
 maxConcurrentPerAccount
@@ -1054,6 +1055,12 @@ HTTP 请求头及新建 WS 的握手提示按当时的最终出站档位构造�
 字段约束与[代理位置](#独立代理管理--managed-proxies)一致。全局自定义开启后，OpenAI Responses 使用全局位置，
 关联代理配置了自定义位置时优先使用代理值。保存后通过现有配置发布机制对新请求生效，
 已开始请求及其重试保持同一份全局值；普通文本、绝对时间戳和数据驻留要求不受影响。
+
+`bpsModelMappings` 是 Basis Points 专用别名映射，键为公开模型名、值为 BPS 上游模型；仅在请求名精确命中时
+把该请求改道 `bps.openai.com` 的 Basis Points 通道（Excel 客户端画像、白名单 schema、OAuth Bearer）。
+命中别名的请求不再串联普通 `modelMappings`，未列出的模型即使映射到同一上游也保持默认 Codex 通道。
+该通道要求账号开启 `basispointsEnabled` 且为 OAuth 认证的 OpenAI 账号；请求固定 `store=false`，
+不支持 `previous_response_id` 服务端续接（由客户端重放完整输入）。
 
 `maxWaitingPerKey` 与 `maxWaitingPerAccount` 是全局统一的排队容量，取值 0～1,000，默认 0（关闭）；
 每个 Key、每个账号各自独立计数，没有单对象覆盖字段。执行并发为 5、最大排队数为 5 时，
