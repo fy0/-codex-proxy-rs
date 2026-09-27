@@ -64,21 +64,31 @@ fn prepare_should_wrap_tools_into_the_transport_catalog() {
 }
 
 #[test]
-fn prepare_should_disable_the_catalog_when_tool_choice_is_none() {
+fn prepare_should_not_envelope_client_calls_when_tool_choice_is_none() {
     let request = source(json!({
-        "input": "hello",
+        "input": [{
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "exec_command",
+            "arguments": "{\"cmd\":\"pwd\"}",
+        }],
         "tool_choice": "none",
         "tools": [{"type": "function", "name": "exec_command"}],
     }));
     let body = prepare_request_body(&request, "gpt-6-astra");
 
     let input = body.get("input").and_then(Value::as_array).expect("input");
-    let catalog = input
+    // tool_choice == "none" 清空 allowed 集合：调用原样透传为 exec_command，
+    // 不封套成 run_officejs（目录文案仍列出工具，与参考实现一致）。
+    let call = input
         .iter()
-        .filter_map(|item| item.pointer("/content/0/text").and_then(Value::as_str))
-        .find(|text| text.contains("relayed"))
-        .expect("catalog message");
-    assert!(!catalog.contains("exec_command"));
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .and_then(Value::as_object)
+        .expect("function call");
+    assert_eq!(
+        call.get("name").and_then(Value::as_str),
+        Some("exec_command")
+    );
 }
 
 #[test]
