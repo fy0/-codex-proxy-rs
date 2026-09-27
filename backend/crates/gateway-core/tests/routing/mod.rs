@@ -730,7 +730,7 @@ fn ordinary_mapping_to_a_bps_upstream_should_keep_the_default_channel() {
 }
 
 /// 未声明 BPS 支持的 Provider 不产出该别名的候选；别名只发布给支持通道的
-/// Provider，对其它 Provider 按模型不存在处理而不是静默降级到默认通道。
+/// Provider，候选为空时报 NoCapableProvider 而不是静默降级到默认通道。
 #[test]
 fn bps_alias_should_not_fall_back_to_unsupported_providers() {
     let openai = ProviderKind::new("openai").expect("provider");
@@ -753,7 +753,7 @@ fn bps_alias_should_not_fall_back_to_unsupported_providers() {
 
     assert!(matches!(
         error,
-        gateway_core::error::RoutingError::ModelNotFound { .. }
+        gateway_core::error::RoutingError::NoCapableProvider { .. }
     ));
     // BPS 别名只对支持通道的 Provider 出现在公开模型清单中。
     let models = snapshot
