@@ -396,24 +396,31 @@ fn decoder_should_use_non_reasoning_preview_web_search_price() {
 }
 
 #[test]
-fn astra_decoder_should_use_reasoning_preview_web_search_price() {
-    let body = concat!(
-        "event: response.created\n",
-        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_preview_search_cost\",\"model\":\"gpt-6-astra\"}}\n\n",
-        "event: response.completed\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_preview_search_cost\",\"model\":\"gpt-6-astra\",\"status\":\"completed\",\"output\":[{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\"}}],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n",
-    );
+fn gpt_6_decoders_should_use_reasoning_preview_web_search_price() {
     let tools = vec![json!({ "type": "web_search_preview" })];
-    let events = CodexCanonicalDecoder::new("gpt-6-astra")
-        .with_request_tool_pricing("gpt-6-astra", Some(&tools))
-        .push(body.as_bytes())
-        .expect("canonical preview web search response");
+    for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+        let body = format!(
+            concat!(
+                "event: response.created\n",
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_preview_search_cost\",\"model\":\"{model}\"}}}}\n\n",
+                "event: response.completed\n",
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_preview_search_cost\",\"model\":\"{model}\",\"status\":\"completed\",\"output\":[{{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{{\"type\":\"search\"}}}}],\"usage\":{{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}}}}\n\n",
+            ),
+        );
+        let events = CodexCanonicalDecoder::new(model)
+            .with_request_tool_pricing(model, Some(&tools))
+            .push(body.as_bytes())
+            .expect("canonical preview web search response");
 
-    assert!(canonical_facts(&events).into_iter().any(|event| matches!(
-        event,
-        GatewayEvent::CalculatedCost(cost)
-            if cost.total().amount().scaled() == 100_000_000
-    )));
+        assert!(
+            canonical_facts(&events).into_iter().any(|event| matches!(
+                event,
+                GatewayEvent::CalculatedCost(cost)
+                    if cost.total().amount().scaled() == 100_000_000
+            )),
+            "reasoning web search price missing for {model}"
+        );
+    }
 }
 
 #[test]

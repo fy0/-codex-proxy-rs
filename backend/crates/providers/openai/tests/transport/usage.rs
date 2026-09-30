@@ -77,6 +77,39 @@ fn astra_billing_should_preserve_components_across_tiers_and_context_boundary() 
 }
 
 #[test]
+fn sol_6_1_billing_should_preserve_components_across_tiers_and_context_boundary() {
+    // USD per million tokens, in order: input, cache read, cache write, output.
+    for (tier, input, expected, multiplier) in [
+        (None, 272_000, ["2", "0.1", "2.5", "10"], 100),
+        (None, 272_001, ["4", "0.2", "5", "15"], 100),
+        (Some("flex"), 272_000, ["1", "0.05", "1.25", "5"], 50),
+        (Some("flex"), 272_001, ["2", "0.1", "2.5", "7.5"], 50),
+        (Some("fast"), 272_000, ["4", "0.2", "5", "20"], 200),
+        (Some("priority"), 272_001, ["8", "0.4", "10", "30"], 200),
+    ] {
+        let breakdown =
+            openai_billing_breakdown("gpt-6.1-sol", billing_usage(input, 5, 20, 10), tier)
+                .expect("published GPT-6.1 Sol pricing");
+        let prices = [
+            breakdown.input_price_per_million(),
+            breakdown.cache_read_price_per_million(),
+            breakdown.cache_write_price_per_million(),
+            breakdown.output_price_per_million(),
+        ]
+        .map(|price| {
+            price
+                .amount()
+                .to_string()
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned()
+        });
+        assert_eq!(prices, expected, "tier={tier:?}, input={input}");
+        assert_eq!(breakdown.multiplier_percent(), multiplier);
+    }
+}
+
+#[test]
 fn billing_breakdown_should_preserve_input_output_and_cache_components() {
     let breakdown = openai_billing_breakdown("gpt-5.6-sol", billing_usage(100, 5, 20, 10), None)
         .expect("known model pricing");

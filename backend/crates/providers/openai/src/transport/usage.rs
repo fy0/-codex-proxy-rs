@@ -219,9 +219,9 @@ struct PricingRule {
     pricing: ModelPricing,
 }
 
-// 价格来源：https://developers.openai.com/api/docs/pricing，核验日期 2026-09-09。
-// 使用常规价，不采用 Sol 的临时 $4/$20 优惠；缓存、Flex、Fast 和长上下文
-// 档位也统一按常规价计算。
+// 价格来源：https://developers.openai.com/api/docs/pricing。
+// 只登记已核验的常规价格及服务档位；临时优惠不写入内置价目。
+// 原有规则于 2026-09-09 核验，GPT-6.1 Sol 于 2026-09-29 核验，其余新增型号见对应条目。
 // 已按 https://developers.openai.com/api/docs/deprecations 核验至 2026-09-13，
 // 移除已关闭的型号；仅宣布弃用但尚未到关闭日期的型号继续保留。
 const PRICING_RULES: &[PricingRule] = &[
@@ -236,6 +236,16 @@ const PRICING_RULES: &[PricingRule] = &[
             .with_long(200_000, 750_000, 20_000)
             .with_long_flex(100_000, 375_000, 10_000)
             .with_long_fast(400_000, 1_500_000, 40_000),
+    },
+    PricingRule {
+        model: "gpt-6.1-sol",
+        pricing: ModelPricing::new(20_000, 100_000, 1_000)
+            .with_cache_write(125)
+            .with_flex(10_000, 50_000, 500)
+            .with_fast(40_000, 200_000, 2_000)
+            .with_long(40_000, 150_000, 2_000)
+            .with_long_flex(20_000, 75_000, 1_000)
+            .with_long_fast(80_000, 300_000, 4_000),
     },
     PricingRule {
         model: "gpt-5.6-sol",
@@ -653,7 +663,7 @@ fn reasoning_model(model: &str) -> bool {
     let normalized = normalize_model_name(model);
     let model = pricing_model_name(&normalized);
     model.starts_with("gpt-5")
-        || model == "gpt-6-astra"
+        || matches!(model, "gpt-6-astra" | "gpt-6.1-sol")
         || model.starts_with("o1")
         || model.starts_with("o3")
         || model.starts_with("o4")
