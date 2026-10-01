@@ -553,6 +553,11 @@ async fn cloud_mint_case() {
             .mount(&mint)
             .await;
         cycle(&*task, &worker).await;
+        assert_eq!(
+            mint.received_requests().await.unwrap().len(),
+            1,
+            "每个拒绝用例都必须真实出站，避免缓存命中造成伪证"
+        );
         let last = store.turn_observations().last().unwrap().clone();
         assert_eq!(last.outcome, outcome);
         assert_eq!(last.source, "cloud_mint");
@@ -617,20 +622,27 @@ async fn cloud_mint_case() {
             .starts_with("Bearer ")
     );
     let bucket = store.turn_state_bucket(&id, MODEL).await.unwrap().unwrap();
-    let current = bucket.current.expect("cloud candidate installed");
+    let current = bucket.current.as_ref().expect("cloud candidate installed");
     assert_eq!(current.value.len(), 780);
     assert_eq!(
         bucket.current_expires_at,
         Some(issued + 240),
         "有效到期取签发+TTL 与远端死线的最小值"
     );
-    let pair = bucket.installed_pair.expect("installed pair");
+    let pair = bucket.installed_pair.as_ref().expect("installed pair");
     assert!(pair.has_pair());
     assert_eq!(pair.gateway_label(), "unified-185");
+    assert_eq!(pair.reported_model, MODEL);
+    assert!(
+        bucket.installed_token(Utc::now().timestamp()).is_some(),
+        "安装成功的票应按 live 实际可用"
+    );
     // 本地出口全程未收到请求。
     assert!(upstream.received_requests().await.unwrap().is_empty());
 
     // +30 秒内的未来签发偏差可通过 mint 验收；装的票按 mint 死线可用。
+    // 先重置桶，避免上一用例的已装票让本轮缓存命中、偏差响应根本没发出去。
+    store.seed_turn_state(ACCOUNT, MODEL, config.clone());
     mint.reset().await;
     let skewed = Utc::now().timestamp() + 25;
     let skewed_state = token_at(585, skewed);
@@ -641,7 +653,8 @@ async fn cloud_mint_case() {
                 .set_body_string(mint_body(
                     MODEL,
                     valid_ticket(&skewed_state, skewed),
-                    valid_cookies(&oailb("185", skewed, skewed + 3600)),
+                    // JWT iat 留在过去：pair 校验不接受未来签发，偏差只验票据本体。
+                    valid_cookies(&oailb("185", skewed - 30, skewed + 3600)),
                     json!(skewed + 3600),
                     json!("unified-185"),
                 )),
@@ -649,11 +662,13 @@ async fn cloud_mint_case() {
         .mount(&mint)
         .await;
     cycle(&*task, &worker).await;
+    let requests = mint.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "桶重置后偏差用例必须真实出站打票");
     let bucket = store.turn_state_bucket(&id, MODEL).await.unwrap().unwrap();
-    assert!(
-        bucket.installed_token(Utc::now().timestamp()).is_some(),
-        "30 秒内的签发偏差应通过 mint 验收并实际可用"
-    );
+    let token = bucket
+        .installed_token(Utc::now().timestamp())
+        .expect("30 秒内的签发偏差应通过 mint 验收并实际可用");
+    assert_eq!(token.issued_at, skewed, "安装的票应保留票据内嵌签发时刻");
 
     // 有效到期取签发+TTL、票据声明、顶层 pair 到期与 JWT exp 的最小值；
     // 逐一让其余三方成为最早死线。
@@ -693,6 +708,11 @@ async fn cloud_mint_case() {
             "最早死线 {expected_secs} 的票据应实际可安装"
         );
         assert_eq!(bucket.current_expires_at, Some(issued + expected_secs));
+        assert_eq!(
+            bucket.installed_pair.as_ref().unwrap().reported_model,
+            MODEL,
+            "绑定 pair 的声明模型应等于请求模型"
+        );
     }
 
     // 随机策略在可用端点中选一个：一次打票只落到一个端点。
