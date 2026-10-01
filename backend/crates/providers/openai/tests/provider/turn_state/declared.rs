@@ -143,8 +143,8 @@ async fn declared_model_installs_candidate_pair_and_short_circuits_cache() {
         .and(path("/codex/responses"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("set-cookie", "__cflb=declared-cflb; Path=/; HttpOnly")
-                .insert_header(
+                .append_header("set-cookie", "__cflb=declared-cflb; Path=/; HttpOnly")
+                .append_header(
                     "set-cookie",
                     format!(
                         "__oailb={}; Path=/; HttpOnly",
@@ -224,8 +224,8 @@ async fn declared_model_rejects_mismatch_missing_model_and_bad_created() {
                 ResponseTemplate::new(200)
                     // 报头模型与请求一致；验收只认首个 created 声明。
                     .insert_header("openai-model", MODEL)
-                    .insert_header("set-cookie", "__cflb=declared-cflb; Path=/")
-                    .insert_header(
+                    .append_header("set-cookie", "__cflb=declared-cflb; Path=/")
+                    .append_header(
                         "set-cookie",
                         format!("__oailb={}; Path=/", oailb("185", now, now + 3600)),
                     )
@@ -258,8 +258,8 @@ async fn declared_model_header_body_conflict_resolves_to_first_created() {
             ResponseTemplate::new(200)
                 // HTTP 报头谎称别的模型；created 声明与请求一致时照样验收。
                 .insert_header("openai-model", "gpt-decoy")
-                .insert_header("set-cookie", "__cflb=declared-cflb; Path=/")
-                .insert_header(
+                .append_header("set-cookie", "__cflb=declared-cflb; Path=/")
+                .append_header(
                     "set-cookie",
                     format!("__oailb={}; Path=/", oailb("185", now, now + 3600)),
                 )
@@ -310,7 +310,7 @@ async fn declared_model_requires_complete_pair_and_ignores_stale_oailb_expiry() 
         .and(path("/codex/responses"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header(
+                .append_header(
                     "set-cookie",
                     format!("__oailb={}; Path=/", oailb("185", now, now + 3600)),
                 )
@@ -333,8 +333,8 @@ async fn declared_model_requires_complete_pair_and_ignores_stale_oailb_expiry() 
         .and(path("/codex/responses"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("set-cookie", "__cflb=declared-cflb; Path=/; Max-Age=3600")
-                .insert_header(
+                .append_header("set-cookie", "__cflb=declared-cflb; Path=/; Max-Age=3600")
+                .append_header(
                     "set-cookie",
                     format!(
                         "__oailb={}; Path=/; Expires=Wed, 01 Jan 2020 00:00:00 GMT",
@@ -910,8 +910,8 @@ async fn cloud_endpoint_cooldown_falls_back_to_local_declared_probe() {
         .and(path("/codex/responses"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("set-cookie", "__cflb=fallback-cflb; Path=/")
-                .insert_header(
+                .append_header("set-cookie", "__cflb=fallback-cflb; Path=/")
+                .append_header(
                     "set-cookie",
                     format!("__oailb={}; Path=/", oailb("185", now, now + 3600)),
                 )
@@ -951,9 +951,11 @@ impl Respond for ProbeResponder {
         let now = Utc::now().timestamp();
         let mut response = ResponseTemplate::new(200);
         if self.cookies {
+            // wiremock 的 insert_header 会覆盖同名头，Set-Cookie 必须追加：
+            // __cflb 与 __oailb 要同时保留才能组成完整路由 pair。
             response = response
-                .insert_header("set-cookie", "__cflb=declared-cflb; Path=/; HttpOnly")
-                .insert_header(
+                .append_header("set-cookie", "__cflb=declared-cflb; Path=/; HttpOnly")
+                .append_header(
                     "set-cookie",
                     format!(
                         "__oailb={}; Path=/; HttpOnly",
@@ -1141,7 +1143,7 @@ async fn declared_worker_expired_ticket_reprobes_with_the_installed_pair() {
         .respond_with(
             // 只回 __cf_bm 不构成 pair 删除，也不制造新路由凭据：已发 pair 继续沿用。
             ResponseTemplate::new(200)
-                .insert_header("set-cookie", "__cf_bm=reused-cf-bm; Path=/; HttpOnly")
+                .append_header("set-cookie", "__cf_bm=reused-cf-bm; Path=/; HttpOnly")
                 .insert_header("x-codex-turn-state", token(585))
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(created_sse(MODEL, "resp_reuse")),
@@ -1193,7 +1195,7 @@ async fn declared_worker_reminted_partial_cookie_invalidates_the_sent_pair() {
         .respond_with(
             ResponseTemplate::new(200)
                 // 换 pod 只回 __oailb：同响应缺 __cflb，判已发 pair 失效。
-                .insert_header(
+                .append_header(
                     "set-cookie",
                     format!("__oailb={}; Path=/", oailb("999", now, now + 3600)),
                 )
@@ -1298,7 +1300,8 @@ async fn declared_business_injects_installed_ticket_and_bound_pair() {
             .unwrap()
             .clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_context(json!({"use_websocket": false}).as_object().unwrap().clone());
     let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
     let mut stream = bundle
         .core_provider()
@@ -1518,7 +1521,8 @@ async fn declared_cookie_lock_disabled_still_injects_manual_ticket_and_pair() {
             .unwrap()
             .clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_context(json!({"use_websocket": false}).as_object().unwrap().clone());
     let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
     let mut stream = bundle
         .core_provider()
@@ -1596,7 +1600,8 @@ async fn declared_business_created_mismatch_revokes_ticket_and_pair() {
             .unwrap()
             .clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_context(json!({"use_websocket": false}).as_object().unwrap().clone());
     let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
     let mut stream = bundle
         .core_provider()

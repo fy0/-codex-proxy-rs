@@ -499,8 +499,8 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
         .and(path("/codex/responses"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("set-cookie", "__cflb=test-cflb-value; Path=/; HttpOnly")
-                .insert_header("set-cookie", format!("__oailb={first}; Path=/; HttpOnly"))
+                .append_header("set-cookie", "__cflb=test-cflb-value; Path=/; HttpOnly")
+                .append_header("set-cookie", format!("__oailb={first}; Path=/; HttpOnly"))
                 .insert_header("x-codex-turn-state", &probed_state)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(response_body(MODEL)),
