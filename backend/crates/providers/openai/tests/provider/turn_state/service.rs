@@ -581,3 +581,78 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
         assert!(cookie.contains("__cflb=test-cflb-value"));
     }
 }
+
+/// 未托管桶（自动探测与 Cookie 锁定都关闭）的手动探测也要解析响应里的路由
+/// pair：观测记录是管理端展示端点与复制 Cookie 的唯一载体。
+#[tokio::test]
+async fn unmanaged_manual_probe_records_routing_cookie_and_endpoint() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let server = MockServer::start().await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed(&store, false).await;
+    store.seed_turn_state(ACCOUNT, MODEL, TurnStateConfig::default());
+    let now = Utc::now().timestamp();
+    let jwt = format!(
+        "{}.{}.c2ln",
+        URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256"}"#),
+        URL_SAFE_NO_PAD.encode(
+            json!({"host":"chat.gateway.unified-185.api.openai.com","iat":now-100,"exp":now+3600})
+                .to_string()
+        )
+    );
+    let probed_state = token(585);
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("set-cookie", "__cflb=probe-cflb; Path=/; HttpOnly")
+                .append_header("set-cookie", format!("__oailb={jwt}; Path=/; HttpOnly"))
+                .insert_header("x-codex-turn-state", &probed_state)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(COMPLETED),
+        )
+        .mount(&server)
+        .await;
+    let runtime = tempfile::tempdir().unwrap();
+    let mut config = OpenAiConfig::default();
+    config.api.base_url = server.uri();
+    config.resolve_and_validate(runtime.path()).unwrap();
+    let mut bundle =
+        provider_openai::initialize(config, turn_state_provider_ports(Arc::clone(&store)))
+            .await
+            .unwrap();
+    let registration = bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|item| match item {
+            WorkerContribution::Registration(item) if item.id.owner() == "openai-turn-state" => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let WorkerRunnable::Scheduled { task, .. } = registration.runnable else {
+        panic!("scheduled worker")
+    };
+    store.request_turn_probe(ACCOUNT, MODEL);
+    task.run_cycle(WorkerCycleContext::new(
+        registration.id.clone(),
+        None,
+        CancellationToken::new(),
+    ))
+    .await
+    .unwrap();
+    let probed = store
+        .turn_observations()
+        .into_iter()
+        .find(|item| item.probe_trigger.as_deref() == Some("manual"))
+        .expect("manual probe record");
+    assert_eq!(probed.outcome, "candidate");
+    assert_eq!(
+        probed.oailb_host.as_deref(),
+        Some("chat.gateway.unified-185.api.openai.com")
+    );
+    assert_eq!(probed.cookie_value.as_deref(), Some(jwt.as_str()));
+    assert_eq!(probed.cookie_cflb_value.as_deref(), Some("probe-cflb"));
+    assert_eq!(probed.cookie_expires_at, Some(now + 3600));
+}

@@ -1181,6 +1181,35 @@ impl TurnStateService {
                 ProbeOutcome::Miss(response.status)
             };
         }
+        // 未托管桶不持有种子 pair，但响应照常可能带 LB Cookie：解析进观测记录，
+        // 管理端靠这行展示端点与复制 Cookie；声明模型脱离的 pair 不登记共享池。
+        let (cookie, _) = self
+            .observe_cookie(
+                account.id(),
+                &cookie_headers,
+                sent_cookie.as_ref(),
+                created_model
+                    .as_deref()
+                    .or(response.reported_model.as_deref()),
+                request_started_at,
+                response
+                    .reported_model
+                    .as_deref()
+                    .is_some_and(|model| !model.eq_ignore_ascii_case(&bucket.model)),
+            )
+            .await;
+        if let Some(cookie) = &cookie {
+            observation.oailb_host = Some(cookie.pod.clone());
+            observation.cookie_issued_at = Some(cookie.issued_at);
+            observation.cookie_expires_at = Some(cookie.expires_at);
+            observation.cookie_origin = Some(cookie.origin.clone());
+            observation.cookie_name = Some(cookie.name.clone());
+            observation.cookie_value = Some(cookie.value.clone());
+            observation.cookie_cflb_name =
+                (!cookie.cflb_name.is_empty()).then(|| cookie.cflb_name.clone());
+            observation.cookie_cflb_value =
+                (!cookie.cflb_value.is_empty()).then(|| cookie.cflb_value.clone());
+        }
         let latest_issued_at = bucket
             .current_issued_at
             .max(bucket.candidate.as_ref().map(|token| token.issued_at));
