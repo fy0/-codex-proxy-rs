@@ -19,6 +19,7 @@ import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useCopyText } from '@/composables/useCopyText'
 import { useProxyCatalog } from '@/composables/useProxyCatalog'
+import TurnStateCloudMintFields from './TurnStateCloudMintFields.vue'
 
 const props = defineProps<{
   bucket: TurnStateStatus | null
@@ -51,7 +52,7 @@ watch(open, (value) => {
     return
   accountId.value = props.bucket?.accountId ?? ''
   model.value = props.bucket?.model ?? 'gpt-6-astra'
-  config.value = props.bucket ? { ...defaultTurnStateConfig(), ...props.bucket.config, proxyIds: [...props.bucket.config.proxyIds] } : defaultTurnStateConfig(true)
+  config.value = props.bucket ? { ...defaultTurnStateConfig(), ...props.bucket.config, proxyIds: [...props.bucket.config.proxyIds], cloudMints: (props.bucket.config.cloudMints ?? []).map(endpoint => ({ ...endpoint })) } : defaultTurnStateConfig(true)
   userAgentMode.value = config.value.userAgent ? 'custom' : 'auto'
   showWebhook.value = false
   proxySearch.value = ''
@@ -84,6 +85,51 @@ watchDebounced(() => [open.value, config.value.originator, config.value.clientVe
   }
 }, { debounce: 250 })
 
+// 云端端点入参校验与后端一致的底线：只查格式不查连通性，代理 URL 由后端校验。
+function validateCloudMints() {
+  const endpoints = config.value.cloudMints ?? []
+  if (endpoints.length > 16)
+    return '云端打票端点最多 16 个'
+  const names = new Set<string>()
+  for (const [index, endpoint] of endpoints.entries()) {
+    const label = `端点 ${index + 1}`
+    if (!/^[\w.-]{1,64}$/.test(endpoint.name))
+      return `${label}的名称只能由字母、数字、点、下划线、中划线组成（1-64 字符）`
+    if (names.has(endpoint.name))
+      return `${label}的名称与前面的端点重复`
+    names.add(endpoint.name)
+    if (!/^[a-z_]\w{0,127}$/i.test(endpoint.keyEnv))
+      return `${label}的密钥环境变量名不合法`
+    const url = endpoint.url
+    if (url.length > 2048)
+      return `${label}的 URL 过长`
+    if (url !== url.trim())
+      return `${label}的 URL 首尾不能有空格`
+    if (url.includes('?') || url.includes('#'))
+      return `${label}的 URL 不能包含查询参数或片段`
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    }
+    catch {
+      return `${label}的 URL 无法解析`
+    }
+    if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password)
+      return `${label}的 URL 必须是 HTTPS 地址，且不能带用户名密码`
+    const gateway = endpoint.gateway.trim().toLowerCase()
+    endpoint.gateway = gateway
+    if (gateway !== '' && gateway !== 'any' && gateway !== '*' && !/^(?:unified[-_])?\d{1,10}$/.test(gateway))
+      return `${label}的网关只支持 any 或 unified-N 编号`
+    if (endpoint.ticketLength !== config.value.targetLength)
+      return `${label}的票长度必须等于目标长度 ${config.value.targetLength}`
+    if (!Number.isInteger(endpoint.ttlSeconds) || endpoint.ttlSeconds < 1 || endpoint.ttlSeconds > 3600)
+      return `${label}的票有效期须为 1-3600 秒整数`
+    if (!Number.isInteger(endpoint.timeoutMs) || endpoint.timeoutMs < 1000 || endpoint.timeoutMs > 300000)
+      return `${label}的超时须为 1000-300000 毫秒整数`
+  }
+  return ''
+}
+
 function selectProxy(id: string, selected: boolean) {
   config.value.proxyIds = selected ? [...new Set([...config.value.proxyIds, id])] : config.value.proxyIds.filter(value => value !== id)
 }
@@ -111,6 +157,11 @@ async function save() {
   }
   if (!config.value.includeAccountProxy && !config.value.includeDirect && !config.value.proxyIds.length) {
     toast.warning('请至少选择一个探测出口')
+    return
+  }
+  const cloudMintError = validateCloudMints()
+  if (cloudMintError) {
+    toast.warning(cloudMintError)
     return
   }
   await run(async () => {
@@ -231,6 +282,7 @@ async function save() {
         </BaseInput>
         <span class="text-cp-xs text-cp-text-secondary">支持飞书 / Lark 自定义机器人。安装新票后推送完整 state、距上次安装时间、获取耗时和尝试次数。关键词可设为 state；不使用签名校验。</span>
       </BaseFormItem>
+      <TurnStateCloudMintFields v-model="config" :saving="saving" />
       <fieldset class="m-0 min-w-0 border-0 p-0">
         <legend class="mb-3 text-cp font-semibold text-cp-text">
           探测出口
