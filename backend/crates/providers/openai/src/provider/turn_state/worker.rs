@@ -103,7 +103,7 @@ impl ScheduledTask for TurnStateTask {
                     .push(bucket);
             }
             let probes: BoxFuture<'static, ()> = Box::pin(
-                futures::stream::iter(groups.into_iter()).for_each_concurrent(
+                futures::stream::iter(groups).for_each_concurrent(
                     4,
                     move |(account_key, mut buckets)| {
                         let service = Arc::clone(&service);

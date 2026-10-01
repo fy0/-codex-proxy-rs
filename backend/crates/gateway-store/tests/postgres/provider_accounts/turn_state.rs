@@ -1502,9 +1502,26 @@ async fn expired_ticket_keeps_the_installed_pair_until_its_own_expiry() {
     assert!(bucket.installed_token(now).is_none());
     let pair = bucket
         .installed_pair
+        .as_ref()
         .expect("installed pair survives ticket expiry");
     assert!(pair.expires_at > now);
     assert!(pair.is_route_valid(now));
     assert!(bucket.seed_pair(now).is_some());
+    database.close().await;
+}
+
+/// 空库也走同一条清理语句：桶加载入口在无数据时仍执行过期清理 UPDATE，
+/// 其语法问题必须在最早的正常路径上暴露，而不是等到有桶数据才踩中。
+#[tokio::test]
+async fn empty_database_turn_state_bucket_cleanup_succeeds() {
+    let Some(database) = TestDatabase::create("turn_state_empty_cleanup").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let buckets = repository
+        .turn_state_buckets()
+        .await
+        .expect("load turn-state buckets in an empty database");
+    assert!(buckets.is_empty());
     database.close().await;
 }

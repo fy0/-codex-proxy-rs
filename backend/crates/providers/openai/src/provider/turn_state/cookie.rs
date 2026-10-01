@@ -32,40 +32,42 @@ impl TurnStateService {
     /// 会连票一起摘除，之后按票正文匹配的二次作废必然落空，但连接仍须驱逐。
     async fn detach_routing(
         &self,
-        account: &gateway_core::account::ProviderAccount,
-        requested_model: &str,
-        model: &str,
-        request_state: Option<&str>,
-        sent: Option<&RoutingCookie>,
-        started_at: i64,
+        observation: &BusinessCookieObservation<'_>,
         revoke_ticket: bool,
         confirmed: bool,
     ) -> bool {
-        if let Some(sent) = sent {
+        if let Some(sent) = observation.sent {
             let _ = self
                 .store
                 .observe_routing_cookie(RoutingCookieObservation {
                     origin: self.endpoint.clone(),
-                    observed_at: started_at,
+                    observed_at: observation.started_at,
                     sent: Some(sent.clone()),
                     received: None,
-                    reported_model: Some(model.to_owned()),
+                    reported_model: Some(observation.model.to_owned()),
                     deleted: true,
                 })
                 .await;
             // 标坏的 pair 同步从账号闸的种子表摘除，下一轮不再拿它定向打票。
-            self.drop_pair_seed(account.id().as_str(), sent);
+            self.drop_pair_seed(observation.account.id().as_str(), sent);
         }
         if !revoke_ticket {
             return false;
         }
-        let account_id = account.id().clone();
-        let Some(sent_state) = request_state.filter(|value| !value.is_empty()) else {
+        let account_id = observation.account.id().clone();
+        let Some(sent_state) = observation.request_state.filter(|value| !value.is_empty()) else {
             return false;
         };
         let revoked = self
             .store
-            .observe_installed_model(&account_id, requested_model, sent_state, model, true, sent)
+            .observe_installed_model(
+                &account_id,
+                observation.requested_model,
+                sent_state,
+                observation.model,
+                true,
+                observation.sent,
+            )
             .await
             .unwrap_or(false);
         if revoked || confirmed {
@@ -124,12 +126,7 @@ impl TurnStateService {
         // 新票，这条路径也一样生效，之后请求不得再注入同一张票。
         if mismatched {
             self.detach_routing(
-                account,
-                requested_model,
-                model,
-                request_state,
-                sent,
-                started_at,
+                &observation,
                 bucket.config.revokes_ticket_when_model_detaches(),
                 confirmed,
             )
