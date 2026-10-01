@@ -228,7 +228,8 @@ impl PgProviderAccountRepository {
             let sql = format!(
                 "update account_turn_states set turn_state_override = case when {installed} then null else turn_state_override end, installed_pair = case when {installed} then null else installed_pair end, current_expires_at = case when {installed} then null else current_expires_at end, attached_model = case when {installed} then null else attached_model end, manual_override = case when {installed} then false else manual_override end, next_probe_at = case when {installed} then null else next_probe_at end, candidate = case when {candidate} then null else candidate end, candidate_pair = case when {candidate} then null else candidate_pair end, candidate_expires_at = case when {candidate} then null else candidate_expires_at end, cookie_override_pod = case when {pinned} then null else cookie_override_pod end, cookie_override_issued_at = case when {pinned} then null else cookie_override_issued_at end, cookie_override_name = case when {pinned} then null else cookie_override_name end, cookie_override_value = case when {pinned} then null else cookie_override_value end, cookie_override_cflb_name = case when {pinned} then null else cookie_override_cflb_name end, cookie_override_cflb_value = case when {pinned} then null else cookie_override_cflb_value end, cookie_override_expires_at = case when {pinned} then null else cookie_override_expires_at end, cookie_override_observation_id = case when {pinned} then null else cookie_override_observation_id end where ({installed}) or ({candidate}) or ({pinned})"
             );
-            sqlx::query(&sql)
+            // 只拼接固定 SQL 谓词；origin、pod、水位及 Cookie 正文仍通过 bind 传入。
+            sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(&observation.origin)
                 .bind(&sent.pod)
                 .bind(observation.observed_at)

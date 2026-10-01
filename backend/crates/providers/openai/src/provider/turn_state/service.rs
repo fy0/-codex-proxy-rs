@@ -1184,6 +1184,8 @@ impl TurnStateService {
         let latest_issued_at = bucket
             .current_issued_at
             .max(bucket.candidate.as_ref().map(|token| token.issued_at));
+        // response 移交 observe 前先留状态码快照，供 Miss 回报使用。
+        let status = response.status;
         self.observe(
             observation,
             response,
@@ -1196,7 +1198,7 @@ impl TurnStateService {
         if self.install(account.id(), &bucket.model).await {
             ProbeOutcome::Installed
         } else {
-            ProbeOutcome::Miss(response.status)
+            ProbeOutcome::Miss(status)
         }
     }
 
