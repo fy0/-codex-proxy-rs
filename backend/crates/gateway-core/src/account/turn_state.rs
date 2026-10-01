@@ -129,8 +129,8 @@ impl std::fmt::Debug for CloudMintConfig {
         if let Some(url) = url.as_mut() {
             let _ = url.set_username("");
             let _ = url.set_password(None);
-            let _ = url.set_query(None);
-            let _ = url.set_fragment(None);
+            url.set_query(None);
+            url.set_fragment(None);
         }
         f.debug_struct("CloudMintConfig")
             .field("name", &self.name)
