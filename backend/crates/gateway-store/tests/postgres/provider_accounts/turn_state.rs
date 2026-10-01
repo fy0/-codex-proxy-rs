@@ -342,6 +342,97 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
     database.close().await;
 }
 
+/// 未托管桶仍不记录普通被动观测；只有响应真正下发路由 pair 的那条入库，
+/// 供管理端展示端点并按观测 ID 复制 Cookie，历史按桶封顶不随请求量增长。
+#[tokio::test]
+async fn unmanaged_bucket_records_cookie_observations_with_bounded_history() {
+    let Some(database) = TestDatabase::create("turn_state_passive_cookie").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_passive_cookie").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let mut plain = observation(id.as_str(), "model-a", 780, Utc::now().timestamp() - 5);
+    plain.source = "passive".to_owned();
+    plain.probe_trigger = None;
+    repository.observe_turn_state(plain, None).await.unwrap();
+    assert!(
+        admin
+            .turn_state_status(Some(id.as_str()))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+            .observations
+            .is_empty()
+    );
+    let mut cookie_observation =
+        observation(id.as_str(), "model-a", 780, Utc::now().timestamp() - 4);
+    cookie_observation.source = "passive".to_owned();
+    cookie_observation.probe_trigger = None;
+    cookie_observation.outcome = "cookie_ready".to_owned();
+    cookie_observation.response_source = Some("response_created".to_owned());
+    cookie_observation.oailb_host = Some("chat.gateway.unified-185.api.openai.com".to_owned());
+    cookie_observation.cookie_origin = Some("https://api.example.invalid".to_owned());
+    cookie_observation.cookie_name = Some("__oailb".to_owned());
+    cookie_observation.cookie_value = Some("cookie-value".to_owned());
+    cookie_observation.cookie_cflb_name = Some("__cflb".to_owned());
+    cookie_observation.cookie_cflb_value = Some("cflb-value".to_owned());
+    cookie_observation.cookie_issued_at = Some(Utc::now().timestamp() - 4);
+    cookie_observation.cookie_expires_at = Some(Utc::now().timestamp() + 300);
+    repository
+        .observe_turn_state(cookie_observation, None)
+        .await
+        .unwrap();
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.observations.len(), 1);
+    let recorded = &status.observations[0];
+    assert_eq!(recorded.outcome, "cookie_ready");
+    assert!(recorded.has_cookie);
+    assert_eq!(
+        recorded.oailb_host.as_deref(),
+        Some("chat.gateway.unified-185.api.openai.com")
+    );
+    let observation_id: i64 = recorded.observation_id.as_deref().unwrap().parse().unwrap();
+    let cookie = admin
+        .recorded_routing_cookie(&id, "model-a", observation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cookie.pod, "chat.gateway.unified-185.api.openai.com");
+    assert_eq!(cookie.value, "cookie-value");
+    assert_eq!(cookie.cflb_value, "cflb-value");
+    for index in 0..105 {
+        let mut extra = observation(id.as_str(), "model-a", 780, Utc::now().timestamp());
+        extra.source = "passive".to_owned();
+        extra.probe_trigger = None;
+        extra.outcome = "cookie_ready".to_owned();
+        extra.cookie_value = Some(format!("cookie-{index}"));
+        repository.observe_turn_state(extra, None).await.unwrap();
+    }
+    assert_eq!(
+        admin
+            .turn_state_status(Some(id.as_str()))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+            .observations
+            .len(),
+        100
+    );
+    database.close().await;
+}
+
 #[tokio::test]
 async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() {
     let Some(database) = TestDatabase::create("turn_state_rotation").await else {

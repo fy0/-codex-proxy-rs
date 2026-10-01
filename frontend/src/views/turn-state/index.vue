@@ -19,6 +19,7 @@ import TurnStateConfigModal from './TurnStateConfigModal.vue'
 
 const buckets = ref<TurnStateStatus[]>([])
 const accountFilter = ref('')
+const modelFilter = ref('')
 const selectedKey = ref(sessionStorage.getItem('turn-state-selection') ?? '')
 const accounts = ref<Awaited<ReturnType<typeof getAccounts>>['items']>([])
 const error = ref('')
@@ -38,13 +39,18 @@ const cookieApplying = ref(false)
 const cookieRemoving = ref(false)
 const copyText = useCopyText()
 let loadVersion = 0
-const tableBuckets = computed<TurnStateStatus[]>(() => {
-  const configured = new Set(buckets.value.map(bucket => bucket.accountId))
-  const unconfigured = accounts.value.filter(account => account.authenticationKind === 'oauth' && !configured.has(account.id) && (!accountFilter.value || account.id === accountFilter.value)).map(account => ({
+// 路由状态只维护 gpt-6 系列桶；更早系列及其他类型的桶不在此页展示。
+function isGpt6Series(model: string) {
+  return model === 'gpt-6' || model.startsWith('gpt-6-')
+}
+const seriesBuckets = computed<TurnStateStatus[]>(() => {
+  const placeholderModel = 'gpt-6-astra'
+  const configured = new Set(buckets.value.map(bucket => `${bucket.accountId}/${bucket.model}`))
+  const unconfigured = accounts.value.filter(account => account.authenticationKind === 'oauth' && !configured.has(`${account.id}/${placeholderModel}`) && (!accountFilter.value || account.id === accountFilter.value)).map(account => ({
     accountId: account.id,
     accountName: account.name,
     accountEmail: account.email,
-    model: 'gpt-6-astra',
+    model: placeholderModel,
     config: defaultTurnStateConfig(),
     tokenLength: null,
     issuedAt: null,
@@ -62,8 +68,10 @@ const tableBuckets = computed<TurnStateStatus[]>(() => {
   return [...buckets.value.map((bucket) => {
     const account = accounts.value.find(account => account.id === bucket.accountId)
     return { ...bucket, accountEmail: bucket.accountEmail ?? account?.email }
-  }), ...unconfigured]
+  }), ...unconfigured].filter(bucket => isGpt6Series(bucket.model))
 })
+const tableBuckets = computed<TurnStateStatus[]>(() => modelFilter.value ? seriesBuckets.value.filter(bucket => bucket.model === modelFilter.value) : seriesBuckets.value)
+const modelOptions = computed(() => [{ label: '全部模型', value: '' }, ...[...new Set(seriesBuckets.value.map(bucket => bucket.model))].sort().map(model => ({ label: model, value: model }))])
 const selection = computed(() => tableBuckets.value.find(bucket => bucketKey(bucket) === selectedKey.value))
 const accountOptions = computed(() => [{ label: '全部账号', value: '' }, ...accounts.value.map(account => ({ label: `${account.email?.trim() || account.name} · ${account.id}`, value: account.id }))])
 const bucketOptions = computed(() => tableBuckets.value.map(bucket => ({ label: `${bucket.accountEmail?.trim() || bucket.accountName} · ${bucket.accountId} / ${bucket.model}`, value: bucketKey(bucket) })))
@@ -187,7 +195,7 @@ async function load() {
     if (version === loadVersion) {
       buckets.value = data
       if (!selection.value)
-        selectedKey.value = buckets.value[0] ? bucketKey(buckets.value[0]) : ''
+        selectedKey.value = tableBuckets.value[0] ? bucketKey(tableBuckets.value[0]) : ''
       error.value = ''
     }
   }
@@ -361,6 +369,11 @@ async function applyCookie(bucket: TurnStateStatus, pod: string, issuedAt?: numb
   }
 }
 
+// 固定 Cookie 只在会回放它的桶上有意义：Cookie 锁定或绑定路由 pair 的模式，
+// 与后端 apply_turn_state_cookie 的受理条件一致。
+function canPinCookie(bucket: TurnStateStatus) {
+  return bucket.config.cookieLockEnabled || bucket.config.stopStrategy === 'declared_model' || bucket.config.cloudMints.length > 0
+}
 function cookieBound(bucket: TurnStateStatus) {
   return !!(bucket.cookieOverrideName || bucket.cookieOverrideValue || bucket.cookieOverridePod || bucket.cookieOverrideObservationId)
 }
@@ -388,6 +401,10 @@ async function removeCookie(bucket: TurnStateStatus) {
 watch(selectedKey, value => sessionStorage.setItem('turn-state-selection', value))
 watch(tab, value => sessionStorage.setItem('turn-state-tab', value))
 watch(accountFilter, load)
+watch(modelFilter, () => {
+  if (!selection.value)
+    selectedKey.value = tableBuckets.value[0] ? bucketKey(tableBuckets.value[0]) : ''
+})
 watch([selectedKey, tab], () => {
   page.value = 1
 })
@@ -429,7 +446,10 @@ onMounted(async () => {
       </template>
     </BasePageHeader>
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <BaseSelect v-model="accountFilter" class="w-full sm:w-72" :options="accountOptions" aria-label="筛选账号" />
+      <div class="flex flex-wrap items-center gap-3">
+        <BaseSelect v-model="accountFilter" class="w-full sm:w-72" :options="accountOptions" aria-label="筛选账号" />
+        <BaseSelect v-model="modelFilter" class="w-full sm:w-56" :options="modelOptions" aria-label="筛选模型" />
+      </div>
       <BaseSwitch v-model="autoRefresh" label="自动刷新" show-label />
     </div>
     <p v-if="error" role="alert" class="m-0 text-cp-error-text">
@@ -576,6 +596,14 @@ onMounted(async () => {
             {{ date(expiresAt(selection)) }}
           </dd>
         </div>
+        <div>
+          <dt class="text-cp-text-secondary">
+            最近观测端点
+          </dt>
+          <dd class="m-0 mt-1 break-all font-mono">
+            {{ selection.observations.find(item => item.oailbHost)?.oailbHost ?? '-' }}
+          </dd>
+        </div>
         <div v-for="[length, count] in distribution" :key="length">
           <dt class="text-cp-text-secondary">
             {{ length }}
@@ -622,7 +650,7 @@ onMounted(async () => {
             <Cookie class="size-4" />
           </BaseIconButton>
           <span v-if="pinnedRecord(selection, row.observationId)" class="text-cp-xs text-cp-success-text">当前固定</span>
-          <BaseIconButton v-else-if="row.hasCookie && row.observationId && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinRecordCookie(selection, row)">
+          <BaseIconButton v-else-if="canPinCookie(selection) && row.hasCookie && row.observationId && row.answerMatch !== false" label="固定此 Cookie" :disabled="cookieApplying" @click="pinRecordCookie(selection, row)">
             <LockKeyhole class="size-4" />
           </BaseIconButton>
         </template>

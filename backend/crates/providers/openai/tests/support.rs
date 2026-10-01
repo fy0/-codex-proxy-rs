@@ -496,7 +496,9 @@ impl ProviderAccountStore for MemoryAccountStore {
             return Ok(());
         }
         let mut states = self.turn_states.lock().unwrap();
-        let mut record = observation.probe_trigger.as_deref() == Some("manual");
+        // 与 PG 实现一致：未托管桶仍记录带路由 Cookie 的观测。
+        let mut record = observation.probe_trigger.as_deref() == Some("manual")
+            || observation.cookie_value.is_some();
         if let Some(state) =
             states.get_mut(&(observation.account_id.clone(), observation.model.clone()))
         {

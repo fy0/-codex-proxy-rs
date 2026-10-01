@@ -132,11 +132,16 @@ impl TurnStateService {
             )
             .await;
         }
-        if !bucket.config.cookie_lock_enabled && !bucket.config.requires_route_pair() {
-            return;
-        }
         // 脱离模型的 pair 不作为本模型的可用凭据登记。
         let cookie = if mismatched { None } else { cookie };
+        // 未托管桶只在响应真正下发完整 pair 时留观测行：这条记录是管理端展示
+        // 端点与复制 Cookie 的唯一载体；没有 pair 的普通业务响应不刷日志。
+        if !bucket.config.cookie_lock_enabled
+            && !bucket.config.requires_route_pair()
+            && cookie.is_none()
+        {
+            return;
+        }
         let outcome = if mismatched {
             "cookie_model_mismatch"
         } else if deleted {

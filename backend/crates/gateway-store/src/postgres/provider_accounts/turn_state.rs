@@ -351,9 +351,12 @@ impl PgProviderAccountRepository {
             }
         }
         // 停止后台日志不丢弃有效候选；手动发起的探测仍保留可操作结果。
-        if state.config.enabled
-            || state.config.cookie_lock_enabled
+        // 未托管桶额外放行带路由 Cookie 的观测：端点与 Cookie 复制依赖这条记录，
+        // 且只有响应真正下发 pair 时才产生一行。
+        let managed = state.config.enabled || state.config.cookie_lock_enabled;
+        if managed
             || observation.probe_trigger.as_deref() == Some("manual")
+            || observation.cookie_value.is_some()
         {
             append_event(
                 &mut tx,
@@ -363,6 +366,12 @@ impl PgProviderAccountRepository {
                 serde_json::to_value(&observation).map_err(unavailable)?,
             )
             .await?;
+            // 未托管桶的被动观测只留最近 100 条，端点日志不随业务请求量无限增长；
+            // 探测与云端打票行按 source 排除，不在这次裁剪范围内。
+            if !managed {
+                sqlx::query("delete from account_turn_state_events where account_id = $1 and model = $2 and event_kind = 'observation' and detail->>'source' = 'passive' and id not in (select id from account_turn_state_events where account_id = $1 and model = $2 and event_kind = 'observation' and detail->>'source' = 'passive' order by id desc limit 100)")
+                    .bind(&observation.account_id).bind(&observation.model).execute(&mut *tx).await.map_err(unavailable)?;
+            }
         }
         tx.commit().await.map_err(unavailable)
     }
