@@ -1274,6 +1274,22 @@ async fn pair_required_candidates_need_full_pair_install_capped_and_reject_histo
         observed_at: 0,
         reported_model: "model-a".to_owned(),
     };
+    // `pair` 字段本身是 serde skip 不落库：观测行的持久化事实必须带齐
+    // Cookie 明文与模型声明，安装重放才能重建完整 pair；只填内存 pair
+    // 的历史行会因缺元数据被正确拒绝。
+    let with_pair = |mut observation: TurnStateObservation, pair: RoutingCookie| {
+        observation.reported_model = Some(pair.reported_model.clone());
+        observation.oailb_host = Some(pair.pod.clone());
+        observation.cookie_origin = Some(pair.origin.clone());
+        observation.cookie_name = Some(pair.name.clone());
+        observation.cookie_value = Some(pair.value.clone());
+        observation.cookie_cflb_name = Some(pair.cflb_name.clone());
+        observation.cookie_cflb_value = Some(pair.cflb_value.clone());
+        observation.cookie_issued_at = Some(pair.issued_at);
+        observation.cookie_expires_at = Some(pair.expires_at);
+        observation.pair = Some(pair);
+        observation
+    };
     // 声明模型验收要求候选自带完整 pair：无 pair 的合格票只进观测历史、不占候选槽。
     let issued = now - 30;
     repository
@@ -1307,8 +1323,10 @@ async fn pair_required_candidates_need_full_pair_install_capped_and_reject_histo
         .unwrap();
     assert!(bucket.candidate.is_none());
     // 完整 pair 携带有效到期收窄候选寿命：安装后 current_expires_at 取 pair 死线。
-    let mut observed = observation(id.as_str(), "model-a", 780, issued + 2);
-    observed.pair = Some(pair(issued + 60));
+    let mut observed = with_pair(
+        observation(id.as_str(), "model-a", 780, issued + 2),
+        pair(issued + 60),
+    );
     observed.expires_at = Some(issued + 60);
     repository
         .observe_turn_state(observed, Some(token(780, issued + 2)))
@@ -1368,11 +1386,13 @@ async fn pair_required_candidates_need_full_pair_install_capped_and_reject_histo
         .await
         .unwrap();
     let issued_b = now - 20;
-    let mut observed_b = observation(id.as_str(), "model-b", 780, issued_b);
     let mut pair_b = pair(now + 1800);
     pair_b.cflb_value = "pair-cflb-b".to_owned();
     pair_b.reported_model = "model-b".to_owned();
-    observed_b.pair = Some(pair_b.clone());
+    let mut observed_b = with_pair(
+        observation(id.as_str(), "model-b", 780, issued_b),
+        pair_b.clone(),
+    );
     observed_b.expires_at = Some(issued_b + 120);
     repository
         .observe_turn_state(observed_b, Some(token(780, issued_b)))
@@ -1403,9 +1423,11 @@ async fn pair_required_candidates_need_full_pair_install_capped_and_reject_histo
     assert_eq!(applied.cflb_value, "pair-cflb-b");
     assert_eq!(bucket.current_expires_at, Some(issued_b + 120));
     // 失败声明行即使带着完整 pair 与票也不许套用：验收结论与 pair 一起把关。
-    let mut bad = observation(id.as_str(), "model-b", 780, issued_b + 1);
+    let mut bad = with_pair(
+        observation(id.as_str(), "model-b", 780, issued_b + 1),
+        pair_b,
+    );
     bad.outcome = "model_mismatch".to_owned();
-    bad.pair = Some(pair_b);
     bad.expires_at = Some(issued_b + 60);
     repository
         .observe_turn_state(bad, Some(token(780, issued_b + 1)))
