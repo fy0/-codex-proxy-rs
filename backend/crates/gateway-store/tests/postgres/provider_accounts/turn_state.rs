@@ -1,7 +1,10 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use gateway_core::account::{
-    MissingTurnStatePolicy, TurnStateBusinessStatus, TurnStateConfig, TurnStateObservation,
-    TurnStateToken,
+    MissingTurnStatePolicy, RoutingCookie, TurnStateBusinessStatus, TurnStateConfig,
+    TurnStateObservation, TurnStateStopStrategy, TurnStateToken,
 };
 
 use super::*;
@@ -34,22 +37,27 @@ pub(super) fn observation(
         request_state_source: Some("none".to_owned()),
         response_source: Some("http_headers".to_owned()),
         probe_trigger: Some("scheduled".to_owned()),
-        outcome: if length == 292 {
+        outcome: if length == 780 {
             "candidate"
         } else {
-            "length_miss"
+            "invalid_length"
         }
         .to_owned(),
         http_status: Some(200),
         token_length: Some(length),
         issued_at: Some(issued_at),
+        endpoint: None,
         reported_model: None,
         oailb_host: None,
         cookie_issued_at: None,
         cookie_expires_at: None,
+        expires_at: None,
         cookie_origin: None,
         cookie_name: None,
         cookie_value: None,
+        cookie_cflb_name: None,
+        cookie_cflb_value: None,
+        pair: None,
         has_cookie: false,
         // 使用合成正文验证存储边界，失效票应在持久化时被剥离。
         token: Some(token(length, issued_at).value),
@@ -99,8 +107,8 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
             .unwrap();
         repository
             .observe_turn_state(
-                observation(id.as_str(), model, 292, issued),
-                Some(token(292, issued)),
+                observation(id.as_str(), model, 780, issued),
+                Some(token(780, issued)),
             )
             .await
             .unwrap();
@@ -150,7 +158,7 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
             .await
             .unwrap()
             .map(|state| state.value.len()),
-        Some(292)
+        Some(780)
     );
     assert!(
         admin
@@ -166,8 +174,8 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
     assert!(bucket.manages_injection());
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, issued),
-            Some(token(292, issued)),
+            observation(id.as_str(), "model-a", 780, issued),
+            Some(token(780, issued)),
         )
         .await
         .unwrap();
@@ -175,8 +183,8 @@ async fn removal_preserves_switches_and_watermark_and_isolates_models() {
     let renewed = issued + 1;
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, renewed),
-            Some(token(292, renewed)),
+            observation(id.as_str(), "model-a", 780, renewed),
+            Some(token(780, renewed)),
         )
         .await
         .unwrap();
@@ -217,8 +225,8 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
         .await
         .unwrap();
     let issued = Utc::now().timestamp() - 5;
-    let expected = token(292, issued);
-    let mut passive = observation(id.as_str(), "model-a", 292, issued);
+    let expected = token(780, issued);
+    let mut passive = observation(id.as_str(), "model-a", 780, issued);
     passive.source = "passive".to_owned();
     passive.probe_trigger = None;
     repository
@@ -323,7 +331,7 @@ async fn disabled_logging_retains_candidates_and_copy_is_scoped_to_valid_current
     );
     let expired = issued - 3600;
     sqlx::query("update account_turn_states set upstream_user_id = $1, turn_state_override = $2, current_issued_at = $3 where account_id = $1")
-        .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
+        .bind(id.as_str()).bind(token(780, expired).value).bind(expired).execute(&database.pool).await.unwrap();
     assert!(
         admin
             .turn_state_token(&id, "model-a", expired, None)
@@ -404,10 +412,10 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
             .unwrap()
     );
     let issued = Utc::now().timestamp() - 60;
-    let initial = token(292, issued);
+    let initial = token(780, issued);
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, issued),
+            observation(id.as_str(), "model-a", 780, issued),
             Some(initial.clone()),
         )
         .await
@@ -423,8 +431,8 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
     );
     // 同签发时间、旧候选和非目标长度都不能越过更新门。
     for (length, time) in [
-        (292, issued),
-        (292, issued - 1),
+        (780, issued),
+        (780, issued - 1),
         (312, issued + 1),
         (552, issued + 1),
     ] {
@@ -439,8 +447,8 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
     }
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-b", 292, issued - 4000),
-            Some(token(292, issued - 4000)),
+            observation(id.as_str(), "model-b", 780, issued - 4000),
+            Some(token(780, issued - 4000)),
         )
         .await
         .unwrap();
@@ -478,9 +486,9 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
     );
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, issued + 1),
+            observation(id.as_str(), "model-a", 780, issued + 1),
             Some(TurnStateToken {
-                value: "x".repeat(292),
+                value: "x".repeat(780),
                 issued_at: issued + 1,
             }),
         )
@@ -489,8 +497,8 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
     assert!(!repository.install_turn_state(&id, "model-a").await.unwrap());
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, issued + 2),
-            Some(token(292, issued + 2)),
+            observation(id.as_str(), "model-a", 780, issued + 2),
+            Some(token(780, issued + 2)),
         )
         .await
         .unwrap();
@@ -529,8 +537,8 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
         .unwrap();
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, issued + 3),
-            Some(token(292, issued + 3)),
+            observation(id.as_str(), "model-a", 780, issued + 3),
+            Some(token(780, issued + 3)),
         )
         .await
         .unwrap();
@@ -542,6 +550,10 @@ async fn turn_state_candidates_are_atomic_isolated_and_expire_from_issue_time() 
     assert!(replaced.current.is_none());
     assert!(replaced.candidate.is_none());
     assert!(replaced.current_issued_at.is_none());
+    assert!(replaced.current_expires_at.is_none());
+    assert!(replaced.candidate_expires_at.is_none());
+    assert!(replaced.installed_pair.is_none());
+    assert!(replaced.candidate_pair.is_none());
     assert!(replaced.manual_probe_requested_at.is_none());
     assert!(!replaced.manual_override);
     assert!(replaced.config.enabled);
@@ -576,8 +588,8 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
     let issued = Utc::now().timestamp() - 60;
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, issued),
-            Some(token(292, issued)),
+            observation(id.as_str(), "model-a", 780, issued),
+            Some(token(780, issued)),
         )
         .await
         .unwrap();
@@ -588,7 +600,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         .pop()
         .unwrap();
     assert_eq!(status.candidate_issued_at, Some(issued));
-    assert_eq!(status.candidate_length, Some(292));
+    assert_eq!(status.candidate_length, Some(780));
     assert!(!status.config.enabled);
     assert!(!status.active);
     assert_eq!(
@@ -637,7 +649,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
     assert!(configured.installed_token(Utc::now().timestamp()).is_some());
     assert!(configured.manual_override);
     assert!(!configured.config.enabled);
-    for outcome in ["length_miss", "missing_header", "transport_error"] {
+    for outcome in ["invalid_length", "missing_header", "transport_error"] {
         let mut miss = observation(id.as_str(), "model-a", 312, issued + 1);
         miss.outcome = outcome.to_owned();
         repository.observe_turn_state(miss, None).await.unwrap();
@@ -694,7 +706,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
     );
     let expired = Utc::now().timestamp() - 3600;
     sqlx::query("update account_turn_states set turn_state_override = $2, current_issued_at = $3 where account_id = $1")
-        .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
+        .bind(id.as_str()).bind(token(780, expired).value).bind(expired).execute(&database.pool).await.unwrap();
     let status = admin
         .turn_state_status(Some(id.as_str()))
         .await
@@ -707,7 +719,7 @@ async fn manual_apply_keeps_rotation_disabled_and_rejects_stale_candidates() {
         TurnStateBusinessStatus::WaitingForState
     );
     sqlx::query("update account_turn_states set candidate = $2, candidate_issued_at = $3, current_issued_at = null, turn_state_override = null where account_id = $1")
-        .bind(id.as_str()).bind(token(292, expired).value).bind(expired).execute(&database.pool).await.unwrap();
+        .bind(id.as_str()).bind(token(780, expired).value).bind(expired).execute(&database.pool).await.unwrap();
     assert!(
         admin
             .apply_turn_state(&id, "model-a", expired, None, &context)
@@ -859,7 +871,7 @@ async fn history_selection_is_exact_even_when_tokens_share_timestamp_and_length(
         .await
         .unwrap();
     let issued = Utc::now().timestamp() - 5;
-    let first = token(292, issued);
+    let first = token(780, issued);
     let mut bytes = URL_SAFE.decode(&first.value).unwrap();
     bytes[10] = 1;
     let second = TurnStateToken::parse(&URL_SAFE.encode(bytes)).unwrap();
@@ -916,7 +928,7 @@ async fn history_selection_is_exact_even_when_tokens_share_timestamp_and_length(
             .unwrap()
             .is_none()
     );
-    // 312 历史行不得借用同秒的 292 候选安装。
+    // 312 历史行不得借用同秒的 780 候选安装。
     assert!(
         admin
             .apply_turn_state(&id, "model-a", issued, Some(ids[2]), &context)
@@ -1030,10 +1042,10 @@ async fn invalid_history_bodies_are_rejected_and_legacy_extreme_dates_do_not_bre
         sqlx::query("insert into account_turn_state_events(account_id, model, event_kind, detail) values ($1, 'model-a', 'observation', $2)")
             .bind(id.as_str()).bind(serde_json::to_value(observed).unwrap()).execute(&database.pool).await.unwrap();
     }
-    let fresh = token(292, now - 1);
+    let fresh = token(780, now - 1);
     repository
         .observe_turn_state(
-            observation(id.as_str(), "model-a", 292, fresh.issued_at),
+            observation(id.as_str(), "model-a", 780, fresh.issued_at),
             Some(fresh.clone()),
         )
         .await
@@ -1092,10 +1104,10 @@ async fn pause_voids_the_installed_ticket_when_the_reported_model_changes() {
         .await
         .unwrap();
     let issued = Utc::now().timestamp() - 5;
-    let mut seen = observation(id.as_str(), "model-a", 292, issued);
+    let mut seen = observation(id.as_str(), "model-a", 780, issued);
     seen.reported_model = Some("gpt-5.6-astra".to_owned());
     repository
-        .observe_turn_state(seen, Some(token(292, issued)))
+        .observe_turn_state(seen, Some(token(780, issued)))
         .await
         .unwrap();
     assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
@@ -1113,15 +1125,16 @@ async fn pause_voids_the_installed_ticket_when_the_reported_model_changes() {
             .await
             .unwrap();
     assert_eq!(attached, "gpt-5.6-astra");
+    // 判异基准是请求模型而不是先前记录的 attached_model：上报等于请求模型（忽略大小写）不作废。
     assert!(
         !repository
-            .observe_installed_model(&id, "model-a", &installed, "GPT-5.6-ASTRA", true)
+            .observe_installed_model(&id, "model-a", &installed, "MODEL-A", true, None)
             .await
             .unwrap()
     );
     assert!(
         !repository
-            .observe_installed_model(&id, "model-a", &installed, "gpt-5.6-luna", false)
+            .observe_installed_model(&id, "model-a", &installed, "gpt-5.6-luna", false, None)
             .await
             .unwrap()
     );
@@ -1133,9 +1146,45 @@ async fn pause_voids_the_installed_ticket_when_the_reported_model_changes() {
     .await
     .unwrap();
     assert_eq!(still.as_deref(), Some(installed.as_str()));
+    // 别的账号同名票的 sent_state 不匹配；本账号上报模型脱离请求模型才作废。
+    let foreign = ProviderAccountId::new("acct_detach_other").unwrap();
+    repository
+        .insert_provider_account(account(foreign.as_str(), foreign.as_str()))
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .observe_installed_model(&foreign, "model-a", &installed, "gpt-5.6-luna", true, None)
+            .await
+            .unwrap()
+    );
+    // 固定 pair 恰为本次发出的精确值时，随票一起解除固定。
+    sqlx::query("update account_turn_states set cookie_override_pod = 'chat.gateway.unified-1.api.openai.com', cookie_override_issued_at = $2, cookie_override_name = '__oailb', cookie_override_value = 'pinned-jwt', cookie_override_cflb_name = '__cflb', cookie_override_cflb_value = 'pinned-cflb', cookie_override_expires_at = $3 where account_id = $1")
+        .bind(id.as_str()).bind(issued).bind(issued + 3600).execute(&database.pool).await.unwrap();
+    let sent = RoutingCookie {
+        origin: "endpoint".to_owned(),
+        pod: "chat.gateway.unified-1.api.openai.com".to_owned(),
+        name: "__oailb".to_owned(),
+        value: "pinned-jwt".to_owned(),
+        cflb_name: "__cflb".to_owned(),
+        cflb_value: "pinned-cflb".to_owned(),
+        cflb_expires_at: None,
+        oailb_expires_at: None,
+        issued_at: issued,
+        expires_at: issued + 3600,
+        observed_at: 0,
+        reported_model: String::new(),
+    };
     assert!(
         repository
-            .observe_installed_model(&id, "model-a", &installed, "gpt-5.6-luna", true)
+            .observe_installed_model(
+                &id,
+                "model-a",
+                &installed,
+                "gpt-5.6-luna",
+                true,
+                Some(&sent)
+            )
             .await
             .unwrap()
     );
@@ -1147,6 +1196,14 @@ async fn pause_voids_the_installed_ticket_when_the_reported_model_changes() {
     .await
     .unwrap();
     assert!(cleared.is_none());
+    let override_name: Option<String> = sqlx::query_scalar(
+        "select cookie_override_name from account_turn_states where account_id = $1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(override_name.is_none());
     let watermark: Option<i64> = sqlx::query_scalar(
         "select current_issued_at from account_turn_states where account_id = $1",
     )
@@ -1155,5 +1212,299 @@ async fn pause_voids_the_installed_ticket_when_the_reported_model_changes() {
     .await
     .unwrap();
     assert_eq!(watermark, Some(issued));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn pair_required_candidates_need_full_pair_install_capped_and_reject_history_apply() {
+    let Some(database) = TestDatabase::create("turn_state_pair").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_pair").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "pair-test".to_owned(),
+    };
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                stop_strategy: TurnStateStopStrategy::DeclaredModel,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let now = Utc::now().timestamp();
+    // 历史套用会真重解析 JWT：测试值必须是带合法 host/iat/exp 声明的 ES256 结构。
+    let jwt = |expiry: i64| {
+        format!(
+            "{}.{}.c2ln",
+            URL_SAFE_NO_PAD.encode(serde_json::json!({"alg":"ES256"}).to_string()),
+            URL_SAFE_NO_PAD.encode(
+                serde_json::json!({
+                    "host": "chat.gateway.unified-7.api.openai.com",
+                    "iat": now - 5,
+                    "exp": expiry
+                })
+                .to_string()
+            )
+        )
+    };
+    let pair = |expiry: i64| RoutingCookie {
+        origin: "endpoint".to_owned(),
+        pod: "chat.gateway.unified-7.api.openai.com".to_owned(),
+        name: "__oailb".to_owned(),
+        value: jwt(expiry),
+        cflb_name: "__cflb".to_owned(),
+        cflb_value: "pair-cflb".to_owned(),
+        cflb_expires_at: Some(expiry),
+        oailb_expires_at: Some(expiry),
+        issued_at: now - 5,
+        expires_at: expiry,
+        observed_at: 0,
+        reported_model: "model-a".to_owned(),
+    };
+    // 声明模型验收要求候选自带完整 pair：无 pair 的合格票只进观测历史、不占候选槽。
+    let issued = now - 30;
+    repository
+        .observe_turn_state(
+            observation(id.as_str(), "model-a", 780, issued),
+            Some(token(780, issued)),
+        )
+        .await
+        .unwrap();
+    let bucket = repository
+        .turn_state_bucket(&id, "model-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bucket.candidate.is_none());
+    assert!(bucket.candidate_pair.is_none());
+    // 半截 pair（缺 __cflb 值）同样被拒，不能靠单 cookie 制造候选。
+    let mut bare = pair(now + 3600);
+    bare.cflb_name.clear();
+    bare.cflb_value.clear();
+    let mut half = observation(id.as_str(), "model-a", 780, issued + 1);
+    half.pair = Some(bare);
+    repository
+        .observe_turn_state(half, Some(token(780, issued + 1)))
+        .await
+        .unwrap();
+    let bucket = repository
+        .turn_state_bucket(&id, "model-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bucket.candidate.is_none());
+    // 完整 pair 携带有效到期收窄候选寿命：安装后 current_expires_at 取 pair 死线。
+    let mut observed = observation(id.as_str(), "model-a", 780, issued + 2);
+    observed.pair = Some(pair(issued + 60));
+    observed.expires_at = Some(issued + 60);
+    repository
+        .observe_turn_state(observed, Some(token(780, issued + 2)))
+        .await
+        .unwrap();
+    let bucket = repository
+        .turn_state_bucket(&id, "model-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bucket.candidate.is_some());
+    assert_eq!(bucket.candidate_expires_at, Some(issued + 60));
+    assert!(bucket.candidate_pair.is_some());
+    assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
+    let bucket = repository
+        .turn_state_bucket(&id, "model-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bucket.current.is_some());
+    assert_eq!(bucket.current_expires_at, Some(issued + 60));
+    let installed = bucket.installed_pair.expect("installed pair");
+    assert!(installed.has_pair());
+    assert_eq!(installed.pod, "chat.gateway.unified-7.api.openai.com");
+    // 常规状态输出只报布尔标志，不落 pair 正文。
+    let status = admin
+        .turn_state_status(Some(id.as_str()))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(status.has_installed_pair);
+    assert_eq!(status.installed_gateway_id.as_deref(), Some("unified-7"));
+    let rendered = serde_json::to_string(&status).unwrap();
+    // JWT 签名段与 cflb 值都是正文标记，常规状态一律不得泄露。
+    assert!(!rendered.contains("c2ln"));
+    assert!(!rendered.contains("pair-cflb"));
+    // pair 必填模式下历史正文无法回放：观测行有 token 但手动安装必须被拒。
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-a", issued, None, &context)
+            .await
+            .is_err()
+    );
+    // 合格候选观测行可以手动应用：从记录重建完整 pair，有效到期按记录死线封顶。
+    admin
+        .configure_turn_state(
+            &id,
+            "model-b",
+            TurnStateConfig {
+                enabled: true,
+                stop_strategy: TurnStateStopStrategy::DeclaredModel,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let issued_b = now - 20;
+    let mut observed_b = observation(id.as_str(), "model-b", 780, issued_b);
+    let mut pair_b = pair(now + 1800);
+    pair_b.cflb_value = "pair-cflb-b".to_owned();
+    pair_b.reported_model = "model-b".to_owned();
+    observed_b.pair = Some(pair_b.clone());
+    observed_b.expires_at = Some(issued_b + 120);
+    repository
+        .observe_turn_state(observed_b, Some(token(780, issued_b)))
+        .await
+        .unwrap();
+    let observation_id: i64 = sqlx::query_scalar(
+        "select id from account_turn_state_events where account_id = $1 and model = $2 order by id desc limit 1",
+    )
+    .bind(id.as_str())
+    .bind("model-b")
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    admin
+        .apply_turn_state(&id, "model-b", issued_b, Some(observation_id), &context)
+        .await
+        .unwrap();
+    let bucket = repository
+        .turn_state_bucket(&id, "model-b")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bucket.current.is_some());
+    assert!(bucket.manual_override);
+    let applied = bucket
+        .installed_pair
+        .expect("pair reconstructed from history");
+    assert_eq!(applied.cflb_value, "pair-cflb-b");
+    assert_eq!(bucket.current_expires_at, Some(issued_b + 120));
+    // 失败声明行即使带着完整 pair 与票也不许套用：验收结论与 pair 一起把关。
+    let mut bad = observation(id.as_str(), "model-b", 780, issued_b + 1);
+    bad.outcome = "model_mismatch".to_owned();
+    bad.pair = Some(pair_b);
+    bad.expires_at = Some(issued_b + 60);
+    repository
+        .observe_turn_state(bad, Some(token(780, issued_b + 1)))
+        .await
+        .unwrap();
+    let bad_id: i64 = sqlx::query_scalar(
+        "select id from account_turn_state_events where account_id = $1 and model = $2 order by id desc limit 1",
+    )
+    .bind(id.as_str())
+    .bind("model-b")
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        admin
+            .apply_turn_state(&id, "model-b", issued_b + 1, Some(bad_id), &context)
+            .await
+            .is_err()
+    );
+    database.close().await;
+}
+
+/// 票到期不连带已安装 pair：加载清理只摘除票本身，pair 保留到自身联合到期，
+/// 供下一次过期票定向重打做种子。
+#[tokio::test]
+async fn expired_ticket_keeps_the_installed_pair_until_its_own_expiry() {
+    let Some(database) = TestDatabase::create("turn_state_pair_outlive").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let id = ProviderAccountId::new("acct_pair_outlive").unwrap();
+    repository
+        .insert_provider_account(account(id.as_str(), id.as_str()))
+        .await
+        .unwrap();
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "pair-outlive".to_owned(),
+    };
+    admin
+        .configure_turn_state(
+            &id,
+            "model-a",
+            TurnStateConfig {
+                enabled: true,
+                stop_strategy: TurnStateStopStrategy::DeclaredModel,
+                ..TurnStateConfig::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    let now = Utc::now().timestamp();
+    let issued = now - 30;
+    let mut observed = observation(id.as_str(), "model-a", 780, issued);
+    observed.pair = Some(RoutingCookie {
+        origin: "endpoint".to_owned(),
+        pod: "chat.gateway.unified-7.api.openai.com".to_owned(),
+        name: "__oailb".to_owned(),
+        value: "outlive-jwt".to_owned(),
+        cflb_name: "__cflb".to_owned(),
+        cflb_value: "outlive-cflb".to_owned(),
+        cflb_expires_at: Some(now + 3600),
+        oailb_expires_at: Some(now + 3600),
+        issued_at: now - 5,
+        expires_at: now + 3600,
+        observed_at: 0,
+        reported_model: "model-a".to_owned(),
+    });
+    observed.expires_at = Some(issued + 240);
+    repository
+        .observe_turn_state(observed, Some(token(780, issued)))
+        .await
+        .unwrap();
+    assert!(repository.install_turn_state(&id, "model-a").await.unwrap());
+    // 有效死线已过、pair 联合到期仍远：清理只摘除票，不得连带 pair。
+    sqlx::query(
+        "update account_turn_states set current_expires_at = $1 where account_id = $2 and model = $3",
+    )
+    .bind(now - 1)
+    .bind(id.as_str())
+    .bind("model-a")
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let bucket = repository
+        .turn_state_buckets()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|bucket| bucket.account_id == id.as_str() && bucket.model == "model-a")
+        .unwrap();
+    assert!(bucket.installed_token(now).is_none());
+    let pair = bucket
+        .installed_pair
+        .expect("installed pair survives ticket expiry");
+    assert!(pair.expires_at > now);
+    assert!(pair.is_route_valid(now));
+    assert!(bucket.seed_pair(now).is_some());
     database.close().await;
 }

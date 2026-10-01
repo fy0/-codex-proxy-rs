@@ -14,7 +14,7 @@ pub struct TurnStateConfig {
     pub cookie_refresh_before_seconds: u64,
     pub cookie_gateway_ids: String,
     pub missing_state_policy: MissingTurnStatePolicy,
-    /// 暂停业务调度时，已附着的实际模型突然变化则作废当前票。
+    /// 已附着的实际模型突然变化则作废当前票。
     pub detect_actual_model: bool,
     pub target_length: usize,
     pub ttl_seconds: u64,
@@ -32,6 +32,17 @@ pub struct TurnStateConfig {
     pub proxy_ids: Vec<String>,
     pub stop_strategy: TurnStateStopStrategy,
     pub feishu_webhook_url: String,
+    /// 云端打票端点；全部冷却时回落本地探测出口。
+    #[serde(alias = "cloud_mints")]
+    pub cloud_mints: Vec<CloudMintConfig>,
+    #[serde(alias = "strategy")]
+    pub strategy: CloudMintStrategy,
+    #[serde(alias = "cloud_failure_threshold")]
+    pub cloud_failure_threshold: u32,
+    #[serde(alias = "cloud_cooldown_seconds")]
+    pub cloud_cooldown_seconds: u64,
+    #[serde(alias = "task_timeout_seconds")]
+    pub task_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -61,13 +72,173 @@ impl TurnStateAvailability {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStateStopStrategy {
     #[default]
     Headers,
     FirstOutput,
     Mixed,
+    /// 读到首个 `response.created` 即停，按其模型声明与响应 ID 验收票与路由 pair。
+    DeclaredModel,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudMintTransport {
+    #[default]
+    Sse,
+    Websocket,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudMintStrategy {
+    #[default]
+    Random,
+    RoundRobin,
+}
+
+/// 云端打票端点：URL 只为定位，`key_env` 是环境变量名而不是密钥正文。
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudMintConfig {
+    pub name: String,
+    pub url: String,
+    /// 存放中继密钥的环境变量名；拒绝把密钥正文写进配置。
+    #[serde(alias = "key_env")]
+    pub key_env: String,
+    #[serde(default)]
+    pub transport: CloudMintTransport,
+    /// `any` 或统一网编号（`88` / `unified-88`）。
+    #[serde(default = "default_cloud_gateway")]
+    pub gateway: String,
+    #[serde(default = "default_cloud_ticket_length", alias = "ticket_length")]
+    pub ticket_length: usize,
+    #[serde(default = "default_cloud_ttl", alias = "ttl_seconds")]
+    pub ttl_seconds: u64,
+    #[serde(default = "default_cloud_timeout_ms", alias = "timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default, alias = "proxy_url")]
+    pub proxy_url: String,
+}
+
+impl std::fmt::Debug for CloudMintConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut url = url::Url::parse(&self.url).ok();
+        if let Some(url) = url.as_mut() {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            let _ = url.set_query(None);
+            let _ = url.set_fragment(None);
+        }
+        f.debug_struct("CloudMintConfig")
+            .field("name", &self.name)
+            .field("url", &url.map(|url| url.to_string()))
+            .field("key_env", &self.key_env)
+            .field("gateway", &self.gateway)
+            .field("ticket_length", &self.ticket_length)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("proxy_url", &self.proxy_url.is_empty().then_some(()))
+            .finish()
+    }
+}
+
+fn default_cloud_gateway() -> String {
+    "any".to_owned()
+}
+
+fn default_cloud_ticket_length() -> usize {
+    780
+}
+
+fn default_cloud_ttl() -> u64 {
+    240
+}
+
+fn default_cloud_timeout_ms() -> u64 {
+    90_000
+}
+
+impl Default for CloudMintConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            url: String::new(),
+            key_env: String::new(),
+            transport: CloudMintTransport::Sse,
+            gateway: default_cloud_gateway(),
+            ticket_length: default_cloud_ticket_length(),
+            ttl_seconds: default_cloud_ttl(),
+            timeout_ms: default_cloud_timeout_ms(),
+            proxy_url: String::new(),
+        }
+    }
+}
+
+impl CloudMintConfig {
+    /// `any`/`*`/空表示不限定节点；否则必须是统一网编号。
+    pub fn gateway_target(&self) -> Option<String> {
+        let value = self.gateway.trim().to_ascii_lowercase();
+        if value.is_empty() || value == "any" || value == "*" {
+            return None;
+        }
+        super::RoutingCookie::normalize_gateway_label(&value)
+    }
+
+    /// 每个端点的稳定身份；配置改名会重开失败计数，防止张冠李戴。
+    pub fn endpoint_key(&self) -> String {
+        format!("{}\u{0}{}\u{0}{}", self.name, self.url, self.key_env)
+    }
+
+    fn is_valid(&self, target_length: usize) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= 64
+            && self
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            && valid_cloud_url(&self.url)
+            && valid_env_name(&self.key_env)
+            && (self.gateway_target().is_some()
+                || matches!(
+                    self.gateway.trim().to_ascii_lowercase().as_str(),
+                    "" | "any" | "*"
+                ))
+            && self.ticket_length == target_length
+            && (1..=3600).contains(&self.ttl_seconds)
+            && (1_000..=300_000).contains(&self.timeout_ms)
+            && (self.proxy_url.is_empty() || super::OutboundProxy::parse(&self.proxy_url).is_ok())
+    }
+}
+
+/// 中继 URL 必须是干净的 HTTPS 端点：不允许内嵌凭据、query 或 fragment。
+fn valid_cloud_url(value: &str) -> bool {
+    if value.len() > 2048 || value.trim() != value {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn valid_env_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 impl Default for TurnStateConfig {
@@ -79,13 +250,13 @@ impl Default for TurnStateConfig {
             cookie_gateway_ids: String::new(),
             missing_state_policy: MissingTurnStatePolicy::Allow,
             detect_actual_model: false,
-            target_length: 292,
-            // 同一张 292 在 191.7 秒时仍被接受，267.1 秒时上游已重新签发。240 秒落在这两次实测之间。
+            target_length: 780,
+            // 本侧配置的票有效窗口；超出后视作不可用并重新打票。
             ttl_seconds: 240,
             refresh_after_seconds: 120,
             retry_seconds: 30,
             jitter_seconds: 15,
-            budget: 40,
+            budget: 24,
             idle_seconds: 300,
             timezone: chrono_tz::UTC,
             originator: "codex-tui".to_owned(),
@@ -97,6 +268,11 @@ impl Default for TurnStateConfig {
             proxy_ids: Vec::new(),
             stop_strategy: TurnStateStopStrategy::Headers,
             feishu_webhook_url: String::new(),
+            cloud_mints: Vec::new(),
+            strategy: CloudMintStrategy::Random,
+            cloud_failure_threshold: 3,
+            cloud_cooldown_seconds: 300,
+            task_timeout_seconds: 75,
         }
     }
 }
@@ -134,6 +310,16 @@ impl TurnStateConfig {
             && self.cookie_gateway_ids_valid()
             && (self.feishu_webhook_url.is_empty()
                 || valid_feishu_webhook(&self.feishu_webhook_url))
+            && self.cloud_mints.len() <= 16
+            && {
+                let mut names = std::collections::BTreeSet::new();
+                self.cloud_mints.iter().all(|endpoint| {
+                    endpoint.is_valid(self.target_length) && names.insert(&endpoint.name)
+                })
+            }
+            && (1..=64).contains(&self.cloud_failure_threshold)
+            && (10..=86400).contains(&self.cloud_cooldown_seconds)
+            && (10..=600).contains(&self.task_timeout_seconds)
     }
 
     pub fn cookie_gateway_ids_valid(&self) -> bool {
@@ -148,21 +334,51 @@ impl TurnStateConfig {
                     })))
     }
 
+    /// 空列表放行任何合法 unified pod；非法 pod 一律不放行。
     pub fn allows_cookie_gateway(&self, pod: &str) -> bool {
-        if self.cookie_gateway_ids.is_empty() {
-            return false;
-        }
         let Some(gateway_id) = super::RoutingCookie::gateway_id_from_pod(pod) else {
             return false;
         };
+        if self.cookie_gateway_ids.is_empty() {
+            return true;
+        }
         self.cookie_gateway_ids
             .split('|')
             .any(|id| id == gateway_id)
     }
 
-    /// 实际模型检测只在暂停业务调度时把脱离的票作废，避免继续注入失效票。
+    /// 声明模型验收：首个 `response.created` 的模型声明必须命中请求模型。
+    pub fn uses_declared_model(&self) -> bool {
+        self.stop_strategy == TurnStateStopStrategy::DeclaredModel
+    }
+
+    /// 该桶的票据必须绑定完整路由 pair：声明模型验收或云端打票都依赖它钉住节点。
+    pub fn requires_route_pair(&self) -> bool {
+        self.uses_declared_model() || !self.cloud_mints.is_empty()
+    }
+
+    /// 实际模型检测把脱离请求模型的已安装票作废，避免继续注入失效票。
+    /// pair 绑定的模式（声明模型/云端打票）里票本身钉在声明模型上，脱离即作废，
+    /// 不依赖可选的实际模型检测开关。
     pub fn revokes_ticket_when_model_detaches(&self) -> bool {
-        self.detect_actual_model && self.missing_state_policy == MissingTurnStatePolicy::Pause
+        self.detect_actual_model || self.requires_route_pair()
+    }
+
+    /// 账号任务预算：配置值与硬上限 24 取小。
+    pub fn task_budget(&self) -> u32 {
+        self.budget.min(24)
+    }
+
+    /// 账号任务总时限：配置值与硬上限 75 秒取小。
+    pub fn task_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.task_timeout_seconds.min(75))
+    }
+
+    /// 端点票 TTL 与桶 TTL 共同收窄有效窗口。
+    pub fn effective_ttl(&self, endpoint: Option<&CloudMintConfig>) -> u64 {
+        endpoint.map_or(self.ttl_seconds, |endpoint| {
+            self.ttl_seconds.min(endpoint.ttl_seconds)
+        })
     }
 }
 
@@ -232,11 +448,30 @@ impl TurnStateToken {
         })
     }
 
+    /// Fernet 内嵌签发时刻；打票通道允许 30 秒以内的时钟偏差。
+    /// 只放宽签发起点，不延长 `issued_at + ttl` 死线。
+    pub fn mint_fresh(&self, now: i64, ttl_seconds: u64) -> bool {
+        self.issued_at > 0
+            && self.issued_at <= now + 30
+            && self.issued_at + ttl_seconds as i64 > now
+    }
+
     pub fn is_fresh(&self, now: i64, ttl_seconds: u64) -> bool {
         self.issued_at > 0
             && now
                 .checked_sub(self.issued_at)
                 .is_some_and(|age| age >= 0 && (age as u64) < ttl_seconds)
+    }
+
+    /// 桶内有效性：`expires_at` 只在 mint 验收路径写入，此时允许 30 秒签发偏差；
+    /// 其它票仍走严格 `is_fresh`，不被全局放宽。
+    pub fn live(&self, now: i64, ttl_seconds: u64, expires_at: Option<i64>) -> bool {
+        let fresh = if expires_at.is_some() {
+            self.mint_fresh(now, ttl_seconds)
+        } else {
+            self.is_fresh(now, ttl_seconds)
+        };
+        fresh && expires_at.is_none_or(|deadline| now < deadline)
     }
 
     pub fn is_newer_than(&self, issued_at: Option<i64>) -> bool {
@@ -269,6 +504,9 @@ pub struct TurnStateObservation {
     pub http_status: Option<u16>,
     pub token_length: Option<usize>,
     pub issued_at: Option<i64>,
+    /// 云端打票入口名；本地探测与业务观测为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     /// 上游在同一响应声明的实际模型；与令牌长度一样是观测事实，不代表生效模型。
     #[serde(default)]
     pub reported_model: Option<String>,
@@ -279,6 +517,9 @@ pub struct TurnStateObservation {
     pub cookie_issued_at: Option<i64>,
     #[serde(default)]
     pub cookie_expires_at: Option<i64>,
+    /// 票的有效到期：四个死线的最小值；空表示没有额外收窄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
     /// 这一条探测当时拿到的路由 Cookie。状态列表不返回正文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie_origin: Option<String>,
@@ -286,6 +527,14 @@ pub struct TurnStateObservation {
     pub cookie_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie_value: Option<String>,
+    /// pair 的 `__cflb` 半边；状态列表同样不返回正文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_cflb_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_cflb_value: Option<String>,
+    /// 候选票据绑定的完整路由 pair；只进桶的配对列，不写进事件 detail。
+    #[serde(skip)]
+    pub pair: Option<super::RoutingCookie>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_cookie: bool,
     /// 有效信封正文随观测行持久化；状态查询剥离正文，操作使用观测 ID 精确定位。
@@ -368,10 +617,19 @@ pub struct TurnStateBucket {
     pub cookie_override_value: Option<String>,
     pub cookie_override_expires_at: Option<i64>,
     pub cookie_override_observation_id: Option<i64>,
+    /// 固定 pair 的 `__cflb` 半边；缺半边时整个固定不回放。
+    pub cookie_override_cflb_name: Option<String>,
+    pub cookie_override_cflb_value: Option<String>,
     pub current: Option<TurnStateToken>,
     pub current_issued_at: Option<i64>,
+    /// 当前票的有效到期：四个死线的最小值；空表示只按签发时间 + TTL 判断。
+    pub current_expires_at: Option<i64>,
+    /// 当前票绑定的路由 pair；缺失表示票与 pair 无关（旧格式）。
+    pub installed_pair: Option<super::RoutingCookie>,
     pub current_length: Option<usize>,
     pub candidate: Option<TurnStateToken>,
+    pub candidate_expires_at: Option<i64>,
+    pub candidate_pair: Option<super::RoutingCookie>,
     pub hunt_attempts: u64,
     pub next_probe_at: Option<i64>,
     pub manual_probe_requested_at: Option<i64>,
@@ -381,8 +639,8 @@ pub struct TurnStateBucket {
 }
 
 impl TurnStateBucket {
-    /// 已固定的那一条探测 Cookie。有正文就回放到后续请求，直到解除或到期。
-    pub fn routing_cookie(&self, now: i64) -> Option<super::RoutingCookie> {
+    /// 固定的完整 pair。半截固定值不回放，直到解除或到期。
+    fn pinned_cookie(&self, now: i64) -> Option<super::RoutingCookie> {
         let name = self
             .cookie_override_name
             .as_deref()
@@ -391,20 +649,66 @@ impl TurnStateBucket {
             .cookie_override_value
             .as_deref()
             .filter(|value| !value.is_empty())?;
+        let cflb_name = self
+            .cookie_override_cflb_name
+            .as_deref()
+            .filter(|name| !name.is_empty())?;
+        let cflb_value = self
+            .cookie_override_cflb_value
+            .as_deref()
+            .filter(|value| !value.is_empty())?;
         let expires_at = self.cookie_override_expires_at?;
         if now >= expires_at {
             return None;
         }
-        Some(super::RoutingCookie {
+        let cookie = super::RoutingCookie {
             origin: String::new(),
             pod: self.cookie_override_pod.clone().unwrap_or_default(),
             name: name.to_owned(),
             value: value.to_owned(),
+            cflb_name: cflb_name.to_owned(),
+            cflb_value: cflb_value.to_owned(),
+            cflb_expires_at: Some(expires_at),
+            oailb_expires_at: Some(expires_at),
             issued_at: self.cookie_override_issued_at.unwrap_or(0),
             expires_at,
             observed_at: 0,
             reported_model: self.model.clone(),
-        })
+        };
+        cookie.is_route_valid(now).then_some(cookie)
+    }
+
+    /// 固定 pair 优先；其次回放已安装票绑定的 pair。
+    /// 票绑定模式不回退到无关共享 pod；旧式 Cookie 锁定（无票）仍按共享池选号。
+    pub fn routing_cookie(&self, now: i64) -> Option<super::RoutingCookie> {
+        if let Some(cookie) = self.pinned_cookie(now) {
+            return Some(cookie);
+        }
+        if let Some(pair) = self.installed_pair.as_ref().filter(|pair| {
+            pair.is_usable(&self.model, now) && self.config.allows_cookie_gateway(&pair.pod)
+        }) {
+            return Some(pair.clone());
+        }
+        if self.config.requires_route_pair() {
+            return None;
+        }
+        self.routing_cookies
+            .iter()
+            .find(|cookie| {
+                cookie.is_usable(&self.model, now) && self.config.allows_cookie_gateway(&cookie.pod)
+            })
+            .cloned()
+    }
+
+    /// 种子 pair：固定值或已安装 pair 的路由有效性，不看模型——种子跨模型复用。
+    pub fn seed_pair(&self, now: i64) -> Option<super::RoutingCookie> {
+        if let Some(cookie) = self.pinned_cookie(now) {
+            return Some(cookie);
+        }
+        self.installed_pair
+            .as_ref()
+            .filter(|pair| pair.is_route_valid(now) && self.config.allows_cookie_gateway(&pair.pod))
+            .cloned()
     }
 
     pub fn renewal_cookie(&self, now: i64) -> Option<super::RoutingCookie> {
@@ -418,13 +722,53 @@ impl TurnStateBucket {
     }
 
     /// 已安装正文才是票，候选及账号级通用覆盖不能满足模型桶的要求。
+    /// 需要路由 pair 的模式要求票已绑定完整可用 pair，否则票发不出去、按缺失处理。
+    /// 固定 pair 存在时优先：票绑定的 pair 必须与当前固定值是同一把，
+    /// 换绑其它 pair 后旧票不可继续注入，直到定向重打或绑定被作废。
     pub fn installed_token(&self, now: i64) -> Option<&TurnStateToken> {
+        let pinned = self.pinned_cookie(now);
         self.current.as_ref().filter(|token| {
             Some(token.issued_at) == self.current_issued_at
                 && token.value.len() == self.config.target_length
-                && token.is_fresh(now, self.config.ttl_seconds)
+                && token.live(now, self.config.ttl_seconds, self.current_expires_at)
                 && TurnStateToken::parse(&token.value)
                     .is_some_and(|parsed| parsed.issued_at == token.issued_at)
+                && if let Some(pin) = pinned.as_ref() {
+                    self.installed_pair.as_ref().is_some_and(|pair| {
+                        pair.same_pair(pin)
+                            && pair.is_usable(&self.model, now)
+                            && self.config.allows_cookie_gateway(&pair.pod)
+                    })
+                } else if self.config.requires_route_pair() {
+                    self.installed_pair.as_ref().is_some_and(|pair| {
+                        pair.is_usable(&self.model, now)
+                            && self.config.allows_cookie_gateway(&pair.pod)
+                    })
+                } else {
+                    self.installed_pair.as_ref().is_none_or(|pair| {
+                        pair.is_usable(&self.model, now)
+                            && self.config.allows_cookie_gateway(&pair.pod)
+                    })
+                }
+        })
+    }
+
+    /// 票的签发死线；`current_expires_at` 存在时取两者较小值。
+    pub fn installed_deadline(&self, now: i64) -> Option<i64> {
+        let token = self.installed_token(now)?;
+        Some(
+            self.current_expires_at
+                .unwrap_or(token.issued_at + self.config.ttl_seconds as i64)
+                .min(token.issued_at + self.config.ttl_seconds as i64),
+        )
+    }
+
+    /// 候选票的有效性判断与已安装票同规则，供存储/探测复用。
+    pub fn candidate_live(&self, now: i64) -> bool {
+        self.candidate.as_ref().is_some_and(|token| {
+            token.value.len() == self.config.target_length
+                && token.live(now, self.config.ttl_seconds, self.candidate_expires_at)
+                && token.is_newer_than(self.current_issued_at)
         })
     }
 
@@ -445,7 +789,8 @@ impl TurnStateBucket {
         if self.config.missing_state_policy == MissingTurnStatePolicy::Allow {
             return TurnStateAvailability::Optional;
         }
-        if self.config.cookie_lock_enabled {
+        // 旧式 Cookie 锁定只认 pair；声明模型与云端打票的桶必须有已安装票。
+        if self.config.cookie_lock_enabled && !self.config.requires_route_pair() {
             let expires_at = self
                 .routing_cookie(now)
                 .filter(|_| self.matches_account(account, model))
@@ -458,10 +803,9 @@ impl TurnStateBucket {
         let expires_at = self
             .installed_token(now)
             .filter(|_| self.matches_account(account, model))
-            .and_then(|token| {
-                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
-                    token.issued_at as u64 + self.config.ttl_seconds,
-                ))
+            .and_then(|_| self.installed_deadline(now))
+            .and_then(|deadline| {
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(deadline as u64))
             });
         TurnStateAvailability::Required { expires_at }
     }
@@ -487,12 +831,21 @@ pub struct TurnStateStatus {
     pub age_seconds: Option<i64>,
     pub active: bool,
     pub has_installed_state: bool,
+    /// 已安装票是否绑定完整路由 pair（不返回 pair 正文）。
+    pub has_installed_pair: bool,
+    /// 已安装 pair 的 `unified-N` 标签；未绑定或 pair 不完整时为空。
+    pub installed_gateway_id: Option<String>,
+    /// 当前票的有效到期点；空表示只按签发时间 + TTL 判断。
+    pub current_expires_at: Option<i64>,
+    pub candidate_expires_at: Option<i64>,
     pub routing_cookie: Option<super::RoutingCookieStatus>,
     pub cookie_pool: Vec<super::RoutingCookieStatus>,
     pub cookie_override_pod: Option<String>,
     pub cookie_override_issued_at: Option<i64>,
     pub cookie_override_name: Option<String>,
     pub cookie_override_value: Option<String>,
+    pub cookie_override_cflb_name: Option<String>,
+    pub cookie_override_cflb_value: Option<String>,
     pub cookie_override_expires_at: Option<i64>,
     pub cookie_override_observation_id: Option<String>,
     pub business_status: TurnStateBusinessStatus,

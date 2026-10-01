@@ -18,9 +18,10 @@ mod selection;
 mod store;
 mod turn_state;
 pub use turn_state::{
-    MissingTurnStatePolicy, TurnStateAvailability, TurnStateBucket, TurnStateBusinessStatus,
-    TurnStateConfig, TurnStateInstallation, TurnStateNotification, TurnStateObservation,
-    TurnStateStatus, TurnStateStopStrategy, TurnStateToken,
+    CloudMintConfig, CloudMintStrategy, CloudMintTransport, MissingTurnStatePolicy,
+    TurnStateAvailability, TurnStateBucket, TurnStateBusinessStatus, TurnStateConfig,
+    TurnStateInstallation, TurnStateNotification, TurnStateObservation, TurnStateStatus,
+    TurnStateStopStrategy, TurnStateToken,
 };
 
 pub use error::CredentialError;

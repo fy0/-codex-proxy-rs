@@ -101,7 +101,9 @@ pub trait ProviderAccountStore: Send + Sync {
         Ok(false)
     }
 
-    /// 记录本张已安装票的实际模型。`revoke_on_change` 时，相对已附着模型的变化会清除票正文并保留签发水位。
+    /// 记录本张已安装票实际被谁服务。`sent_state` 精确匹配已安装正文、且实际模型脱离
+    /// 请求模型时，在 `revoke_on_change` 下作废票正文与其绑定的路由 pair 并保留签发水位；
+    /// `sent_cookie` 提供本次请求携带的路由 Cookie，固定值恰为它时一并解除固定。
     async fn observe_installed_model(
         &self,
         _account: &ProviderAccountId,
@@ -109,6 +111,7 @@ pub trait ProviderAccountStore: Send + Sync {
         _sent_state: &str,
         _reported_model: &str,
         _revoke_on_change: bool,
+        _sent_cookie: Option<&super::RoutingCookie>,
     ) -> Result<bool, StoreError> {
         Ok(false)
     }

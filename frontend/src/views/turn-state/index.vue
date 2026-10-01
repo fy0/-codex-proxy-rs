@@ -67,7 +67,7 @@ const tableBuckets = computed<TurnStateStatus[]>(() => {
 const selection = computed(() => tableBuckets.value.find(bucket => bucketKey(bucket) === selectedKey.value))
 const accountOptions = computed(() => [{ label: '全部账号', value: '' }, ...accounts.value.map(account => ({ label: `${account.email?.trim() || account.name} · ${account.id}`, value: account.id }))])
 const bucketOptions = computed(() => tableBuckets.value.map(bucket => ({ label: `${bucket.accountEmail?.trim() || bucket.accountName} · ${bucket.accountId} / ${bucket.model}`, value: bucketKey(bucket) })))
-const observations = computed(() => selection.value?.observations.filter(item => item.source === tab.value) ?? [])
+const observations = computed(() => selection.value?.observations.filter(item => tab.value === 'probe' ? item.source !== 'passive' : item.source === tab.value) ?? [])
 const installations = computed(() => selection.value?.installations ?? [])
 const total = computed(() => tab.value === 'history' ? installations.value.length : observations.value.length)
 const distribution = computed(() => {
@@ -115,9 +115,9 @@ const historyColumns = defineTableColumns<TurnStateInstallation>([
   { key: 'issuedAt', label: '签发时间', kind: 'datetime', format: value => date(value as number) },
   { key: 'tokenLength', label: '长度', kind: 'numeric' },
   { key: 'acquiredAt', label: '获取时间', kind: 'datetime', format: value => date(value as number) },
-  { key: 'attempts', label: '尝试次数', kind: 'numeric', format: (value, row) => row.source === 'probe' && row.attempts === 0 ? '未记录' : value },
-  { key: 'huntSeconds', label: '获取耗时（秒）', kind: 'numeric', format: (value, row) => row.source === 'probe' && row.attempts === 0 ? '未记录' : value },
-  { key: 'source', label: '来源', kind: 'text', format: value => value === 'probe' ? '主动探测' : '被动采集' },
+  { key: 'attempts', label: '尝试次数', kind: 'numeric', format: (value, row) => row.source !== 'passive' && row.attempts === 0 ? '未记录' : value },
+  { key: 'huntSeconds', label: '获取耗时（秒）', kind: 'numeric', format: (value, row) => row.source !== 'passive' && row.attempts === 0 ? '未记录' : value },
+  { key: 'source', label: '来源', kind: 'text', format: value => value === 'cloud_mint' ? '云端打票' : value === 'probe' ? '主动探测' : '被动采集' },
 ])
 
 function bucketKey(bucket: TurnStateStatus) {
@@ -150,7 +150,7 @@ function businessLabel(bucket: TurnStateStatus) {
   return labels[businessStatus(bucket)]
 }
 function recentProbe(bucket: TurnStateStatus) {
-  return bucket.observations.find(item => item.source === 'probe')
+  return bucket.observations.find(item => item.source !== 'passive')
 }
 function clippedAnswer(value: string) {
   const limit = 120
@@ -169,7 +169,7 @@ function averageRetries(bucket: TurnStateStatus) {
   return samples.length ? (samples.reduce((sum, item) => sum + Math.max(0, item.attempts - 1), 0) / samples.length).toFixed(1) : '-'
 }
 function outcome(value: string) {
-  const labels: Record<string, string> = { cookie_ready: 'Cookie 可用', cookie_gateway_filtered: '网关编号未允许', cookie_model_mismatch: 'pod 模型不符', missing_cookie: '未获得路由 Cookie', missing_model: '缺少模型声明', cookie_deleted: 'Cookie 已失效', candidate: '有效候选', length_miss: '长度未命中', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
+  const labels: Record<string, string> = { cookie_ready: 'Cookie 可用', cookie_gateway_filtered: '网关编号未允许', cookie_model_mismatch: 'pod 模型不符', missing_cookie: '未获得路由 Cookie', missing_model: '缺少模型声明', cookie_deleted: 'Cookie 已失效', candidate: '有效候选', invalid_length: '长度未命中', headers_only: '仅报头票，缺路由 pair', pair_ready: '票与路由 pair 就绪', invalid_created: '首个 response.created 不完整', model_mismatch: '声明模型与请求不符', endpoint_unavailable: '云端端点不可用', invalid_response: '云端响应无效', body_limit: '云端响应超限', timeout: '云端打票超时', session_aborted: '账号任务已中止', budget_exhausted: '账号任务预算耗尽', missing_header: '无响应头', transport_error: '传输错误', invalid_token: '无效令牌', expired_or_future: '签发时间失效', http_error: 'HTTP 错误', access_token_expired_or_unknown: '凭据过期或时间未知', account_disabled_or_model_denied: '账号停用或模型禁用', account_ended: '账号凭据被拒', oauth_required: '需要 OAuth', missing_account_identity: '缺少账号身份', credential_unavailable: '凭据读取失败', credential_invalid: '凭据无效', cookie_required: '官方上游需要 Cookie', cookie_invalid: 'Cookie 无法发送', model_detached: '实际模型脱离，票已作废', proxy_pool_unavailable: '代理池读取失败', proxy_pool_empty: '无可用出口' }
   if (value === 'reused_state')
     return '相同 state（未续期）'
   if (value === 'not_newer')
@@ -453,7 +453,7 @@ onMounted(async () => {
         <div class="grid gap-1">
           <span :class="businessStatus(row) === 'ready' ? 'text-cp-success-text' : 'text-cp-warning-text'">{{ businessLabel(row) }}</span>
           <span class="text-cp-xs text-cp-text-secondary">无票：{{ row.config.missingStatePolicy === 'pause' ? '暂停业务调度' : '继续调度' }}</span>
-          <span v-if="row.config.detectActualModel && !row.config.cookieLockEnabled" class="text-cp-xs text-cp-text-secondary">实际模型检测{{ row.config.missingStatePolicy === 'pause' ? '：脱离即作废' : '：仅记录' }}</span>
+          <span v-if="row.config.detectActualModel && !row.config.cookieLockEnabled" class="text-cp-xs text-cp-text-secondary">实际模型检测：脱离即作废</span>
           <span v-if="row.config.missingStatePolicy === 'pause' && !row.config.enabled && !row.config.cookieLockEnabled" class="text-cp-xs text-cp-warning-text">缺票需手动探测并应用</span>
         </div>
       </template>
@@ -550,7 +550,7 @@ onMounted(async () => {
             近期成功样本
           </dt>
           <dd class="m-0 mt-1">
-            {{ selection.installations.filter(item => item.source === 'probe').length }} 次
+            {{ selection.installations.filter(item => item.source !== 'passive').length }} 次
           </dd>
         </div>
         <div>
@@ -592,7 +592,6 @@ onMounted(async () => {
           <span v-if="selection.cookieOverridePod" class="break-all text-cp-xs text-cp-text-secondary">{{ selection.cookieOverridePod }}</span>
           <span class="text-cp-text-secondary">签发 {{ date(selection.cookieOverrideIssuedAt ?? null) }}</span>
           <span class="text-cp-text-secondary">到期 {{ date(selection.cookieOverrideExpiresAt ?? null) }}</span>
-          <span v-if="selection.cookieOverrideValue" class="basis-full break-all font-mono text-cp-xs">{{ selection.cookieOverrideName }}={{ selection.cookieOverrideValue }}</span>
           <BaseButton variant="destructive" size="sm" :disabled="cookieRemoving" @click="removeCookie(selection)">
             解除固定
           </BaseButton>

@@ -113,8 +113,10 @@ struct CookieCopyResponse {
     pod: String,
     name: String,
     value: String,
+    cflb_name: String,
+    cflb_value: String,
     expires_at: i64,
-    /// 账号仍有效的 Cookie，加上选中的路由票，格式与业务请求的 Cookie 头相同。
+    /// 账号仍有效的 Cookie，加上选中的路由票 pair，格式与业务请求的 Cookie 头相同。
     header: String,
 }
 
@@ -281,6 +283,8 @@ where
             pod: cookie.pod,
             name: cookie.name,
             value: cookie.value,
+            cflb_name: cookie.cflb_name,
+            cflb_value: cookie.cflb_value,
             expires_at: cookie.expires_at,
             header: cookie.header,
         }),

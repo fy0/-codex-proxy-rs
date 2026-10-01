@@ -154,11 +154,14 @@ async function save() {
       </p>
       <BaseSwitch v-if="!config.cookieLockEnabled" v-model="config.detectActualModel" label="实际模型检测" show-label :disabled="saving" />
       <p v-if="config.detectActualModel && !config.cookieLockEnabled" class="m-0 text-cp-sm text-cp-text-secondary">
-        同时选择暂停业务调度时，本票已附着的实际模型如果突然变成另一个模型，当前票立即作废，后续业务等待新票。
+        业务响应带回的实际模型与请求模型不符时，当前票立即作废并断开该账号已有 WebSocket；声明模型验收和云端打票桶始终按此规则，不依赖本开关。
       </p>
-      <BaseFormItem v-if="!config.cookieLockEnabled" label="探测中断策略">
-        <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }]" aria-label="探测中断策略" :disabled="saving" />
+      <BaseFormItem v-if="!config.cookieLockEnabled || config.enabled" label="探测中断策略">
+        <BaseSelect v-model="config.stopStrategy" :options="[{ label: '获得 state 即中断', value: 'headers' }, { label: '获得回应中断', value: 'first_output' }, { label: '混合', value: 'mixed' }, { label: '首个 response.created', value: 'declared_model' }]" aria-label="探测中断策略" :disabled="saving" />
       </BaseFormItem>
+      <p v-if="(!config.cookieLockEnabled || config.enabled) && config.stopStrategy === 'declared_model'" class="m-0 text-cp-sm text-cp-text-secondary">
+        以首个 response.created 的模型声明验收：模型不符、缺少声明或缺完整 __cflb/__oailb pair 均不安装；需配合云端铸造或 Cookie 采集获得 pair。
+      </p>
       <p class="m-0 text-cp-sm text-cp-text-secondary">
         {{ config.cookieLockEnabled ? 'Cookie 探测读取 response.created 的模型声明和 JWT payload；只有模型一致且网关编号命中的 pod 才会自动使用。池为空时遵循无票调度策略。' : 'state 按目标长度筛选，有效期只决定网关何时停止注入；实际是否接受由上游决定。' }}
       </p>

@@ -133,9 +133,17 @@ impl ProviderAccountStore for PgProviderAccountRepository {
         sent_state: &str,
         reported_model: &str,
         revoke_on_change: bool,
+        sent_cookie: Option<&gateway_core::account::RoutingCookie>,
     ) -> Result<bool, CoreStoreError> {
-        self.note_installed_model(account, model, sent_state, reported_model, revoke_on_change)
-            .await
+        self.note_installed_model(
+            account,
+            model,
+            sent_state,
+            reported_model,
+            revoke_on_change,
+            sent_cookie,
+        )
+        .await
     }
 
     async fn create_account(&self, account: CoreNewProviderAccount) -> Result<(), CoreStoreError> {

@@ -32,7 +32,7 @@ async fn notification_sends_installation_details_and_checks_feishu_business_stat
         panic!("expected scheduled worker");
     };
     let issued = Utc::now().timestamp() - 5;
-    let value = token_at(217, issued);
+    let value = token_at(585, issued);
     for (status, code, delivered, attempts) in [
         (200, 0, true, 12),
         (200, 19024, false, 12),
@@ -53,7 +53,7 @@ async fn notification_sends_installation_details_and_checks_feishu_business_stat
             installation: TurnStateInstallation {
                 installed_at: issued + 5,
                 issued_at: issued,
-                token_length: 292,
+                token_length: 780,
                 source: "probe".to_owned(),
                 acquired_at: issued + 4,
                 attempts,

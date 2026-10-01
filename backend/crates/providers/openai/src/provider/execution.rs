@@ -822,12 +822,19 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let request_state_source = prepare_turn_state(
             &mut request, &lease, upstream_model.as_str(), context.is_diagnostic_required_account(),
         )?;
+        let cookie_lock = lease.turn_state().is_some_and(|bucket| bucket.config.cookie_lock_enabled)
+            || lease.turn_state().is_some_and(|bucket| bucket.config.requires_route_pair());
+        // 冷流真正发送时重新读共享池，不能用选号时缓存的已降级凭证。
+        let cookie_bucket = if cookie_lock {
+            if let Some(service) = &turn_state { service.current(lease.account().id(), upstream_model.as_str()).await } else { None }
+        } else { None };
+        let sent_cookie = cookie_bucket.as_ref().and_then(|bucket| bucket.routing_cookie(chrono::Utc::now().timestamp()));
         let observer = turn_state.as_ref().filter(|_| lease.authentication().oauth().is_some())
             .map(|service| service.observer(
                 lease.account(), upstream_model.as_str(),
                 request.body().get("reasoning").and_then(|value| value.get("effort"))
                     .and_then(Value::as_str).map(str::to_owned),
-                request_state_source, request.turn_state.clone(),
+                request_state_source, request.turn_state.clone(), sent_cookie.clone(),
             ));
         let client = client.with_turn_state_observer(observer);
         if let Some(capture) = session_capture.as_mut() {
@@ -845,21 +852,15 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             allows_capacity_feedback: !context.is_diagnostic_required_account(),
         };
         let mut active_account = lease.account().clone();
-        let cookie_lock = lease.turn_state().is_some_and(|bucket| bucket.config.cookie_lock_enabled);
-        // 冷流真正发送时重新读共享池，不能用选号时缓存的已降级凭证。
-        let cookie_bucket = if cookie_lock {
-            if let Some(service) = &turn_state { service.current(lease.account().id(), upstream_model.as_str()).await } else { None }
-        } else { None };
-        let sent_cookie = cookie_bucket.as_ref().and_then(|bucket| bucket.routing_cookie(chrono::Utc::now().timestamp()));
         if cookie_lock && !context.is_diagnostic_required_account()
             && lease.turn_state().is_some_and(|bucket| bucket.config.missing_state_policy == gateway_core::account::MissingTurnStatePolicy::Pause)
             && sent_cookie.is_none() {
             Err(map_selection_error(CredentialSelectionError::MissingTurnState))?;
         }
         let cookie_header = if cookie_lock {
-            // 只锁路由凭证；剥离旧的 __oailb/__oai_lb 避免与池内选定值重复，
-            // __cflb 等其余亲和 Cookie 原样回放。
-            let base = build_cookie_header(lease.cookies().iter().filter(|cookie| !matches!(cookie.name.as_str(), "__oailb" | "__oai_lb")))?;
+            // 只锁路由凭证；剥离旧的 __oailb/__oai_lb/__cflb 避免与池内选定 pair 重复，
+            // 半截 pair 不构成可回放凭据，账号自带 __cflb 不单独放行。
+            let base = build_cookie_header(lease.cookies().iter().filter(|cookie| !matches!(cookie.name.as_str(), "__oailb" | "__oai_lb" | "__cflb")))?;
             let mut value = base.as_ref().map(|value| value.expose_secret().to_owned()).unwrap_or_default();
             if let Some(cookie) = &sent_cookie {
                 if !value.is_empty() { value.push_str("; "); }
@@ -1007,10 +1008,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         if let Some(service) = &turn_state {
             service
                 .observe_cookie(
+                    active_account.id(),
                     &response.set_cookie_headers,
                     sent_cookie.as_ref(),
                     None,
                     cookie_request_started_at,
+                    false,
                 )
                 .await;
         }
@@ -1185,8 +1188,13 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             pre_commit_events.observe_chunk(chunk_len);
             let response_model_changed = observation_state
                 .observe_upstream_response_model(decoder.response_model());
-            if let Some(model) = decoder.body_response_model()
-                && observed_cookie_model.as_deref() != Some(model)
+            // 路由对账只认首个 `response.created` 锁住的模型；created 缺失时回退
+            // 共享正文观测，终端事件不得反超 created 声明。
+            if let Some(model) = decoder
+                .created_response_model()
+                .or_else(|| decoder.body_response_model())
+                .map(str::to_owned)
+                && observed_cookie_model.as_deref() != Some(model.as_str())
                 && let Some(service) = &turn_state {
                 service
                     .observe_business_cookie(
@@ -1195,14 +1203,15 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                             headers: &failure_set_cookie_headers,
                             sent: sent_cookie.as_ref(),
                             requested_model: upstream_model.as_str(),
-                            model,
+                            model: &model,
+                            request_state: request.turn_state.as_deref(),
                             request_state_source,
                             response_state: response_turn_state.as_deref(),
                             started_at: cookie_request_started_at,
                         },
                     )
                     .await;
-                observed_cookie_model = Some(model.to_owned());
+                observed_cookie_model = Some(model);
             }
             let service_tier_changed = observation_state
                 .observe_upstream_service_tier(decoder.response_service_tier());
@@ -1465,10 +1474,13 @@ fn prepare_turn_state(
     };
     // 非空的账号通用 state 一直覆盖自动票，直到管理员把它改成空。
     let account_override = account_state_override(lease);
-    if lease
-        .turn_state()
-        .is_some_and(|bucket| bucket.config.cookie_lock_enabled && !bucket.config.enabled)
-    {
+    // 早期返回只管纯 Cookie 锁定：声明模型/云端打票的桶即使关闭自动打票，
+    // 手动安装的票与其绑定 pair 仍要照常注入。
+    if lease.turn_state().is_some_and(|bucket| {
+        bucket.config.cookie_lock_enabled
+            && !bucket.config.enabled
+            && !bucket.config.requires_route_pair()
+    }) {
         if let Some(value) = account_override {
             force_turn_state_override(request, value);
             return Ok("account_override");

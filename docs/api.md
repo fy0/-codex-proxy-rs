@@ -375,8 +375,8 @@ Token 明细、费用明细、用时/首字与状态。Token 和费用复用现�
 | `POST` | `/api/admin/accounts/turn-state/probe` | `{ accountId, model }` | 排队一次探测，返回 202 和账号配置版本；账号须启用，不要求桶启用轮换 |
 | `POST` | `/api/admin/accounts/turn-state/apply` | `{ accountId, model, issuedAt, observationId? }` | 应用当前候选或指定观测记录的票，不改变自动轮换开关；票已变更、过期或不再可安装时返回 409 |
 | `POST` | `/api/admin/accounts/turn-state/remove` | `{ accountId, model, issuedAt }` | 移除该桶已安装票，预期签发时间不匹配或已移除时返回 409，不改变账号或探测开关 |
-| `POST` | `/api/admin/accounts/turn-state/cookie-apply` | `{ accountId, model, pod, issuedAt?, observationId? }` | 固定某一条探测记录上的 Cookie。带 `observationId` 时用那条记录保存的 Cookie 正文写回池并绑定它的签发时间；省略则绑定池内该 pod 的当前值。失败返回 409 |
-| `POST` | `/api/admin/accounts/turn-state/cookie-copy` | `{ accountId, model, pod, observationId? }` | 复制某一条探测记录上保存的路由 Cookie。`header` 是账号上仍可回放的 Cookie 加上这张记录里的路由票；同时返回 `pod`、`name`、`value` 和 `expiresAt`。未带 `observationId` 时读取池内该 pod 的当前值。响应禁止缓存；记录和池里都没有正文时返回错误 |
+| `POST` | `/api/admin/accounts/turn-state/cookie-apply` | `{ accountId, model, pod, issuedAt?, observationId? }` | 固定某一条探测记录上的 Cookie pair。带 `observationId` 时用那条记录保存的两个 Cookie 正文写回池并绑定它的签发时间；省略则绑定池内该 pod 的当前值。记录或池内 pair 不完整时失败返回 409 |
+| `POST` | `/api/admin/accounts/turn-state/cookie-copy` | `{ accountId, model, pod, observationId? }` | 复制某一条探测记录上保存的路由 Cookie pair。`header` 是账号上仍可回放的 Cookie 加上这张记录里的完整 pair；同时返回 `pod`、`name`、`value`、`cflbName`、`cflbValue` 和 `expiresAt`。未带 `observationId` 时读取池内该 pod 的当前值。响应禁止缓存；记录和池里都没有正文或 pair 不完整时返回错误 |
 | `POST` | `/api/admin/accounts/turn-state/cookie-remove` | `{ accountId, model }` | 取消该模型桶的 Cookie 固定；没有固定值时返回 409，不改变 Cookie 锁定或探测开关 |
 | `POST` | `/api/admin/accounts/turn-state/copy` | `{ accountId, model, issuedAt, observationId? }` | 按需读取仍有效的已安装票、当前候选或指定观测记录的票，返回正文和签发时间，响应禁止缓存 |
 | `POST` | `/api/admin/accounts/turn-state/preview` | `{ config }` | 返回实际探测 UA、CLI 版本和时区日期，不发送上游请求 |
@@ -446,12 +446,12 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 | `cookieRefreshBeforeSeconds` | `300` | 30–1800 秒，在 JWT 到期前提前携带同一 Cookie 探测续约；以新 JWT 的实际期限为准 |
 | `cookieGatewayIds` | `""` | 只允许十进制网关编号，多个值用 `|` 分隔，例如 `185|87`；留空不自动选择，管理员仍可人工固定有效候选 |
 | `missingStatePolicy` | `allow` | `allow` 无有效 state 时继续调度；`pause` 暂停该账号、该上游模型的业务调度，不改变账号与自动探测开关。`pause` 是这里的退避策略 |
-| `detectActualModel` | `false` | 开启后记录本票附着的上游实际模型。只有同时为 `pause` 时，后续请求的实际模型突然变化才会作废当前票：清除正文、保留签发水位，并断开该账号已有 WebSocket。第一次看到实际模型只建立附着，不作废。大小写不同视为同一个模型 |
-| `targetLength` | `292` | 76–4096 字节；候选与安装票的长度门槛。只有命中目标长度的合法新票进入候选，其他合法票的正文随观测历史留存 |
-| `ttlSeconds` | `240` | 60–3600 秒，从令牌内嵌签发时间计算的本地有效期；重复观察不续期。同一张 292 在 191.7 秒时仍被接受，267.1 秒时上游已重新签发 312；240 秒位于这两次实测之间 |
-| `refreshAfterSeconds` | `120` | 至少 30 秒且小于寿命；达到此龄开始寻找更新令牌 |
-| `retrySeconds` / `jitterSeconds` | `30` / `15` | 重试间隔 1–3600 秒，再加 0–jitter 的随机秒数，抖动上限 3600 |
-| `budget` / `idleSeconds` | `40` / `300` | 每轮最多 1–100 次尝试，之后休息 10–86400 秒 |
+| `detectActualModel` | `false` | 开启后把每张票实际带回的上游模型与请求模型比对；后续请求带回的实际模型与请求模型不符时立即作废当前票：清除正文与其绑定 pair、保留签发水位，并断开该账号已有 WebSocket。`declared_model` 与配置了云端打票的桶始终按此规则作废，不依赖本开关。大小写不同视为同一个模型 |
+| `targetLength` | `780` | 76–4096 字节；候选与安装票的长度门槛。只有命中目标长度的合法新票进入候选，其他合法票的正文随观测历史留存 |
+| `ttlSeconds` | `240` | 60–3600 秒，从令牌内嵌签发时间计算的本地有效期；重复观察不续期。有效期是本侧停止注入的本地窗口，不代表上游承诺的可用时长 |
+| `refreshAfterSeconds` | `120` | 至少 30 秒且小于寿命；旧版提前轮换留下的调度提示，当前实现只在票到期后补打，该值只用于状态估算下一次探测时间 |
+| `retrySeconds` / `jitterSeconds` | `30` / `15` | 重试间隔 1–3600 秒，再加 0–jitter 的随机秒数，抖动上限 3600；429 与 5xx 在同一账号任务的预算与死线内按此间隔重试 |
+| `budget` / `idleSeconds` | `24` / `300` | 同一账号任务的模型间共享尝试预算，配置接受 1–100，实际生效取配置值与硬上限 24 的较小值；之后休息 10–86400 秒 |
 | `timezone` | `UTC` | 探测专用 IANA 时区，决定环境日期；不跟随或修改业务出口时区 |
 | `originator` | `codex-tui` | 仅影响探测，非空可见 ASCII 字符，最多 128 字节 |
 | `clientVersion` | `0.154.0` | 探测 CLI 正式版本号，最多 64 字节，无预发布或构建后缀的 SemVer；同时用于自动 UA 与 version 请求头，旧配置缺省时使用该默认值 |
@@ -459,16 +459,22 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 | `includeAccountProxy` | `true` | 默认使用账号当前代理；账号无代理时为直连 |
 | `includeDirect` | `false` | 显式额外加入直连 |
 | `proxyIds` | `[]` | 最多 32 个托管代理 ID，可多选；支持 HTTP、HTTPS、SOCKS5、SOCKS5H |
-| `stopStrategy` | `headers` | `headers` 获得响应头即中断；`first_output` 读取到首个输出/推理 delta 或终态即中断；`mixed` 每次 50% 随机选择前两者 |
+| `stopStrategy` | `headers` | `headers` 获得响应头即中断；`first_output` 读取到首个输出/推理 delta 或终态即中断；`mixed` 每次 50% 随机选择前两者；`declared_model` 读到首个 `response.created` 即停，按其模型声明与响应 ID 验收，并要求同一响应给出完整路由 Cookie pair，二者缺一不装票 |
+| `cloudMints` | `[]` | 云端打票端点列表，最多 16 个，名称唯一；每项 `{ name, url, keyEnv, transport, gateway, ticketLength, ttlSeconds, timeoutMs, proxyUrl }`。`url` 只允许干净的 HTTPS 地址（无凭据、query、fragment），`keyEnv` 是存放中继密钥的环境变量名而非密钥正文，`gateway` 为 `any` 或统一网编号，`ticketLength` 必须等于桶的 `targetLength`。配置了端点时优先云端打票，全部冷却才回落本地探测出口 |
+| `strategy` | `random` | 云端端点选择策略：`random` 在可用端点中均匀随机，`round_robin` 轮询 |
+| `cloudFailureThreshold` / `cloudCooldownSeconds` | `3` / `300` | 同一端点连续失败 1–64 次后进入 10–86400 秒冷却，成功即清零计数 |
+| `taskTimeoutSeconds` | `75` | 配置接受 10–600 秒，实际生效取配置值与硬上限 75 秒的较小值；一次账号任务跨模型共享的绝对死线，云端调用与本地探测共用 |
 | `feishuWebhookUrl` | 空字符串 | 留空关闭；只接受 `https://open.feishu.cn/open-apis/bot/v2/hook/...` 或对应 `open.larksuite.com` 地址，不允许查询参数、用户信息或重定向 |
 
 出口集合去重后，每次探测均匀随机选择一个。账号代理和托管代理均按尝试时的最新值解析；没有可用出口时记录跳过，不能暗中改为直连。停用探测不修改账号自己的业务出口。
 
-state 探测请求不携带账号 Cookie。带上 Cookie 时上游不会发放 292。`__cflb` 和 `__oai_lb` 是账号级路由 Cookie，不绑定某一张 state，也不绑定某一次对话；同一会话可以更换 292，票和 Cookie 错配时上游仍可接受。普通 Codex 响应带回的这两个 Cookie 会写入账号，并在之后的业务请求里与 state 一起回放。探测本身不回放它们。只有 state、没有仍有效的路由 Cookie 时，上游不会稳定接受这条 292。
+state 探测请求不携带账号 Cookie。路由 Cookie 是同一响应给出的 `__cflb` + `__oailb`（兼容 `__oai_lb`）成对凭据，两半缺一不可回放，也不和某一张票或某一次对话绑定；多张票可以共用一组仍有效的 pair。`__oailb` 的寿命以内嵌 JWT `exp` 为准，HTTP 过期属性陈旧不否决仍有效的 JWT；`__cflb` 没有内嵌死线，以其 HTTP 过期属性为准。普通 Codex 响应带回的完整 pair 会写入共享池，并在之后的业务请求里与 state 一起回放；只回一半或把不同响应的两半拼起来都不构成凭据。只有 state、没有仍有效的路由 pair 时，上游不会稳定接受这条票。
 
-Cookie 锁定使用 `__oailb`（兼容 `__oai_lb`）的 ES256 JWT 元数据，按上游端点和 pod 共享路由池，不共享账号认证 Cookie、`__cf_bm` 或 `__cflb`。JWT 只解析不验签、不修改，必须具有合法 host、iat、exp，签发与到期窗口由上游声明；管理记录显示 `unified-*` 编号和到期时间。探测读取 `response.created.model`，仅当其与桶模型一致且编号命中 `cookieGatewayIds` 时自动注入，不要求 state 长度；业务流仍记录所有可解析 Cookie，未命中的编号可供人工研判。管理员可以在探测记录里固定某一条仍有效的 Cookie，固定失效后不会自动换用其它 pod，取消固定后才恢复按允许编号自动选择。开启后按代理出口裸请求采样，最多维持三个可用 pod；临期优先携带原 Cookie 续约，重复 JWT 不延长期限。缺少模型声明不会把未知 pod 判为可用；返回不同 host、删除 Cookie 或模型不符后按当前固定/允许规则继续采样。池为空时 `allow` 清除旧路由 Cookie 并放行，`pause` 保持 `missing_turn_state` 诊断合同并暂停业务；已有请求继续完成。Cookie 锁定不使用 state 复制或飞书通知接口。
+Cookie 锁定使用 `__oailb`（兼容 `__oai_lb`）的 ES256 JWT 元数据与同响应的 `__cflb` 组成 pair，按上游端点和 pod 共享路由池，不共享账号认证 Cookie 或 `__cf_bm`。JWT 只解析不验签、不修改，必须具有合法 host、iat、exp，签发与到期窗口由上游声明；管理记录显示 `unified-*` 编号和到期时间。探测读取 `response.created.model`，仅当其与桶模型一致且编号命中 `cookieGatewayIds` 时自动注入；`cookieGatewayIds` 留空时接受任何合法的 `unified-*` pod。业务流仍记录所有可解析 Cookie，未命中的编号可供人工研判。管理员可以在探测记录里固定某一条仍有效的 pair，固定失效后不会自动换用其它 pod，取消固定后才恢复按允许编号自动选择。开启后按代理出口裸请求采样，最多维持三个可用 pod；临期优先携带原 pair 续约，重复 JWT 不延长期限。缺少模型声明不会把未知 pod 判为可用；返回不同 host、删除任一半 Cookie 或模型不符后按当前固定/允许规则继续采样。池为空时 `allow` 清除旧路由 Cookie 并放行，`pause` 保持 `missing_turn_state` 诊断合同并暂停业务；已有请求继续完成。Cookie 锁定不使用 state 复制或飞书通知接口。
 
-状态增加 `routingCookie` 和 `cookiePool`，仅提供 `gatewayId`、pod、签发/到期 Unix 秒、请求开始水位 `observedAt`（Unix 毫秒）、`reportedModel` 和 `allowed`，不返回 Cookie 正文；`cookieOverridePod` 表示当前人工固定值。Cookie 模式下 `active` 表示存在匹配模型、未过期且命中允许编号的路由 Cookie；`hasInstalledState` 仍只表示 state。探测/被动记录增加 `oailbHost`、`cookieExpiresAt`，结果包含 `cookie_ready`、`cookie_gateway_filtered`、`cookie_model_mismatch`、`cookie_deleted`、`missing_cookie`、`missing_model`。Cookie 的实际亲和和模型稳定性取决于上游，状态不是服务质量保证。
+`declared_model` 与配置了 `cloudMints` 的桶要求票与完整 pair 同时合格：首个 `response.created` 的模型声明是验收权威（HTTP `openai-model` 头不一致时以 created 为准），缺事件、缺响应 ID、模型不符、缺任一半 Cookie 或编号不命中都不会安装。云端打票响应还必须同时声明票据 `expires_at`、顶层 pair `expires_at` 与 `gateway` 编号，缺失或畸形一律拒收；`gateway` 是 `unified-N` 节点标签，须与 JWT pod、端点目标和桶白名单一致，不是死线字段；死线在完整解析响应后按当前时刻判定，有效到期取签发+TTL、票据声明到期、pair 联合到期与 JWT `exp` 的最小值。
+
+状态增加 `routingCookie` 和 `cookiePool`，仅提供 `gatewayId`、pod、签发/到期 Unix 秒、请求开始水位 `observedAt`（Unix 毫秒）、`reportedModel` 和 `allowed`，不返回 Cookie 正文；`cookieOverridePod` 表示当前人工固定值；`cookieOverrideValue` 与 `cookieOverrideCflbValue` 在常规状态中恒为 `null`，Cookie 正文只经 cookie-copy 按需返回。Cookie 模式下 `active` 表示存在匹配模型、未过期且命中允许编号的路由 pair；`hasInstalledState` 仍只表示 state。探测/被动记录增加 `oailbHost`、`cookieExpiresAt` 与有效到期 `expiresAt`，结果包含 `candidate`、`headers_only`、`pair_ready`、`cookie_ready`、`cookie_gateway_filtered`、`cookie_model_mismatch`、`cookie_deleted`、`missing_cookie`、`missing_model`、`invalid_created`、`model_mismatch`、`endpoint_unavailable` 等。Cookie 的实际亲和和模型稳定性取决于上游，状态不是服务质量保证。
 
 飞书通知只为配置后成功安装的新票排队，涵盖自动安装与手动应用；候选未应用、重复票和失败探测不通知。内容包含账号、模型、安装来源、距上次安装的时间、本次获取耗时、尝试次数、签发时间、长度和完整 state。后台通过服务器直连发送，不使用账号探测代理，不进入业务计量。每桶仅保留最新安装的待发送任务，领取时核对当前有效票、身份与手动账号开关，自动探测关闭不阻止手动应用后的通知；已移除、过期或被更新的旧票不发送。失败或进程中断后每 60 秒重试，最多 5 次；成功后不再领取。飞书已接收但本地确认失败时可能重复，不承诺远端恰好一次送达。完整 state 不写入通知任务、审计或观测日志，发送时从当前票读取。
 
@@ -484,7 +490,7 @@ state 模式下，`pause` 的有票条件只认可同账号、同上游模型、
 
 状态项包含 `accountId`、`accountName`、`model`、`config`、`tokenLength`、`issuedAt`、`ageSeconds`、`active`、`accountEnabled`、`businessStatus`、`huntAttempts`、`nextProbeAt`、`observations`、`installations`。签发和观察时间均为 Unix 秒；尚未安装时令牌元数据为 `null`。过期后保留最后安装的长度和签发水位供诊断，`active=false`，令牌正文清除。`active` 表示账号启用且同桶已安装令牌满足身份、长度及有效期检查，不保证上游接受。`businessStatus` 为 `ready`、`manual_disabled`、`waiting_for_state`、`model_denied`、`quota_exhausted`、`rate_limited` 或 `account_error`；这是当前桶的资格投影，不承诺具体 Client Key 权限或瞬时并发容量。`accountEnabled` 是手动账号开关，`config.enabled` 是自动探测开关，均不能从缺票状态推断。`huntAttempts` 为当前寻获周期的累计尝试数，跨预算轮次累计；`nextProbeAt` 为预计下次开始时间，调度周期和并发限制可能使实际开始稍晚，账号或自动探测停用时为 `null`。
 
-`observations` 保留全部主动探测和被动采集记录；包含十进制字符串 `observationId`、`source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、上游在同一响应中声明的 `reportedModel`、表示该观测行仍有有效正文的 `hasToken`、表示正文与当前有效已安装票相同的 `isInstalled`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode`、`stopReason`、题库回答正文 `answer`（按 8 KiB 截断）和期望片段命中结果 `answerMatch`。`answer`/`answerMatch` 仅由读取回应的主动探测产生，业务观测不保存回答正文。`reportedModel` 来自上游响应头 `openai-model` / `x-openai-model`、WS 元数据或回应策略窗口内流内事件的模型声明，是上游自报的实际服务模型，与请求模型、桶模型是三个不同字段；缺失为 `null`，不能据此推断请求模型生效，令牌长度本身也不能证明路由。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`invalid_token`、`expired_or_future` 不会安装或保存正文；`length_miss` 同样不能直接安装，但其正文随观测行留存（`hasToken`），可在改目标长度后直接应用或随时复制；观测记录里的 state 正文保留，刷新后仍可按记录复制；已安装槽位过期后不再注入。回应策略最多读取 1 MiB、30 秒，除题库回答外不保存响应正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；旧版历史若未保存获取统计，主动票的 attempts 为 0 表示未知，飞书显示“历史未记录”；新观测保存 `huntAttempts` 和 `huntSeconds`，手动应用沿用该行的统计；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。响应不含令牌正文、Bearer 或代理认证，正文只经 `copy` 接口按需取回。
+`observations` 保留全部主动探测和被动采集记录；包含十进制字符串 `observationId`、`source`、`outcome`、`httpStatus`、任意实际头长度 `tokenLength`、可解析的 `issuedAt`、上游在同一响应中声明的 `reportedModel`、表示该观测行仍有有效正文的 `hasToken`、表示正文与当前有效已安装票相同的 `isInstalled`、脱敏出口 `egress`、`shape`、`effort`、`elapsedMs`、`probeId`、`stopMode`、`stopReason`、题库回答正文 `answer`（按 8 KiB 截断）和期望片段命中结果 `answerMatch`。`answer`/`answerMatch` 仅由读取回应的主动探测产生，业务观测不保存回答正文。`reportedModel` 来自上游响应头 `openai-model` / `x-openai-model`、WS 元数据或回应策略窗口内流内事件的模型声明，是上游自报的实际服务模型，与请求模型、桶模型是三个不同字段；缺失为 `null`，不能据此推断请求模型生效，令牌长度本身也不能证明路由。`observedAt` 是获取响应头的时间，`startedAt` 是主动请求开始时间；业务请求无 shape。`transport_error` 与 `missing_header` 分开计数，`invalid_token`、`expired_or_future` 不会安装或保存正文；`invalid_length` 同样不能直接安装，但其正文随观测行留存（`hasToken`），可在改目标长度后直接应用或随时复制；观测记录里的 state 正文保留，刷新后仍可按记录复制；已安装槽位过期后不再注入。回应策略最多读取 1 MiB、30 秒，除题库回答外不保存响应正文；body 读取超时或错误单独记在 `stopReason`，已收到的合法头仍可安装。安装历史最近 100 条，包含安装时间、签发时间、长度、来源及 `acquiredAt`（头获取时间）、`attempts`（寻获累计尝试数，含成功的一次）、`huntSeconds`。被动获取 attempts 为 0；旧版历史若未保存获取统计，主动票的 attempts 为 0 表示未知，飞书显示“历史未记录”；新观测保存 `huntAttempts` 和 `huntSeconds`，手动应用沿用该行的统计；页面的重试数为 max(attempts−1, 0)，近期平均仅统计这 100 条中的主动成功样本，不能视为所有尝试的平均耗时。响应不含令牌正文、Bearer 或代理认证，正文只经 `copy` 接口按需取回。
 
 `hasInstalledState` 表示当前存在身份、长度、有效期均匹配的已安装票，不依赖账号开关；因此手动停用时仍可复制有效票。移除后为 false，保留的 `issuedAt` 仅是历史水位，不能用于判断有票。模型票与通用覆盖使用相同的强制注入路径，同时覆盖请求头及会话元数据；切换会话后继续按本次选中账号与实际上游模型应用。
 

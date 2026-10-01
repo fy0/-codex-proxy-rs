@@ -50,7 +50,14 @@ pub(super) fn random_index(count: usize) -> usize {
 pub(super) struct ProbeOutput {
     pub reason: &'static str,
     pub reported_model: Option<String>,
+    /// 首个 `response.created` 锁住的声明模型；后续事件不覆盖。
     pub created_model: Option<String>,
+    /// 首个 `response.created` 声明的响应 ID；780 验收要求非空。
+    pub created_id: Option<String>,
+    /// 是否已见首个 `response.created` 形态的事件（含畸形数据）。
+    pub created_seen: bool,
+    /// SSE `event:` 名缺失或恰为 `response.created`；名不符的 created 判 invalid_created。
+    pub created_event_ok: bool,
     /// 题库问题的回答正文（按字节截断）；只有读取正文的探测才会产生。
     pub answer: Option<String>,
     /// 回答是否包含题库声明的期望片段；题目未声明期望时为空。
@@ -83,6 +90,9 @@ pub(super) async fn wait_for_output(
     let mut header_model: Option<String> = None;
     let mut body_model = ResponseModelObservation::default();
     let mut created_model = None;
+    let mut created_id = None;
+    let mut created_seen = false;
+    let mut created_event_ok = true;
     let mut answer = String::new();
     let reason = 'read: loop {
         let Some(chunk) = stream.next().await else {
@@ -97,7 +107,52 @@ pub(super) async fn wait_for_output(
         }
         for frame in decoder.push_frames(&chunk) {
             for event in frame.events() {
-                let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
+                let parsed = serde_json::from_str::<Value>(&event.data);
+                // 首个 created 形态的事件先锁住：后续 created 与终端事件都不许覆盖；
+                // 缺 id/model 或 SSE event 名不符同样立刻返回，由验收侧判缺项。
+                if !created_seen {
+                    let is_created = parsed
+                        .as_ref()
+                        .ok()
+                        .and_then(|value| value.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("response.created")
+                        || event.event.as_deref() == Some("response.created")
+                        || (parsed.is_err() && event.data.contains("response.created"));
+                    if is_created {
+                        created_seen = true;
+                        // 严格校验：JSON 合法且 type 必须是 response.created，SSE event 名
+                        // 缺失或一致；event: response.created 配 response.completed 正文是伪造。
+                        created_event_ok = event
+                            .event
+                            .as_deref()
+                            .is_none_or(|name| name == "response.created")
+                            && parsed
+                                .as_ref()
+                                .ok()
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("response.created");
+                        if let Ok(value) = &parsed {
+                            let response = value.get("response");
+                            created_model = response
+                                .and_then(|response| response.get("model"))
+                                .and_then(Value::as_str)
+                                .filter(|model| !model.is_empty() && model.len() <= 256)
+                                .map(str::to_owned);
+                            created_id = response
+                                .and_then(|response| response.get("id"))
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+                                .map(str::to_owned);
+                        }
+                        // 声明模型验收不带题库期望，读到首个 created 立即返回。
+                        if stop_at_model && expect.is_none() {
+                            break 'read "response_created";
+                        }
+                    }
+                }
+                let Ok(value) = parsed else {
                     continue;
                 };
                 let event_type = value.get("type").and_then(Value::as_str);
@@ -107,17 +162,6 @@ pub(super) async fn wait_for_output(
                             .map(str::to_owned);
                 }
                 body_model.observe(event_type, &value);
-                if event_type == Some("response.created") {
-                    created_model = value
-                        .get("response")
-                        .and_then(|response| response.get("model"))
-                        .and_then(Value::as_str)
-                        .filter(|model| !model.is_empty() && model.len() <= 256)
-                        .map(str::to_owned);
-                    if stop_at_model && expect.is_none() && created_model.is_some() {
-                        break 'read "response_created";
-                    }
-                }
                 match event_type {
                     Some("response.output_text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
@@ -157,6 +201,9 @@ pub(super) async fn wait_for_output(
     ProbeOutput {
         reason,
         created_model,
+        created_id,
+        created_seen,
+        created_event_ok,
         reported_model: header_model.or_else(|| body_model.model().map(str::to_owned)),
         answer: (!answer.is_empty()).then_some(answer),
         answer_match,

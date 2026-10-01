@@ -23,7 +23,8 @@ impl PgProviderAccountRepository {
         &self,
     ) -> Result<Vec<TurnStateNotification>, CoreStoreError> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        let rows = sqlx::query("select n.issued_at, n.installation, n.previous_installed_at, s.account_id, s.model, s.config, s.turn_state_override, s.manual_override, a.name as account_name from account_turn_state_notifications n join account_turn_states s using (account_id, model) join provider_accounts a on a.id = s.account_id where n.sent_at is null and n.attempts < 5 and n.next_attempt_at <= extract(epoch from now()) and a.enabled and a.provider_kind = 'openai' and a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id and n.issued_at = s.current_issued_at and s.turn_state_override is not null and coalesce(s.config->>'feishuWebhookUrl', '') <> '' and n.issued_at + (s.config->>'ttlSeconds')::bigint > extract(epoch from now()) order by n.next_attempt_at limit 16 for update of n skip locked")
+        // mint 票的有效期以 current_expires_at 上限为准：通知只投仍在生效的票。
+        let rows = sqlx::query("select n.issued_at, n.installation, n.previous_installed_at, s.account_id, s.model, s.config, s.turn_state_override, s.current_expires_at, s.installed_pair, s.manual_override, a.name as account_name from account_turn_state_notifications n join account_turn_states s using (account_id, model) join provider_accounts a on a.id = s.account_id where n.sent_at is null and n.attempts < 5 and n.next_attempt_at <= extract(epoch from now()) and a.enabled and a.provider_kind = 'openai' and a.authentication_kind = 'oauth' and s.upstream_account_id is not distinct from a.upstream_account_id and s.upstream_user_id is not distinct from a.upstream_user_id and n.issued_at = s.current_issued_at and s.turn_state_override is not null and coalesce(s.config->>'feishuWebhookUrl', '') <> '' and n.issued_at + (s.config->>'ttlSeconds')::bigint > extract(epoch from now()) and (s.current_expires_at is null or s.current_expires_at > extract(epoch from now())) order by n.next_attempt_at limit 16 for update of n skip locked")
             .fetch_all(&mut *tx).await.map_err(unavailable)?;
         let mut notifications = Vec::new();
         for row in rows {
@@ -32,16 +33,32 @@ impl PgProviderAccountRepository {
                     .map_err(unavailable)?;
             let value: String = row.try_get("turn_state_override").map_err(unavailable)?;
             let issued_at: i64 = row.try_get("issued_at").map_err(unavailable)?;
+            let current_expires_at: Option<i64> =
+                row.try_get("current_expires_at").map_err(unavailable)?;
             let Some(token) = TurnStateToken::parse(&value).filter(|token| {
                 config.is_valid()
                     && token.issued_at == issued_at
                     && value.len() == config.target_length
-                    && token.is_fresh(Utc::now().timestamp(), config.ttl_seconds)
+                    && token.live(
+                        Utc::now().timestamp(),
+                        config.ttl_seconds,
+                        current_expires_at,
+                    )
             }) else {
                 continue;
             };
             let account_id: String = row.try_get("account_id").map_err(unavailable)?;
             let model: String = row.try_get("model").map_err(unavailable)?;
+            // pair 绑定模式的票只在 pair 仍有效时才可投递：票本身活着但路由
+            // pair 已失效的通知属于过期货，与发送前的有效性复核一致。
+            if config.requires_route_pair()
+                && !super::turn_state::stored_pair(&row, "installed_pair").is_some_and(|pair| {
+                    pair.is_usable(&model, Utc::now().timestamp())
+                        && config.allows_cookie_gateway(&pair.pod)
+                })
+            {
+                continue;
+            }
             // 发送超时短于领取窗口；进程崩溃后最多重试五次，不阻塞轮换或业务。
             sqlx::query("update account_turn_state_notifications set attempts = attempts + 1, next_attempt_at = extract(epoch from now())::bigint + 60 where account_id = $1 and model = $2")
                 .bind(&account_id).bind(&model).execute(&mut *tx).await.map_err(unavailable)?;

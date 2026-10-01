@@ -15,19 +15,31 @@ fn routing_cookie_rejects_expired_future_and_invalid_scope() {
     let now = 1_800_000_000;
     let host = "chat.gateway.unified-185.api.openai.com";
     let value = jwt(host, now, now + 3600, "ES256");
-    let mut cookie = RoutingCookie::parse(
+    let cookie = RoutingCookie::parse(
         "https://chatgpt.com/backend-api/codex/responses",
         "__oailb",
         &value,
         now,
     )
     .unwrap();
+    // 只有 __oailb 半边的 Cookie 不是可回放 pair。
+    assert!(!cookie.has_pair());
+    assert!(!cookie.is_route_valid(now));
+    assert!(!cookie.is_usable("gpt-6-astra", now));
+    assert_eq!(cookie.header(), format!("__oailb={value}"));
+    let mut cookie = cookie.with_cflb("__cflb", "synthetic-cflb", None).unwrap();
+    assert!(cookie.has_pair());
     assert!(!cookie.is_usable("gpt-6-astra", now));
     cookie.reported_model = "gpt-6-astra".to_owned();
     assert!(cookie.is_usable("GPT-6-ASTRA", now));
     assert!(!cookie.is_usable("gpt-6-astra", now + 3600));
     assert!(!cookie.is_usable("gpt-5.6-luna", now));
+    assert_eq!(
+        cookie.header(),
+        format!("__cflb=synthetic-cflb; __oailb={value}")
+    );
     assert!(!format!("{cookie:?}").contains(&value));
+    assert!(!format!("{cookie:?}").contains("synthetic-cflb"));
     for (host, iat, exp, alg) in [
         (host, now + 1, now + 3600, "ES256"),
         (host, now - 3600, now, "ES256"),
@@ -69,5 +81,45 @@ fn routing_cookie_exposes_gateway_id_and_expiry_metadata() {
     .unwrap();
     assert_eq!(cookie.gateway_id(), "87");
     assert_eq!(cookie.expires_at, now + 3600);
+    assert_eq!(cookie.oailb_expires_at, Some(now + 3600));
     assert_eq!(cookie.status().gateway_id, "87");
+    // __cflb 属性寿命更短时收窄联合到期；更长时仍以 __oailb JWT exp 为准。
+    let narrowed = RoutingCookie::parse(
+        "origin",
+        "__oailb",
+        &jwt(
+            "chat.gateway.unified-87.api.openai.com",
+            now,
+            now + 3600,
+            "ES256",
+        ),
+        now,
+    )
+    .unwrap()
+    .with_cflb("__cflb", "v", Some(now + 10))
+    .unwrap();
+    assert_eq!(narrowed.expires_at, now + 10);
+    assert_eq!(narrowed.oailb_expires_at, Some(now + 3600));
+    let wider = RoutingCookie::parse(
+        "origin",
+        "__oailb",
+        &jwt(
+            "chat.gateway.unified-87.api.openai.com",
+            now,
+            now + 3600,
+            "ES256",
+        ),
+        now,
+    )
+    .unwrap()
+    .with_cflb("__cflb", "v", Some(now + 7200))
+    .unwrap();
+    assert_eq!(wider.expires_at, now + 3600);
+    // 非法 __cflb 值（CRLF/分号/逗号）拒绝拼接。
+    assert!(
+        RoutingCookie::parse("origin", "__oailb", &cookie.value, now)
+            .unwrap()
+            .with_cflb("__cflb", "a;b", None)
+            .is_none()
+    );
 }

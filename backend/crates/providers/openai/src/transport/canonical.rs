@@ -50,6 +50,10 @@ pub struct CodexCanonicalDecoder {
     requested_service_tier: Option<String>,
     response_service_tier: Option<String>,
     response_model: ResponseModelObservation,
+    /// 首个 `response.created` 的原始声明，路由对账专用：latch 后不被后续事件覆盖。
+    created_seen: bool,
+    created_response_model: Option<String>,
+    created_response_id: Option<String>,
     reported_model: Option<String>,
     web_search_pricing: Option<WebSearchPricing>,
     timing_signals: ResponseEventSignals,
@@ -150,6 +154,9 @@ impl CodexCanonicalDecoder {
             requested_service_tier: None,
             response_service_tier: None,
             response_model: ResponseModelObservation::default(),
+            created_seen: false,
+            created_response_model: None,
+            created_response_id: None,
             reported_model: None,
             web_search_pricing: None,
             timing_signals: ResponseEventSignals::default(),
@@ -249,6 +256,24 @@ impl CodexCanonicalDecoder {
         self.response_model.model()
     }
 
+    /// 首个 `response.created` 的模型声明，路由 Cookie/turn-state 对账专用。
+    /// 与共享 `ResponseModelObservation` 不同，首个 created 一旦被锁住，后续
+    /// 终端事件不得覆盖；缺 created 时返回 `None`，由调用方决定是否回退。
+    #[must_use]
+    pub fn created_response_model(&self) -> Option<&str> {
+        self.created_response_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+    }
+
+    /// 首个 `response.created` 的响应 ID；780 验收要求它非空。
+    #[must_use]
+    pub fn created_response_id(&self) -> Option<&str> {
+        self.created_response_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+    }
+
     /// 官方服务端报告优先；缺少报告时仅使用正文明确声明，不使用请求兜底值。
     #[must_use]
     pub fn response_model(&self) -> Option<&str> {
@@ -323,6 +348,7 @@ impl CodexCanonicalDecoder {
         }
         self.observe_response_service_tier(&value);
         self.response_model.observe(event_type, &value);
+        self.observe_created(&event, &value);
         if let Some(model) = super::response_meta::reported_model_from_event(&value) {
             self.reported_model = Some(model.to_owned());
         }
@@ -373,6 +399,36 @@ impl CodexCanonicalDecoder {
         self.timing_signals.semantic_output |= signals.semantic_output;
         self.timing_signals.reasoning_output |= signals.reasoning_output;
         self.timing_signals.text_output |= signals.text_output;
+    }
+
+    /// 锁住首个 `response.created`：SSE event 名存在时必须一致，JSON type 必须真是
+    /// `response.created`——`event: response.created` 配别的 type 是伪造事件，也照样
+    /// 锁住防顶替但不采纳其声明；缺/空/超长 id/model 由路由验收判 `invalid_created`。
+    fn observe_created(&mut self, event: &SseEvent, value: &Value) {
+        if self.created_seen {
+            return;
+        }
+        let type_is_created = value.get("type").and_then(Value::as_str) == Some("response.created");
+        let name_is_created = event.event.as_deref() == Some("response.created");
+        if !type_is_created && !name_is_created {
+            return;
+        }
+        self.created_seen = true;
+        // event 名存在时必须一致，且 JSON type 必须真为 response.created。
+        if (event.event.is_some() && !name_is_created) || !type_is_created {
+            return;
+        }
+        let response = response_object(value);
+        self.created_response_model = response
+            .and_then(|response| response.get("model"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty() && model.len() <= 256)
+            .map(str::to_owned);
+        self.created_response_id = response
+            .and_then(|response| response.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+            .map(str::to_owned);
     }
 
     fn observe_response_service_tier(&mut self, value: &Value) {

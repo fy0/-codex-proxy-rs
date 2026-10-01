@@ -1,6 +1,18 @@
 import type { RequestOptions } from '../request'
 import request from '../request'
 
+export interface CloudMintConfig {
+  name: string
+  url: string
+  keyEnv: string
+  transport: 'sse' | 'websocket'
+  gateway: string
+  ticketLength: number
+  ttlSeconds: number
+  timeoutMs: number
+  proxyUrl: string
+}
+
 export interface TurnStateConfig {
   enabled: boolean
   cookieLockEnabled: boolean
@@ -22,12 +34,17 @@ export interface TurnStateConfig {
   includeAccountProxy: boolean
   includeDirect: boolean
   proxyIds: string[]
-  stopStrategy: 'headers' | 'first_output' | 'mixed'
+  stopStrategy: 'headers' | 'first_output' | 'mixed' | 'declared_model'
+  cloudMints: CloudMintConfig[]
+  strategy: 'random' | 'round_robin'
+  cloudFailureThreshold: number
+  cloudCooldownSeconds: number
+  taskTimeoutSeconds: number
   feishuWebhookUrl: string
 }
 
 export function defaultTurnStateConfig(enabled = false): TurnStateConfig {
-  return { enabled, cookieLockEnabled: false, cookieRefreshBeforeSeconds: 300, cookieGatewayIds: '', missingStatePolicy: 'allow', detectActualModel: false, targetLength: 292, ttlSeconds: 240, refreshAfterSeconds: 120, retrySeconds: 30, jitterSeconds: 15, budget: 40, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', feishuWebhookUrl: '' }
+  return { enabled, cookieLockEnabled: false, cookieRefreshBeforeSeconds: 300, cookieGatewayIds: '', missingStatePolicy: 'allow', detectActualModel: false, targetLength: 780, ttlSeconds: 240, refreshAfterSeconds: 120, retrySeconds: 30, jitterSeconds: 15, budget: 24, idleSeconds: 300, timezone: 'UTC', originator: 'codex-tui', clientVersion: '0.154.0', userAgent: '', includeAccountProxy: true, includeDirect: false, proxyIds: [], stopStrategy: 'headers', cloudMints: [], strategy: 'random', cloudFailureThreshold: 3, cloudCooldownSeconds: 300, taskTimeoutSeconds: 75, feishuWebhookUrl: '' }
 }
 
 export interface TurnStateProbePreview {
@@ -74,6 +91,7 @@ export interface TurnStateObservation {
   cookieExpiresAt?: number | null
   reportedModel?: string | null
   hasToken?: boolean
+  expiresAt?: number | null
   egress: string
   shape: string | null
   effort: string | null
@@ -116,12 +134,18 @@ export interface TurnStateStatus {
   ageSeconds: number | null
   active: boolean
   hasInstalledState: boolean
+  hasInstalledPair?: boolean | null
+  installedGatewayId?: string | null
+  currentExpiresAt?: number | null
+  candidateExpiresAt?: number | null
   routingCookie?: RoutingCookieStatus | null
   cookiePool?: RoutingCookieStatus[]
   cookieOverridePod?: string | null
   cookieOverrideIssuedAt?: number | null
   cookieOverrideName?: string | null
   cookieOverrideValue?: string | null
+  cookieOverrideCflbName?: string | null
+  cookieOverrideCflbValue?: string | null
   cookieOverrideExpiresAt?: number | null
   cookieOverrideObservationId?: string | null
   businessStatus: 'ready' | 'manual_disabled' | 'waiting_for_state' | 'model_denied' | 'quota_exhausted' | 'rate_limited' | 'account_error'
@@ -179,7 +203,7 @@ export function removeTurnState(data: { accountId: string, model: string, issued
 }
 
 export function copyTurnStateCookie(data: { accountId: string, model: string, pod: string, observationId?: string }) {
-  return request<{ pod: string, name: string, value: string, expiresAt: number, header: string }>({
+  return request<{ pod: string, name: string, value: string, cflbName: string, cflbValue: string, expiresAt: number, header: string }>({
     url: '/api/admin/accounts/turn-state/cookie-copy',
     method: 'POST',
     data,

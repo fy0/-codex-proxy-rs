@@ -1,5 +1,6 @@
 //! 业务选号与探测使用同一桶，但开关、候选和到期的语义保持独立。
 
+use futures::StreamExt;
 use gateway_core::{
     account::{
         AccountSelectionPolicy, AccountWeight, MissingTurnStatePolicy, ProviderAccountId,
@@ -150,7 +151,7 @@ async fn account_turn_state_override_replaces_the_automatic_ticket_until_cleared
             ..TurnStateConfig::default()
         },
     );
-    let installed = super::token_at(217, Utc::now().timestamp());
+    let installed = super::token_at(585, Utc::now().timestamp());
     store.set_current_turn_state(
         ACCOUNT,
         MODEL,
@@ -271,7 +272,7 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
     );
     assert!(server.received_requests().await.unwrap().is_empty());
 
-    let installed = token_at(217, Utc::now().timestamp() - 5);
+    let installed = token_at(585, Utc::now().timestamp() - 5);
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
         .respond_with(
@@ -335,7 +336,7 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
     store.set_current_turn_state(
         ACCOUNT,
         MODEL,
-        TurnStateToken::parse(&token_at(217, Utc::now().timestamp() - 3600)).unwrap(),
+        TurnStateToken::parse(&token_at(585, Utc::now().timestamp() - 3600)).unwrap(),
         false,
     );
     let (input, context) = request(&[ACCOUNT], MODEL);
@@ -351,7 +352,7 @@ async fn strict_business_waits_without_queueing_while_worker_and_manual_recovery
     assert!(server.received_requests().await.unwrap().is_empty());
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
-        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(217)))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(585)))
         .mount(&server)
         .await;
     store.request_turn_probe(ACCOUNT, MODEL);
@@ -410,7 +411,7 @@ async fn mapped_model_and_sticky_account_cannot_bypass_expired_bucket() {
     store.set_current_turn_state(
         ACCOUNT,
         MODEL,
-        TurnStateToken::parse(&token(217)).unwrap(),
+        TurnStateToken::parse(&token(585)).unwrap(),
         false,
     );
     let runtime = tempfile::tempdir().unwrap();
@@ -453,7 +454,7 @@ async fn mapped_model_and_sticky_account_cannot_bypass_expired_bucket() {
         store.set_current_turn_state(
             ACCOUNT,
             MODEL,
-            TurnStateToken::parse(&token_at(217, Utc::now().timestamp() - 3600)).unwrap(),
+            TurnStateToken::parse(&token_at(585, Utc::now().timestamp() - 3600)).unwrap(),
             false,
         );
     }
@@ -484,7 +485,7 @@ async fn cookie_only_probe_renews_and_shares_across_accounts_without_state_overr
         format!("{}.{}.c2ln", URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256"}"#), URL_SAFE_NO_PAD.encode(json!({"host":"chat.gateway.unified-185.api.openai.com","iat":issued,"exp":expires}).to_string()))
     };
     let first = jwt(now - 3500, now + 100);
-    let probed_state = super::token_at(217, now);
+    let probed_state = super::token_at(585, now);
     let response_body = |model: &str| {
         format!("event: response.created
 data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_cookie\",\"model\":\"{model}\",\"status\":\"in_progress\",\"output\":[]}}}}
@@ -498,6 +499,7 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
         .and(path("/codex/responses"))
         .respond_with(
             ResponseTemplate::new(200)
+                .insert_header("set-cookie", "__cflb=test-cflb-value; Path=/; HttpOnly")
                 .insert_header("set-cookie", format!("__oailb={first}; Path=/; HttpOnly"))
                 .insert_header("x-codex-turn-state", &probed_state)
                 .insert_header("content-type", "text/event-stream")
@@ -552,14 +554,30 @@ data: {{\"type\":\"response.output_text.delta\",\"delta\":\"@thsottiaux 高市�
         .unwrap();
     assert!(bucket.current.is_none());
     assert!(bucket.candidate.is_none());
+    // 共享池里的完整 pair 跨账号可用：两个账号的业务请求都携带同一对 __cflb/__oailb。
     for id in [ACCOUNT, "acct_cookie_other"] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(COMPLETED),
+            )
+            .mount(&server)
+            .await;
         let (input, context) = request(&[id], MODEL);
-        assert!(
-            bundle
-                .core_provider()
-                .execute(input, context)
-                .await
-                .is_err()
-        );
+        let mut stream = bundle
+            .core_provider()
+            .execute(input, context)
+            .await
+            .expect("usable shared pair must schedule business");
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        let cookie = requests[0].headers["cookie"].to_str().unwrap().to_owned();
+        assert!(cookie.contains(&format!("__oailb={first}")));
+        assert!(cookie.contains("__cflb=test-cflb-value"));
     }
 }

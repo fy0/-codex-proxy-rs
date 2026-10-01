@@ -98,10 +98,16 @@ impl MemoryAccountStore {
                 cookie_override_value: None,
                 cookie_override_expires_at: None,
                 cookie_override_observation_id: None,
+                cookie_override_cflb_name: None,
+                cookie_override_cflb_value: None,
                 current: None,
                 current_issued_at: None,
+                current_expires_at: None,
+                installed_pair: None,
                 current_length: None,
                 candidate: None,
+                candidate_expires_at: None,
+                candidate_pair: None,
                 hunt_attempts: 0,
                 next_probe_at: None,
                 manual_probe_requested_at: None,
@@ -131,6 +137,20 @@ impl MemoryAccountStore {
         state.current = Some(token);
         state.manual_override = manual;
         state.attached_model = None;
+    }
+
+    pub(crate) fn set_installed_pair(
+        &self,
+        account: &str,
+        model: &str,
+        pair: gateway_core::account::RoutingCookie,
+    ) {
+        self.turn_states
+            .lock()
+            .unwrap()
+            .get_mut(&(account.to_owned(), model.to_owned()))
+            .unwrap()
+            .installed_pair = Some(pair);
     }
 
     pub(crate) fn request_turn_probe(&self, account: &str, model: &str) {
@@ -299,7 +319,60 @@ impl ProviderAccountStore for MemoryAccountStore {
                     .as_ref()
                     .is_some_and(|cookie| cookie.pod != sent.pod))
         {
-            cookies.retain(|cookie| cookie.origin != sent.origin || cookie.pod != sent.pod);
+            // 与 PG 实现一致：按 pair 全字段精确匹配，旧水位不得误删同 pod 的新凭据。
+            let same_pair = |cookie: &gateway_core::account::RoutingCookie| {
+                cookie.origin == sent.origin
+                    && cookie.pod == sent.pod
+                    && cookie.name == sent.name
+                    && cookie.value == sent.value
+                    && cookie.cflb_name == sent.cflb_name
+                    && cookie.cflb_value == sent.cflb_value
+                    && cookie.observed_at <= observation.observed_at
+            };
+            cookies.retain(|cookie| !same_pair(cookie));
+            // 桶上的安装位/候选位/固定位若还绑着这把 pair，连同票据正文一起摘除；
+            // 签发水位保留，调度置空以便尽快补打。
+            let sent = sent.clone();
+            for state in self.turn_states.lock().unwrap().values_mut() {
+                if state.installed_pair.as_ref().is_some_and(same_pair) {
+                    state.installed_pair = None;
+                    state.current = None;
+                    state.current_expires_at = None;
+                    state.attached_model = None;
+                    state.manual_override = false;
+                    state.next_probe_at = None;
+                }
+                if state.candidate_pair.as_ref().is_some_and(same_pair) {
+                    state.candidate = None;
+                    state.candidate_pair = None;
+                    state.candidate_expires_at = None;
+                }
+                if state.cookie_override_name.as_deref() == Some(sent.name.as_str())
+                    && state.cookie_override_value.as_deref() == Some(sent.value.as_str())
+                    && state
+                        .cookie_override_cflb_name
+                        .as_deref()
+                        .unwrap_or_default()
+                        == sent.cflb_name
+                    && state
+                        .cookie_override_cflb_value
+                        .as_deref()
+                        .unwrap_or_default()
+                        == sent.cflb_value
+                    && state
+                        .cookie_override_issued_at
+                        .is_none_or(|at| at * 1000 <= observation.observed_at)
+                {
+                    state.cookie_override_pod = None;
+                    state.cookie_override_issued_at = None;
+                    state.cookie_override_name = None;
+                    state.cookie_override_value = None;
+                    state.cookie_override_cflb_name = None;
+                    state.cookie_override_cflb_value = None;
+                    state.cookie_override_expires_at = None;
+                    state.cookie_override_observation_id = None;
+                }
+            }
         }
         if !observation.deleted
             && let Some(mut cookie) = observation.received.or(observation.sent)
@@ -307,8 +380,11 @@ impl ProviderAccountStore for MemoryAccountStore {
         {
             cookie.reported_model = model;
             cookie.observed_at = observation.observed_at;
-            cookies.retain(|old| old.origin != cookie.origin || old.pod != cookie.pod);
-            cookies.push(cookie);
+            // 与生产存储一致：池里只保留完整 pair。
+            if cookie.has_pair() {
+                cookies.retain(|old| old.origin != cookie.origin || old.pod != cookie.pod);
+                cookies.push(cookie);
+            }
         }
         Ok(())
     }
@@ -425,16 +501,31 @@ impl ProviderAccountStore for MemoryAccountStore {
             states.get_mut(&(observation.account_id.clone(), observation.model.clone()))
         {
             record |= state.config.enabled || state.config.cookie_lock_enabled;
-            if observation.source == "probe" && observation.probe_id.is_some() {
+            // 与 PG 实现一致：云端打票也计主动尝试。
+            if (observation.source == "probe" && observation.probe_id.is_some())
+                || observation.source == "cloud_mint"
+            {
                 state.hunt_attempts += 1;
             }
             // 与生产存储一致：候选槽只收命中目标长度的票，非目标票正文只留在观测记录里。
+            // 需要路由 pair 的模式必须带完整 pair；mint 票按有效期限判断新鲜度。
+            let pair = observation
+                .pair
+                .clone()
+                .filter(|pair| !state.config.requires_route_pair() || pair.has_pair());
             if let Some(candidate) = candidate.filter(|token| {
-                token.value.len() == state.config.target_length
-                    && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
+                (!state.config.requires_route_pair() || pair.is_some())
+                    && token.value.len() == state.config.target_length
+                    && token.live(
+                        chrono::Utc::now().timestamp(),
+                        state.config.ttl_seconds,
+                        observation.expires_at,
+                    )
                     && token.is_newer_than(state.current_issued_at)
                     && token.is_newer_than(state.candidate.as_ref().map(|old| old.issued_at))
             }) {
+                state.candidate_pair = pair;
+                state.candidate_expires_at = observation.expires_at;
                 state.candidate = Some(candidate);
             }
         }
@@ -463,14 +554,26 @@ impl ProviderAccountStore for MemoryAccountStore {
             return Ok(false);
         }
         // 长度等条件不满足时保留候选，与生产 UPDATE 未命中不动候选的行为一致。
+        // 需要路由 pair 的模式要求候选带完整 pair；有效期限以记录到期点为准。
         let installable = state.candidate.as_ref().is_some_and(|token| {
             token.value.len() == state.config.target_length
                 && token.is_newer_than(state.current_issued_at)
-                && token.is_fresh(chrono::Utc::now().timestamp(), state.config.ttl_seconds)
+                && token.live(
+                    chrono::Utc::now().timestamp(),
+                    state.config.ttl_seconds,
+                    state.candidate_expires_at,
+                )
+                && (!state.config.requires_route_pair()
+                    || state
+                        .candidate_pair
+                        .as_ref()
+                        .is_some_and(|pair| pair.has_pair()))
         });
         let Some(candidate) = installable.then(|| state.candidate.take()).flatten() else {
             return Ok(false);
         };
+        state.installed_pair = state.candidate_pair.take();
+        state.current_expires_at = state.candidate_expires_at.take();
         let reported = self
             .turn_observations
             .lock()
@@ -498,6 +601,7 @@ impl ProviderAccountStore for MemoryAccountStore {
         sent_state: &str,
         reported_model: &str,
         revoke_on_change: bool,
+        sent_cookie: Option<&gateway_core::account::RoutingCookie>,
     ) -> Result<bool, StoreError> {
         if reported_model.is_empty() || reported_model.len() > 256 {
             return Ok(false);
@@ -509,21 +613,32 @@ impl ProviderAccountStore for MemoryAccountStore {
         if state.current.as_ref().map(|token| token.value.as_str()) != Some(sent_state) {
             return Ok(false);
         }
-        match state.attached_model.as_deref() {
-            None => {
-                state.attached_model = Some(reported_model.to_owned());
-                Ok(false)
-            }
-            Some(attached) if attached.eq_ignore_ascii_case(reported_model) => Ok(false),
-            Some(_) if revoke_on_change => {
-                state.current = None;
-                state.manual_override = false;
-                state.next_probe_at = None;
-                state.attached_model = None;
-                Ok(true)
-            }
-            Some(_) => Ok(false),
+        // 与生产实现一致：上报模型与请求模型不一致才作废；否则记录实际模型。
+        if reported_model.eq_ignore_ascii_case(model) || !revoke_on_change {
+            state.attached_model = Some(reported_model.to_owned());
+            return Ok(false);
         }
+        state.current = None;
+        state.installed_pair = None;
+        state.current_expires_at = None;
+        state.manual_override = false;
+        state.next_probe_at = None;
+        state.attached_model = None;
+        if let Some(sent) = sent_cookie
+            && state.cookie_override_name.as_deref() == Some(sent.name.as_str())
+            && state.cookie_override_value.as_deref() == Some(sent.value.as_str())
+            && state.cookie_override_cflb_value.as_deref() == Some(sent.cflb_value.as_str())
+        {
+            state.cookie_override_pod = None;
+            state.cookie_override_issued_at = None;
+            state.cookie_override_name = None;
+            state.cookie_override_value = None;
+            state.cookie_override_cflb_name = None;
+            state.cookie_override_cflb_value = None;
+            state.cookie_override_expires_at = None;
+            state.cookie_override_observation_id = None;
+        }
+        Ok(true)
     }
 
     async fn create_account(&self, input: NewProviderAccount) -> Result<(), StoreError> {

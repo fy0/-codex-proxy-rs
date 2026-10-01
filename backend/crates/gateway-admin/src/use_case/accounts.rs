@@ -44,11 +44,13 @@ use super::{
 
 const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 
-/// 管理员复制时拿到的路由票，以及拼好的完整 Cookie 请求头。
+/// 管理员复制时拿到的路由票 pair，以及拼好的完整 Cookie 请求头。
 pub struct TurnStateCookieCopy {
     pub pod: String,
     pub name: String,
     pub value: String,
+    pub cflb_name: String,
+    pub cflb_value: String,
     pub expires_at: i64,
     pub header: String,
 }
@@ -563,6 +565,12 @@ impl AccountsService for DefaultAccountsService {
             .account_replay_cookies(&account_id)
             .await
             .map_err(|error| map_store_error(error, "account cookie copy"))?;
+        // 路由 cookie 需要 __oailb 与 __cflb 成对回放；剥离账号里可能残留的同名单值，
+        // 避免与选中的 pair 混出不属于同一响应的组合。
+        parts.retain(|(name, _)| !matches!(name.as_str(), "__oailb" | "__oai_lb" | "__cflb"));
+        if !routing.cflb_name.is_empty() && !routing.cflb_value.is_empty() {
+            parts.push((routing.cflb_name.clone(), routing.cflb_value.clone()));
+        }
         parts.push((routing.name.clone(), routing.value.clone()));
         let mut header = String::new();
         for (index, (name, value)) in parts.iter().enumerate() {
@@ -577,6 +585,8 @@ impl AccountsService for DefaultAccountsService {
             pod: routing.pod,
             name: routing.name,
             value: routing.value,
+            cflb_name: routing.cflb_name,
+            cflb_value: routing.cflb_value,
             expires_at: routing.expires_at,
             header,
         })

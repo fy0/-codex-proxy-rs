@@ -1,5 +1,6 @@
 //! 从真实初始化、worker 到业务转发的离线协议回归。
 
+mod declared;
 mod notification;
 mod service;
 
@@ -138,11 +139,11 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         || WorkerCycleContext::new(registration.id.clone(), None, CancellationToken::new());
     let mut identities = HashSet::new();
     let id = ProviderAccountId::new("acct_turn_probe").unwrap();
-    // 非目标长度票只进观测记录不占候选；292 票正常成为候选并安装。
+    // 非目标长度票只进观测记录不占候选；780 票正常成为候选并安装。
     let mut target = String::new();
-    for (size, length) in [(233, 312), (414, 552), (217, 292)] {
+    for (size, length) in [(233, 312), (414, 552), (585, 780)] {
         let value = token(size);
-        if length == 292 {
+        if length == 780 {
             target = value.clone();
         }
         Mock::given(method("POST"))
@@ -159,7 +160,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.headers["chatgpt-account-id"], "upstream-probe");
-        // 打票带上账号 Cookie 时上游不发放 292。
+        // 打票带上账号 Cookie 时上游不发放 780。
         assert!(request.headers.get("cookie").is_none());
         assert_eq!(request.headers["originator"], "test-probe-persona");
         assert_eq!(request.headers["user-agent"], "test-probe-agent/1.0");
@@ -221,7 +222,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(bucket.current.is_some(), length == 292);
+        assert_eq!(bucket.current.is_some(), length == 780);
         assert!(
             store
                 .turn_state_bucket(&id, "other-model")
@@ -238,9 +239,9 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             .iter()
             .map(|item| item.token_length)
             .collect::<Vec<_>>(),
-        vec![Some(312), Some(552), Some(292)]
+        vec![Some(312), Some(552), Some(780)]
     );
-    assert_eq!(observations[0].outcome, "length_miss");
+    assert_eq!(observations[0].outcome, "invalid_length");
     // 长度未命中的票正文仍随观测行保存，可供事后复制或改目标后安装。
     assert!(observations[0].token.is_some());
     for phase in 0..4 {
@@ -262,9 +263,9 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             );
         }
         if phase == 3 {
-            // 先把已安装票改旧到过期，再用新签发的 292 票重新成为候选并安装。
+            // 先把已安装票改旧到过期，再用新签发的 780 票重新成为候选并安装。
             tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-            let mut bytes = vec![0; 217];
+            let mut bytes = vec![0; 585];
             bytes[0] = 0x80;
             bytes[1..9].copy_from_slice(&((Utc::now().timestamp() - 3600) as u64).to_be_bytes());
             store.set_current_turn_state(
@@ -279,7 +280,7 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
             .insert_header("x-codex-turn-state", match phase {
                 0 => token(233),
                 // 阶段 3 用新签发的目标长度票顶替已过期的已安装票。
-                3 => token(217),
+                3 => token(585),
                 _ => target.clone(),
             })
             .set_body_string("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_turn_test\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n"))
@@ -327,7 +328,12 @@ async fn probes_refresh_identity_observe_any_length_and_inject_only_target_bucke
         let observation = store.turn_observations().pop().unwrap();
         assert_eq!(
             observation.outcome,
-            ["length_miss", "reused_state", "reused_state", "candidate"][phase]
+            [
+                "invalid_length",
+                "reused_state",
+                "reused_state",
+                "candidate"
+            ][phase]
         );
         assert_eq!(
             observation.request_state_source.as_deref(),
@@ -473,7 +479,7 @@ async fn probe_stop_strategies_abort_at_the_selected_boundary() {
     ] {
         let server = MockServer::start().await;
         Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)
-            .insert_header("x-codex-turn-state", token(217))
+            .insert_header("x-codex-turn-state", token(585))
             .insert_header("content-type", "text/event-stream")
             .set_body_string("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK @thsottiaux 高市早苗\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"))
             .mount(&server).await;
@@ -519,7 +525,7 @@ async fn probe_records_upstream_reported_model_from_headers_and_stream() {
     Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("x-codex-turn-state", token(217))
+                .insert_header("x-codex-turn-state", token(585))
                 .insert_header("openai-model", "gpt-5.6-luna")
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(
@@ -548,7 +554,7 @@ async fn probe_records_upstream_reported_model_from_headers_and_stream() {
     Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("x-codex-turn-state", token(217))
+                .insert_header("x-codex-turn-state", token(585))
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string("data: {\"type\":\"response.created\",\"response\":{\"model\":\"body-model\",\"headers\":{\"openai-model\":\"event-model\"}}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK @thsottiaux 高市早苗\"}\n\n"),
         )
@@ -590,16 +596,16 @@ async fn non_target_token_is_recorded_in_history_without_occupying_candidate() {
         .unwrap();
     // 长度未命中：正文随观测行保存，候选槽保持为空、不占签发水位。
     let observation = &store.turn_observations()[0];
-    assert_eq!(observation.outcome, "length_miss");
+    assert_eq!(observation.outcome, "invalid_length");
     assert_eq!(observation.token.as_deref(), Some(miss.as_str()));
     assert!(!format!("{observation:?}").contains(&miss));
     assert!(bucket.candidate.is_none());
     assert!(bucket.current.is_none());
     assert!(!store.install_turn_state(&id, "gpt-5.4").await.unwrap());
-    // 312 不占水位，随后到达的 292 票立即成为候选并安装。
+    // 312 不占水位，随后到达的 780 票立即成为候选并安装。
     server.reset().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(217)))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(585)))
         .mount(&server)
         .await;
     cycle(Arc::clone(&store), server.uri()).await;
@@ -608,7 +614,7 @@ async fn non_target_token_is_recorded_in_history_without_occupying_candidate() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(bucket.current_length, Some(292));
+    assert_eq!(bucket.current_length, Some(780));
 }
 
 #[tokio::test]
@@ -661,7 +667,7 @@ async fn future_and_expired_envelopes_never_retain_history_bodies() {
         Utc::now().timestamp() + 3600,
         i64::MAX,
     ] {
-        for size in [217, 233] {
+        for size in [585, 233] {
             let value = token_at(size, issued);
             Mock::given(method("POST"))
                 .respond_with(
@@ -733,7 +739,7 @@ async fn probes_default_to_account_proxy_and_respect_selected_pool() {
 async fn manual_probe_runs_once_without_enabling_rotation() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(217)))
+        .respond_with(ResponseTemplate::new(200).insert_header("x-codex-turn-state", token(585)))
         .mount(&server)
         .await;
     let store = Arc::new(MemoryAccountStore::default());
