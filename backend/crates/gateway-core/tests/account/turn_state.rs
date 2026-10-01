@@ -400,8 +400,8 @@ fn pinned_pair_switch_disqualifies_the_installed_token() {
         "固定值优先回放"
     );
     // 固定回已装 pair 的同一把：票恢复可用。
-    bucket.cookie_override_value = Some(installed.value.clone());
-    bucket.cookie_override_cflb_value = Some(installed.cflb_value.clone());
+    bucket.cookie_override_value = Some(installed.value);
+    bucket.cookie_override_cflb_value = Some(installed.cflb_value);
     assert!(bucket.installed_token(now).is_some());
 }
 
