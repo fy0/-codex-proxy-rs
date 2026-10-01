@@ -511,6 +511,9 @@ async fn probe_stop_strategies_abort_at_the_selected_boundary() {
                 [Some("headers"), Some("answer_matched")]
                     .contains(&observation.stop_reason.as_deref())
             ),
+            TurnStateStopStrategy::DeclaredModel => {
+                unreachable!("declared_model uses the pair-aware tests in declared.rs")
+            }
         }
         assert_eq!(observation.outcome, "candidate");
         assert_eq!(observation.reported_model, None);

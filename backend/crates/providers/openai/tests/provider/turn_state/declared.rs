@@ -231,7 +231,7 @@ async fn declared_model_rejects_mismatch_missing_model_and_bad_created() {
                     )
                     .insert_header("x-codex-turn-state", token(585))
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(body),
+                    .set_body_string(&body),
             )
             .mount(&server)
             .await;
@@ -768,7 +768,7 @@ async fn cloud_mint_case() {
     // 连续失败进入冷却：成功后清零计数，冷却中回落本地，冷却到期恢复资格。
     let mut bundle = declared_bundle(&store, &upstream).await;
     let (task, worker) = declared_task(&mut bundle);
-    let mut cooled = config.clone();
+    let mut cooled = config;
     cooled.cloud_failure_threshold = 2;
     cooled.cloud_cooldown_seconds = 3;
     store.seed_turn_state(ACCOUNT, MODEL, cooled.clone());
@@ -837,7 +837,7 @@ async fn cloud_mint_case() {
     cycle(&*task, &worker).await;
     assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     // 冷却到期后端点恢复资格。
-    store.seed_turn_state(ACCOUNT, MODEL, cooled.clone());
+    store.seed_turn_state(ACCOUNT, MODEL, cooled);
     mint.reset().await;
     tokio::time::sleep(Duration::from_millis(2200)).await;
     let issued = Utc::now().timestamp();
@@ -1125,7 +1125,7 @@ async fn declared_worker_expired_ticket_reprobes_with_the_installed_pair() {
     let (task, worker) = declared_task(&mut bundle);
     cycle(&*task, &worker).await;
     let bucket = store.turn_state_bucket(&id, MODEL).await.unwrap().unwrap();
-    let pair = bucket.installed_pair.clone().expect("installed pair");
+    let pair = bucket.installed_pair.expect("installed pair");
     assert!(pair.has_pair());
     // 票过期、pair 仍有效：下一轮直接用已装 pair 定向打票，不再裸打。
     store.set_current_turn_state(
