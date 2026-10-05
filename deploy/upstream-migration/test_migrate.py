@@ -158,12 +158,14 @@ class PostgreSQLTests(unittest.TestCase):
                 cursor.execute("UPDATE provider_accounts SET bps_concurrency_limit = 7")
 
     def schema(self, connection):
+        # dump/restore 会折叠 BETWEEN 展开后的冗余 AND 分组；交给 PostgreSQL 去掉
+        # 非必要括号，而不是自行删除字符串括号，仍保留 AND/OR 优先级等语义差异。
         queries = [
             """SELECT table_name,column_name,data_type,udt_name,is_nullable,column_default,
                       character_maximum_length,numeric_precision,numeric_scale,is_identity
                FROM information_schema.columns WHERE table_schema='public'
                ORDER BY table_name,column_name""",
-            """SELECT c.relname,k.conname,pg_get_constraintdef(k.oid)
+            """SELECT c.relname,k.conname,pg_get_constraintdef(k.oid, true)
                FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid
                JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
                ORDER BY c.relname,k.conname""",
@@ -225,6 +227,29 @@ class PostgreSQLTests(unittest.TestCase):
                     self.assertEqual(migrate.migrate_database(connection, settings, self.bundle, enabled=True),
                                      ("official", None))
                     self.assertEqual(len(list(settings.backup_dir.glob("*.dump"))), 1)
+
+    def test_schema_comparison_preserves_check_constraint_semantics(self):
+        with self.database() as (connection, _settings):
+            with connection, connection.cursor() as cursor:
+                cursor.execute("""CREATE TABLE constraint_fixture (
+                    a integer, b boolean, c boolean,
+                    CONSTRAINT predicate CHECK (a BETWEEN 1 AND 5 AND (b OR c)))""")
+            expected = self.schema(connection)
+            # BETWEEN 与其展开形式语义相同，不能因内部 AND 分组不同而误报恢复失败。
+            with connection, connection.cursor() as cursor:
+                cursor.execute("""ALTER TABLE constraint_fixture DROP CONSTRAINT predicate,
+                    ADD CONSTRAINT predicate CHECK (a >= 1 AND a <= 5 AND (b OR c))""")
+            self.assertEqual(self.schema(connection), expected)
+            with self.assertRaises(self.psycopg2.errors.CheckViolation):
+                with connection, connection.cursor() as cursor:
+                    cursor.execute("INSERT INTO constraint_fixture VALUES (99, false, true)")
+            # 改变 AND/OR 分组会放宽约束；同一比较器必须仍然发现这种真实差异。
+            with connection, connection.cursor() as cursor:
+                cursor.execute("""ALTER TABLE constraint_fixture DROP CONSTRAINT predicate,
+                    ADD CONSTRAINT predicate CHECK ((a >= 1 AND a <= 5 AND b) OR c)""")
+            self.assertNotEqual(self.schema(connection), expected)
+            with connection, connection.cursor() as cursor:
+                cursor.execute("INSERT INTO constraint_fixture VALUES (99, false, true)")
 
     def test_backup_restores_all_legacy_data_and_history(self):
         from psycopg2.extensions import make_dsn
