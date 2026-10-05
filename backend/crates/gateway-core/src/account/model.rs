@@ -58,6 +58,58 @@ impl AccountConcurrencyLimit {
     }
 }
 
+/// 账号继承默认值或应用独立覆盖后的实际并发约束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountConcurrency {
+    Unlimited,
+    Limited(NonZeroU32),
+}
+
+impl AccountConcurrency {
+    /// 配置值零表示不限制；账号独立覆盖仍只接受正数。
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        match NonZeroU32::new(value) {
+            Some(limit) => Self::Limited(limit),
+            None => Self::Unlimited,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        match self {
+            Self::Unlimited => 0,
+            Self::Limited(limit) => limit.get(),
+        }
+    }
+
+    #[must_use]
+    pub const fn limit(self) -> Option<NonZeroU32> {
+        match self {
+            Self::Unlimited => None,
+            Self::Limited(limit) => Some(limit),
+        }
+    }
+
+    /// 扣除当前请求不可占用的预留名额；不限并发不受影响，有限上限至少保留 1 个名额。
+    #[must_use]
+    pub const fn excluding_reserved(self, reserved: u32) -> Self {
+        match self {
+            Self::Unlimited => Self::Unlimited,
+            Self::Limited(limit) => match NonZeroU32::new(limit.get().saturating_sub(reserved)) {
+                Some(remaining) => Self::Limited(remaining),
+                None => Self::Limited(NonZeroU32::MIN),
+            },
+        }
+    }
+}
+
+impl From<NonZeroU32> for AccountConcurrency {
+    fn from(limit: NonZeroU32) -> Self {
+        Self::Limited(limit)
+    }
+}
+
 /// Relative scheduling priority for an account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccountWeight(NonZeroU16);
@@ -205,7 +257,8 @@ impl fmt::Debug for PlaintextCredential {
 }
 
 /// Provider-owned 的任意 JSON object；公共层只搬运、不读取内部 key。
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct OpaqueProviderData(Map<String, Value>);
 
 impl OpaqueProviderData {
@@ -745,9 +798,6 @@ pub struct ProviderAccount {
     has_refresh_token: bool,
     outbound_proxy: Option<super::OutboundProxy>,
     request_location: Option<super::RequestLocation>,
-    turn_state_override: Option<String>,
-    basispoints_enabled: bool,
-    bps_concurrency_limit: Option<AccountConcurrencyLimit>,
 }
 
 impl ProviderAccount {
@@ -785,9 +835,6 @@ impl ProviderAccount {
             has_refresh_token: false,
             outbound_proxy: None,
             request_location: None,
-            turn_state_override: None,
-            basispoints_enabled: false,
-            bps_concurrency_limit: None,
         }
     }
 
@@ -837,45 +884,6 @@ impl ProviderAccount {
     #[must_use]
     pub const fn request_location(&self) -> Option<&super::RequestLocation> {
         self.request_location.as_ref()
-    }
-
-    /// 管理员配置的 x-codex-turn-state 强制覆盖；Provider 自行决定是否应用。
-    #[must_use]
-    pub fn with_turn_state_override(mut self, value: Option<String>) -> Self {
-        self.turn_state_override = value;
-        self
-    }
-
-    #[must_use]
-    pub fn turn_state_override(&self) -> Option<&str> {
-        self.turn_state_override.as_deref()
-    }
-
-    /// 管理员开启的 Basis Points 上游通道；只对使用 OAuth 的 OpenAI 账号生效。
-    #[must_use]
-    pub const fn with_basispoints_enabled(mut self, enabled: bool) -> Self {
-        self.basispoints_enabled = enabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn basispoints_enabled(&self) -> bool {
-        self.basispoints_enabled
-    }
-
-    /// Basis Points 子池上限：`None` 时 BPS 请求只受账号总并发约束。
-    #[must_use]
-    pub const fn with_bps_concurrency_limit(
-        mut self,
-        limit: Option<AccountConcurrencyLimit>,
-    ) -> Self {
-        self.bps_concurrency_limit = limit;
-        self
-    }
-
-    #[must_use]
-    pub const fn bps_concurrency_limit(&self) -> Option<AccountConcurrencyLimit> {
-        self.bps_concurrency_limit
     }
 
     #[must_use]
@@ -1003,9 +1011,9 @@ impl ProviderAccount {
     }
 
     #[must_use]
-    pub const fn effective_concurrency(&self, default: NonZeroU32) -> NonZeroU32 {
+    pub const fn effective_concurrency(&self, default: AccountConcurrency) -> AccountConcurrency {
         match self.concurrency_limit {
-            Some(limit) => limit.into_non_zero(),
+            Some(limit) => AccountConcurrency::Limited(limit.into_non_zero()),
             None => default,
         }
     }
@@ -1058,6 +1066,7 @@ pub struct LoadedCredential {
 /// Provider 已计算好时间边界的有界 OAuth refresh 候选查询。
 ///
 /// Store 只负责按持久事实筛选和稳定排序，不拥有提前量或恢复窗口语义。
+/// 调度启停不影响凭据续期；停用账号仍按 Provider 的凭据状态与时间边界刷新。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRefreshQuery {
     provider: ProviderKind,
@@ -1122,7 +1131,6 @@ impl ProviderRefreshQuery {
     #[must_use]
     pub fn contains(&self, account: &ProviderAccount) -> bool {
         account.provider() == &self.provider
-            && account.enabled()
             && account.has_refresh_token()
             && matches!(
                 account.credential_state(),

@@ -15,7 +15,11 @@ use provider_openai::transport::profile::{
     CodexWireProfile, CodexWireProfileState, parse_desktop_release,
 };
 
+mod cli_release;
 mod desktop_artifact;
+mod identity;
+mod platform_release;
+mod selection;
 
 struct ReleaseTransport {
     releases: Mutex<VecDeque<Result<CodexDesktopRelease, CodexDesktopReleaseError>>>,
@@ -116,6 +120,7 @@ impl ProviderArtifactProfileCachePort for ArtifactProfiles {
     fn read<'a>(
         &'a self,
         provider_kind: &'a ProviderKind,
+        artifact_key: &'a str,
     ) -> BoxFuture<'a, Result<Option<ProviderArtifactProfile>, ProviderStoreError>> {
         Box::pin(async move {
             Ok(self
@@ -123,7 +128,10 @@ impl ProviderArtifactProfileCachePort for ArtifactProfiles {
                 .lock()
                 .expect("artifact profile")
                 .as_ref()
-                .filter(|profile| profile.provider_kind() == provider_kind)
+                .filter(|profile| {
+                    profile.provider_kind() == provider_kind
+                        && profile.artifact_key() == artifact_key
+                })
                 .cloned())
         })
     }
@@ -132,6 +140,7 @@ impl ProviderArtifactProfileCachePort for ArtifactProfiles {
 #[test]
 fn wire_profile_should_generate_bundled_core_app_server_user_agent() {
     let profile = CodexWireProfile {
+        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
         originator: "Codex Desktop".to_owned(),
         codex_version: "0.147.0-alpha.6.6".to_owned(),
         desktop_version: "26.803.81509".to_owned(),
@@ -140,6 +149,7 @@ fn wire_profile_should_generate_bundled_core_app_server_user_agent() {
         os_version: "15.7.1".to_owned(),
         arch: "arm64".to_owned(),
         terminal: "unknown".to_owned(),
+        exact_user_agent: None,
         residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 8, 3, 0, 0, 0)
@@ -150,10 +160,6 @@ fn wire_profile_should_generate_bundled_core_app_server_user_agent() {
     assert_eq!(
         profile.user_agent(),
         "Codex Desktop/0.147.0-alpha.6.6 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.803.81509)"
-    );
-    assert_eq!(
-        profile.turn_state_user_agent(&gateway_core::account::TurnStateConfig::default()),
-        "codex-tui/0.154.0 (Mac OS 15.7.1; arm64) unknown (codex-tui; 0.154.0)"
     );
 }
 
@@ -339,6 +345,7 @@ fn service(
 
 fn wire_profile() -> CodexWireProfile {
     CodexWireProfile {
+        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
         originator: "Codex Desktop".to_owned(),
         codex_version: "0.147.0-alpha.6.6".to_owned(),
         desktop_version: "26.803.81509".to_owned(),
@@ -347,6 +354,7 @@ fn wire_profile() -> CodexWireProfile {
         os_version: "15.7.1".to_owned(),
         arch: "arm64".to_owned(),
         terminal: "unknown".to_owned(),
+        exact_user_agent: None,
         residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 8, 3, 0, 0, 0)

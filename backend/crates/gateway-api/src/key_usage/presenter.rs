@@ -1,11 +1,13 @@
-//! 只投影当前 Key 可见的用量字段，不序列化账号、凭据、上游标识或诊断正文。
+//! 用量响应不含凭据；配置响应仅在显式读取时返回当前 Key 的名称与明文。
 
 use chrono::{DateTime, Utc};
 use gateway_admin::model::{
+    client_keys::ClientKeySecret,
     key_usage::{KeyUsageOverview, KeyUsageRecords},
     observability::{
         CostCoverage, CurrencyCost, Granularity, OpsError, RequestMetrics, UsageListRecord,
     },
+    system::SystemVersion,
 };
 use serde::Serialize;
 
@@ -16,8 +18,39 @@ use crate::admin::observability::{
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct VersionView {
+    version: String,
+    git_sha: String,
+}
+
+pub(super) fn version(version: SystemVersion) -> VersionView {
+    // 密钥用户仅查看构建标识，不暴露部署环境、更新状态或内部诊断。
+    VersionView {
+        version: version.version,
+        git_sha: version.git_sha,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ConfigView {
+    name: String,
+    plaintext_key: String,
+}
+
+pub(super) fn config(secret: ClientKeySecret) -> ConfigView {
+    let plaintext_key = secret.expose_for_response().to_owned();
+    ConfigView {
+        name: secret.record.name,
+        plaintext_key,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct OverviewView {
     as_of: DateTime<Utc>,
+    as_of_display: String,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
     key: KeyView,
@@ -36,9 +69,11 @@ struct KeyView {
     daily_limit_usd: String,
     daily_used_usd: String,
     daily_resets_at: Option<DateTime<Utc>>,
+    daily_resets_at_display: Option<String>,
     weekly_limit_usd: String,
     weekly_used_usd: String,
     weekly_resets_at: Option<DateTime<Utc>>,
+    weekly_resets_at_display: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,14 +113,16 @@ fn metrics(value: &RequestMetrics, costs: &[CurrencyCost], coverage: &CostCovera
 struct TrendPointView {
     time: DateTime<Utc>,
     bucket_seconds: u32,
+    label: String,
     #[serde(flatten)]
     metrics: MetricsView,
 }
 
-pub(super) fn overview(value: KeyUsageOverview) -> OverviewView {
+pub(super) fn overview(value: KeyUsageOverview, time: crate::time::TimePresenter) -> OverviewView {
     let key = value.key;
     OverviewView {
-        as_of: Utc::now(),
+        as_of: value.overview.range.end,
+        as_of_display: time.time(&value.overview.range.end),
         start_time: value.overview.range.start,
         end_time: value.overview.range.end,
         key: KeyView {
@@ -95,9 +132,17 @@ pub(super) fn overview(value: KeyUsageOverview) -> OverviewView {
             requests_per_minute: key.limits.requests_per_minute,
             daily_limit_usd: key.budget.limits.daily_usd.canonical(),
             daily_used_usd: key.budget.daily_used_usd.canonical(),
+            daily_resets_at_display: key
+                .budget
+                .daily_resets_at
+                .map(|value| time.datetime(&value.into())),
             daily_resets_at: key.budget.daily_resets_at.map(DateTime::from),
             weekly_limit_usd: key.budget.limits.weekly_usd.canonical(),
             weekly_used_usd: key.budget.weekly_used_usd.canonical(),
+            weekly_resets_at_display: key
+                .budget
+                .weekly_resets_at
+                .map(|value| time.datetime(&value.into())),
             weekly_resets_at: key.budget.weekly_resets_at.map(DateTime::from),
         },
         summary: metrics(
@@ -110,6 +155,14 @@ pub(super) fn overview(value: KeyUsageOverview) -> OverviewView {
             .into_iter()
             .map(|point| TrendPointView {
                 time: point.bucket_start,
+                label: time.label(
+                    point.bucket_start,
+                    if point.granularity == Granularity::Day {
+                        "%m-%d"
+                    } else {
+                        "%m-%d %H:%M %:z"
+                    },
+                ),
                 bucket_seconds: match point.granularity {
                     Granularity::FifteenMinutes => 900,
                     Granularity::Hour => 3600,
@@ -118,7 +171,7 @@ pub(super) fn overview(value: KeyUsageOverview) -> OverviewView {
                 metrics: metrics(&point.metrics, &point.costs, &point.cost_coverage),
             })
             .collect(),
-        health_timeline: health_timeline_view(value.health_timeline),
+        health_timeline: health_timeline_view(value.health_timeline, time),
     }
 }
 
@@ -127,6 +180,7 @@ pub(super) fn overview(value: KeyUsageOverview) -> OverviewView {
 pub(super) struct RecordView {
     id: String,
     created_at: DateTime<Utc>,
+    created_at_display: String,
     model: Option<String>,
     route: Option<String>,
     reasoning_effort: Option<String>,
@@ -155,12 +209,13 @@ struct OutputTimingView {
     first_text_ms: Option<u64>,
 }
 
-fn success_record(value: UsageListRecord) -> RecordView {
+fn success_record(value: UsageListRecord, time: crate::time::TimePresenter) -> RecordView {
     let token_details = Some(usage_list_token_details(&value));
     let billing = billing_view(value.billing.as_ref());
     RecordView {
         id: value.id,
         created_at: value.started_at,
+        created_at_display: time.datetime(&value.started_at),
         model: value.requested_model_id,
         route: Some(value.endpoint),
         reasoning_effort: value.reasoning_effort,
@@ -183,10 +238,11 @@ fn success_record(value: UsageListRecord) -> RecordView {
     }
 }
 
-fn error_record(value: OpsError) -> RecordView {
+fn error_record(value: OpsError, time: crate::time::TimePresenter) -> RecordView {
     RecordView {
         id: value.event_id,
         created_at: value.occurred_at,
+        created_at_display: time.datetime(&value.occurred_at),
         model: value.requested_model_id,
         route: value.endpoint,
         reasoning_effort: value.reasoning_effort,
@@ -204,16 +260,27 @@ fn error_record(value: OpsError) -> RecordView {
     }
 }
 
-pub(super) fn records(value: KeyUsageRecords) -> PageData<RecordView> {
+pub(super) fn records(
+    value: KeyUsageRecords,
+    time: crate::time::TimePresenter,
+) -> PageData<RecordView> {
     match value {
         KeyUsageRecords::Success(page) => PageData {
-            items: page.items.into_iter().map(success_record).collect(),
+            items: page
+                .items
+                .into_iter()
+                .map(|value| success_record(value, time))
+                .collect(),
             current_page: page.current_page,
             page_size: page.page_size,
             total: page.total,
         },
         KeyUsageRecords::Error(page) => PageData {
-            items: page.items.into_iter().map(error_record).collect(),
+            items: page
+                .items
+                .into_iter()
+                .map(|value| error_record(value, time))
+                .collect(),
             current_page: page.current_page,
             page_size: page.page_size,
             total: page.total,

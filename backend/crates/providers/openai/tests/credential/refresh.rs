@@ -120,7 +120,6 @@ impl ProviderLeasePort for RefreshLeases {
         _: &'a ClientApiKeyId,
         _: &'a ProviderKind,
         _: &'a [ProviderAccountId],
-        _: &'a [gateway_core::routing::UpstreamChannel],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async { panic!("scheduled credential refresh does not load scheduling state") })
     }
@@ -240,6 +239,94 @@ async fn seed_refreshable_account(
             enabled: true,
         })
         .await;
+}
+
+#[tokio::test]
+async fn scheduled_refresh_rotates_tokens_without_enabling_scheduling() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let policy = MutableRuntimePolicy::new(Duration::from_secs(5 * 60));
+    let refresher = SingleUseRefresher::new();
+    let service = refresh_service(&store, Arc::clone(&refresher), policy);
+    let account_id = "acct_disabled_refresh";
+    seed_refreshable_account(&store, account_id, SystemTime::now(), None).await;
+    let before = store.account(account_id).expect("seeded account");
+    store
+        .set_enabled(before.id(), false)
+        .await
+        .expect("disable scheduling");
+
+    let outcomes = service.refresh_due().await.expect("refresh cycle");
+
+    assert!(matches!(
+        outcomes.as_slice(),
+        [CodexCredentialRefreshOutcome::Refreshed { account_id: refreshed_id, .. }]
+            if refreshed_id == account_id
+    ));
+    assert_eq!(refresher.calls(), 1);
+    let after = store.account(account_id).expect("refreshed account");
+    assert!(!after.enabled());
+    assert_eq!(after.quota(), before.quota());
+    assert_eq!(
+        after.status_projection(SystemTime::now(), None).status,
+        AccountStatus::Disabled
+    );
+    let loaded = store
+        .load_credential(after.id(), after.revision())
+        .await
+        .expect("refreshed credential");
+    let runtime = CodexCredentialCodec::decode(&loaded.credential).expect("runtime credential");
+    assert_eq!(
+        runtime
+            .authentication
+            .oauth()
+            .expect("OAuth credential")
+            .access_token
+            .expose_secret(),
+        "refreshed-access-token"
+    );
+}
+
+#[tokio::test]
+async fn scheduled_refresh_stops_retrying_rejected_disabled_credentials() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let service = CodexCredentialRefreshService::new(
+        store.repository(),
+        Arc::new(FailingRefresher {
+            failure: RefreshFailure::InvalidGrant {
+                message: None,
+                upstream: None,
+            },
+        }),
+        Arc::new(RefreshLeases),
+        Arc::new(RefreshCredentialState),
+        MutableRuntimePolicy::new(Duration::from_secs(5 * 60)),
+    );
+    let account_id = "acct_disabled_rejected";
+    seed_refreshable_account(&store, account_id, SystemTime::now(), None).await;
+    let account = store.account(account_id).expect("seeded account");
+    store
+        .set_enabled(account.id(), false)
+        .await
+        .expect("disable scheduling");
+
+    assert!(matches!(
+        service
+            .refresh_due()
+            .await
+            .expect("refresh cycle")
+            .as_slice(),
+        [CodexCredentialRefreshOutcome::Invalidated { .. }]
+    ));
+    let account = store.account(account_id).expect("rejected account");
+    assert!(!account.enabled());
+    assert_eq!(account.credential_state(), CredentialState::Expired);
+    assert!(
+        service
+            .refresh_due()
+            .await
+            .expect("next refresh cycle")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -432,7 +519,7 @@ async fn scheduled_refresh_persists_retryable_message_inside_the_two_hour_window
                 client_id: "test-public-client".to_owned(),
                 token_endpoint: format!("{}/oauth/token", server.uri()),
             },
-            provider_openai::OpenAiConfig::default().wire_profile_state(),
+            provider_openai::transport::profile::CodexWireProfileState::new(Default::default()),
         )),
         Arc::new(RefreshLeases),
         Arc::new(RefreshCredentialState),
@@ -645,6 +732,10 @@ async fn scheduled_refresh_preserves_the_stored_token_set_when_rotation_fields_a
         .expect("test expiry");
     seed_refreshable_account(&store, account_id, expires_at, None).await;
 
+    store.set_oauth_transport(
+        account_id,
+        provider_openai::credential::ResponsesTransport::Http,
+    );
     service.refresh_due().await.expect("refresh cycle");
 
     let account = store.account(account_id).expect("refreshed account");
@@ -654,6 +745,10 @@ async fn scheduled_refresh_preserves_the_stored_token_set_when_rotation_fields_a
         .await
         .expect("refreshed credential");
     let runtime = CodexCredentialCodec::decode(&loaded.credential).expect("runtime credential");
+    assert_eq!(
+        runtime.transport,
+        provider_openai::credential::ResponsesTransport::Http
+    );
     let oauth = runtime.authentication.oauth().expect("OAuth credential");
     assert_eq!(
         oauth.access_token.expose_secret(),
@@ -723,4 +818,91 @@ async fn scheduled_refresh_respects_retry_not_before_until_it_has_elapsed() {
         }] if account_id == "acct_elapsed_retry"
     ));
     assert_eq!(refresher.calls(), 1);
+}
+
+struct QuotaRejectionDuringRefresh {
+    quota: provider_openai::credential::CodexCredentialQuotaService,
+    account_id: ProviderAccountId,
+    background_quota: bool,
+}
+
+#[async_trait]
+impl TokenRefresher for QuotaRejectionDuringRefresh {
+    async fn refresh(&self, _: &str) -> Result<TokenPair, RefreshFailure> {
+        // 模拟 RT 请求在途时，手动或周期额度查询先收到 401。
+        if self.background_quota {
+            assert_eq!(
+                self.quota
+                    .synchronize()
+                    .await
+                    .expect("quota cycle")
+                    .transient,
+                1
+            );
+        } else {
+            assert!(self.quota.refresh_account(&self.account_id).await.is_err());
+        }
+        Err(RefreshFailure::InvalidGrant {
+            message: Some("refresh token invalidated".to_owned()),
+            upstream: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn quota_rejection_during_oauth_refresh_preserves_terminal_result() {
+    for background_quota in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = "acct_quota_during_refresh";
+        seed_refreshable_account(
+            &store,
+            account_id,
+            SystemTime::now() + Duration::from_secs(60),
+            None,
+        )
+        .await;
+        let account = store.account(account_id).expect("account");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": {"code": "token_revoked"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let quota = super::quota::quota_service_with_base_url(
+            &store,
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("client"),
+            server.uri(),
+        );
+        let service = CodexCredentialRefreshService::new(
+            store.repository(),
+            Arc::new(QuotaRejectionDuringRefresh {
+                quota,
+                account_id: account.id().clone(),
+                background_quota,
+            }),
+            Arc::new(RefreshLeases),
+            Arc::new(RefreshCredentialState),
+            MutableRuntimePolicy::new(Duration::from_secs(5 * 60)),
+        );
+        let outcomes = service.refresh_due().await.expect("refresh cycle");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [CodexCredentialRefreshOutcome::Invalidated { .. }]
+            ),
+            "{outcomes:?}"
+        );
+        let current = store.account(account_id).expect("terminal account");
+        assert_eq!(current.credential_state(), CredentialState::Expired);
+        assert_eq!(
+            current.last_error_message(),
+            Some("refresh token invalidated")
+        );
+    }
 }

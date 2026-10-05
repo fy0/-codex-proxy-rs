@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import type { AccountImportTaskDetail } from '@/api'
+import { BaseButton, BaseEmpty, BaseScrollbar, BaseSegmented } from '@codex-proxy/ui'
 import { ArrowUpRight, Check, CircleAlert, Square, X } from '@lucide/vue'
 import { computed, shallowRef, watch } from 'vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
-import { itemDescription, itemStates, outcomeOrder, processed, taskLabel, taskTime } from './presenter'
+import { itemDescription, itemStates, outcomeOrder, processed, taskLabel } from './presenter'
 
 const props = defineProps<{ task: AccountImportTaskDetail, stopping: boolean }>()
 const emit = defineEmits<{ stop: [], viewAccounts: [] }>()
@@ -40,7 +37,7 @@ watch(hasAttention, (value) => {
           {{ taskLabel(task) }}
         </h3>
         <p class="mt-1 text-xs text-cp-text-secondary">
-          {{ taskTime(task.createdAt) }} 创建
+          {{ task.createdAtDisplay }} 创建
         </p>
       </div>
       <BaseButton

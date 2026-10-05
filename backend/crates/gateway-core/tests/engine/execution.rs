@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -111,7 +111,6 @@ fn service(admissions: Arc<Admissions>, budget: Arc<Budget>) -> DefaultExecution
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     )
@@ -160,6 +159,118 @@ fn budget_rejection_releases_client_concurrency_without_creating_a_charge() {
 }
 
 #[test]
+fn plugin_page_key_selection_uses_normal_root_admission_and_budget() {
+    block_on(async {
+        let admissions = Arc::new(Admissions::default());
+        let budget = Arc::new(Budget {
+            reject: true,
+            active: admissions.active.clone(),
+            ..Default::default()
+        });
+        let service = service(admissions.clone(), budget.clone());
+        let key = ClientApiKeyId::new("key_start_test").unwrap();
+        let prepared = service.prepare_plugin_execution(&key).await.unwrap();
+        assert_eq!(prepared.client().policy().key_id(), &key);
+        let request = request(&service, ClientTransport::HttpSse);
+        let result = service
+            .start_prepared(
+                prepared,
+                gateway_core::engine::execution::PreparedExecutionRequest {
+                    public_model: request.public_model,
+                    operation: request.operation,
+                    metadata: request.metadata,
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(error) if error.client_error_code() == Some("key_daily_budget_exceeded"))
+        );
+        assert!(!admissions.active.load(Ordering::SeqCst));
+        assert!(budget.charges.lock().unwrap().is_empty());
+        assert!(
+            matches!(service.prepare_plugin_execution(&ClientApiKeyId::new("key_missing").unwrap()).await, Err(error) if error.kind() == GatewayErrorKind::Unauthorized)
+        );
+    });
+}
+
+#[test]
+fn provider_http_endpoint_uses_the_same_admission_and_budget_gate() {
+    let admissions = Arc::new(Admissions::default());
+    let budget = Arc::new(Budget {
+        reject: true,
+        active: admissions.active.clone(),
+        charges: Mutex::default(),
+        ..Default::default()
+    });
+    let service = service(admissions.clone(), budget.clone());
+    let operation = Operation::ProviderHttp(
+        ProviderHttpRequest::new(
+            "models",
+            ProviderHttpMethod::Get,
+            None,
+            Vec::new(),
+            RawHttpPayload::new("provider-http", Bytes::new()).expect("HTTP payload"),
+        )
+        .expect("provider HTTP operation"),
+    );
+    let result = block_on(service.start_provider_endpoint(StartProviderExecution {
+        client: service.authenticate("sk_start_test").expect("client"),
+        provider: ProviderKind::new("openai").expect("provider"),
+        upstream_model: None,
+        operation,
+        metadata: ExecutionRequestMetadata {
+            protocol: "provider-http".to_owned(),
+            endpoint: "/v1/providers/openai/http/models".to_owned(),
+            transport: ClientTransport::HttpJson,
+            stream: false,
+            client_ip: None,
+            user_agent: None,
+            previous_response_id: None,
+        },
+    }));
+
+    assert!(
+        matches!(result, Err(error) if error.client_error_code() == Some("key_daily_budget_exceeded"))
+    );
+    assert!(!admissions.active.load(Ordering::SeqCst));
+    assert!(budget.charges.lock().unwrap().is_empty());
+}
+
+#[test]
+fn bound_token_count_reports_an_explicit_unsupported_capability() {
+    let admissions = Arc::new(Admissions::default());
+    let budget = Arc::new(Budget {
+        active: admissions.active.clone(),
+        ..Budget::default()
+    });
+    let service = service(admissions.clone(), budget.clone());
+    let operation = Operation::CountTokens(TokenCountRequest::from_raw_json(
+        RawJsonPayload::new("token-count", Bytes::from_static(br#"{"input":"hello"}"#))
+            .expect("token count payload"),
+    ));
+
+    let result = block_on(service.start_provider_endpoint(StartProviderExecution {
+        client: service.authenticate("sk_start_test").expect("client"),
+        provider: ProviderKind::new("openai").expect("provider"),
+        upstream_model: Some(UpstreamModelId::new("gpt-start").expect("model")),
+        operation,
+        metadata: ExecutionRequestMetadata {
+            protocol: "token-count".to_owned(),
+            endpoint: "/v1/providers/openai/models/gpt-start/count_tokens".to_owned(),
+            transport: ClientTransport::HttpJson,
+            stream: false,
+            client_ip: None,
+            user_agent: None,
+            previous_response_id: None,
+        },
+    }));
+
+    assert!(matches!(result, Err(error) if error.kind() == GatewayErrorKind::Unsupported));
+    assert!(!admissions.active.load(Ordering::SeqCst));
+    assert!(budget.charges.lock().unwrap().is_empty());
+}
+
+#[test]
 fn reused_client_uses_updated_limits_for_each_execution() {
     let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
     let admissions = Arc::new(Admissions::default());
@@ -168,7 +279,6 @@ fn reused_client_uses_updated_limits_for_each_execution() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         admissions.clone(),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -178,7 +288,7 @@ fn reused_client_uses_updated_limits_for_each_execution() {
         requests_per_minute: 1,
     };
     for (revision, limits) in [(2, limited), (3, RateLimits::unlimited())] {
-        snapshots.publish(start_snapshot_with_policy(revision, true, limits));
+        snapshots.publish(start_snapshot_with_policy(revision, true, limits, false));
         let mut next = request(&service, ClientTransport::WebSocket);
         next.client = client.clone();
         let started = block_on(service.start(next)).expect("new execution");
@@ -200,7 +310,6 @@ fn reused_client_cannot_start_after_key_disable_or_snapshot_suspension() {
             Arc::new(TrackingExecutionStore::default()),
             ProviderRegistry::default(),
             admissions.clone(),
-            Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
         );
@@ -212,6 +321,7 @@ fn reused_client_cannot_start_after_key_disable_or_snapshot_suspension() {
                 2,
                 false,
                 RateLimits::unlimited(),
+                false,
             ));
         }
         let result = block_on(service.start(next));
@@ -223,6 +333,125 @@ fn reused_client_cannot_start_after_key_disable_or_snapshot_suspension() {
         assert!(matches!(result, Err(error) if error.kind() == expected));
         assert!(admissions.limits.lock().unwrap().is_empty());
     }
+}
+
+struct FrontendAuthenticationFixture {
+    decisions: Mutex<VecDeque<FrontendAuthenticationDecision>>,
+    identities: BTreeMap<String, ClientApiKeyId>,
+    exclusive: bool,
+    calls: AtomicUsize,
+}
+
+impl FrontendAuthenticationPlan for FrontendAuthenticationFixture {
+    fn authenticate<'a>(
+        &'a self,
+        _: &'a ClientAuthenticationRequest,
+    ) -> BoxFuture<'a, Result<FrontendAuthenticationDecision, FrontendAuthenticationError>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.decisions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(FrontendAuthenticationError)
+        })
+    }
+
+    fn client_key_id(&self, principal: &str) -> Option<ClientApiKeyId> {
+        self.identities.get(principal).cloned()
+    }
+
+    fn exclusive(&self) -> bool {
+        self.exclusive
+    }
+}
+
+struct AuthenticationGeneration(Arc<dyn FrontendAuthenticationPlan>);
+
+impl ExtensionSetLease for AuthenticationGeneration {
+    fn is_ready(&self) -> bool {
+        Arc::strong_count(&self.0) > 0
+    }
+}
+
+fn authentication_generation(
+    index: &FrontendAuthenticationExtensionIndex,
+    id: &str,
+    plan: Arc<dyn FrontendAuthenticationPlan>,
+) -> ExtensionSetReference {
+    let id = ExtensionSetId::new(id.to_owned()).unwrap();
+    let plan = index.register(id.clone(), plan).unwrap();
+    ExtensionSetReference::new(id, Arc::new(AuthenticationGeneration(plan)))
+}
+
+#[test]
+fn reused_client_is_reauthenticated_by_the_current_frontend_plan_without_identity_drift() {
+    block_on(async {
+        let authentication = FrontendAuthenticationExtensionIndex::default();
+        let initial_plan = Arc::new(FrontendAuthenticationFixture {
+            decisions: Mutex::new(VecDeque::from([
+                FrontendAuthenticationDecision::Authenticated {
+                    principal: "external-user".into(),
+                },
+            ])),
+            identities: BTreeMap::from([(
+                "external-user".into(),
+                ClientApiKeyId::new("key_start_test").unwrap(),
+            )]),
+            exclusive: true,
+            calls: AtomicUsize::new(0),
+        });
+        let initial = start_snapshot().with_extensions(Some(authentication_generation(
+            &authentication,
+            "authentication-first",
+            initial_plan.clone(),
+        )));
+        let snapshots = RuntimeSnapshotHandle::new(initial);
+        let admissions = Arc::new(Admissions::default());
+        let service = DefaultExecutionService::new(
+            snapshots.clone(),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_frontend_authentication(authentication.clone());
+        let client = service
+            .authenticate_request(
+                ClientAuthenticationRequest::new("External controlled-fixture").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(initial_plan.calls.load(Ordering::SeqCst), 1);
+
+        let replacement_plan = Arc::new(FrontendAuthenticationFixture {
+            decisions: Mutex::new(VecDeque::from([
+                FrontendAuthenticationDecision::Authenticated {
+                    principal: "external-user".into(),
+                },
+            ])),
+            identities: BTreeMap::from([(
+                "external-user".into(),
+                ClientApiKeyId::new("another-key").unwrap(),
+            )]),
+            exclusive: true,
+            calls: AtomicUsize::new(0),
+        });
+        snapshots.publish(
+            start_snapshot().with_extensions(Some(authentication_generation(
+                &authentication,
+                "authentication-second",
+                replacement_plan.clone(),
+            ))),
+        );
+        let mut next = request(&service, ClientTransport::WebSocket);
+        next.client = client;
+        let result = service.start(next).await;
+        assert!(matches!(result, Err(error) if error.kind() == GatewayErrorKind::Unauthorized));
+        assert_eq!(replacement_plan.calls.load(Ordering::SeqCst), 1);
+        assert!(admissions.limits.lock().unwrap().is_empty());
+    });
 }
 
 #[test]
@@ -275,7 +504,6 @@ fn early_failure_service(
         store,
         ProviderRegistry::new([Arc::new(LocalFailingProvider) as Arc<dyn Provider>]).unwrap(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     )
@@ -489,8 +717,1760 @@ struct ChargedProvider {
     fail: bool,
 }
 
+#[derive(Debug)]
+struct FixedRoutingPolicy {
+    decision: ModelRouteDecision,
+    inputs: Mutex<Vec<ModelRouteInput>>,
+}
+
+#[derive(Debug)]
+struct RetryTestPolicy {
+    decision: gateway_core::engine::policy::RetryDecision,
+    facts: Arc<Mutex<Vec<gateway_core::engine::policy::RetryFacts>>>,
+}
+
+impl RequestPolicyPlan for RetryTestPolicy {
+    fn route_model(
+        &self,
+        _: ModelRouteInput,
+    ) -> BoxFuture<'static, Result<ModelRouteDecision, RequestPolicyFault>> {
+        Box::pin(async { Ok(ModelRouteDecision::Unhandled) })
+    }
+    fn schedule_account(
+        &self,
+        _: AccountScheduleInput,
+    ) -> BoxFuture<'static, Result<AccountScheduleDecision, RequestPolicyFault>> {
+        Box::pin(async { Ok(AccountScheduleDecision::Delegate) })
+    }
+    fn retry_decision(
+        &self,
+        input: gateway_core::engine::policy::RetryInput,
+    ) -> BoxFuture<'static, Result<gateway_core::engine::policy::RetryDecision, RequestPolicyFault>>
+    {
+        self.facts.lock().unwrap().push(input.facts);
+        let decision = self.decision;
+        Box::pin(async move { Ok(decision) })
+    }
+}
+
+struct RetryTestProvider {
+    error: ProviderError,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for RetryTestProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![])
+    }
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(ProviderError::new(
+                ProviderErrorKind::NoEligibleAccount,
+                UpstreamSendState::NotSent,
+            ));
+        }
+        let candidate = request.candidate();
+        let metadata = ProviderCallMetadata::new(
+            candidate.provider().clone(),
+            candidate.upstream_model().cloned().unwrap(),
+            ProviderAccountId::new("acct_openai").unwrap(),
+            UpstreamTransport::new("http").unwrap(),
+        );
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::iter([Err(self.error.stable_snapshot())]),
+            (),
+        ))
+    }
+}
+
+#[test]
+fn retry_policy_can_stop_but_cannot_bypass_replay_safety() {
+    use gateway_core::engine::policy::RetryDecision;
+    for (decision, send_state, replay_safe, expected_allowed, expected_calls) in [
+        (
+            RetryDecision::Stop,
+            UpstreamSendState::NotSent,
+            true,
+            true,
+            1,
+        ),
+        (
+            RetryDecision::Retry,
+            UpstreamSendState::NotSent,
+            true,
+            true,
+            2,
+        ),
+        (
+            RetryDecision::Retry,
+            UpstreamSendState::Ambiguous,
+            true,
+            false,
+            1,
+        ),
+        (
+            RetryDecision::Retry,
+            UpstreamSendState::Sent,
+            false,
+            false,
+            1,
+        ),
+    ] {
+        block_on(async {
+            let error = ProviderError::new(ProviderErrorKind::Transport, send_state);
+            let error = if replay_safe {
+                error.with_replay_safe()
+            } else {
+                error
+            };
+            let provider = Arc::new(RetryTestProvider {
+                error,
+                calls: AtomicUsize::new(0),
+            });
+            let facts = Arc::new(Mutex::new(vec![]));
+            let generation = super::extensions::reference("retry-policy");
+            let policies = RequestPolicyExtensionIndex::default();
+            let _owner = policies
+                .register(
+                    generation.id().clone(),
+                    Arc::new(RetryTestPolicy {
+                        decision,
+                        facts: facts.clone(),
+                    }),
+                )
+                .unwrap();
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(request_policy_snapshot(
+                    generation,
+                    &[ProviderKind::new("openai").unwrap()],
+                )),
+                Arc::new(TrackingExecutionStore::default()),
+                ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                Arc::new(Admissions::default()),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            )
+            .with_request_policies(policies);
+            let mut started = service
+                .start(request(&service, ClientTransport::HttpJson))
+                .await
+                .unwrap();
+            assert!(started.session.collect_uncommitted().await.is_err());
+            assert_eq!(provider.calls.load(Ordering::SeqCst), expected_calls);
+            let observed = facts.lock().unwrap();
+            assert_eq!(observed[0].retry_allowed, expected_allowed);
+            assert_eq!(observed[0].send_state, send_state);
+            assert_eq!(observed[0].remaining_routing_attempts, 31);
+        });
+    }
+}
+
+impl RequestPolicyPlan for FixedRoutingPolicy {
+    fn route_model(
+        &self,
+        input: ModelRouteInput,
+    ) -> BoxFuture<'static, Result<ModelRouteDecision, RequestPolicyFault>> {
+        self.inputs.lock().unwrap().push(input);
+        let decision = self.decision.clone();
+        Box::pin(async move { Ok(decision) })
+    }
+
+    fn schedule_account(
+        &self,
+        _: AccountScheduleInput,
+    ) -> BoxFuture<'static, Result<AccountScheduleDecision, RequestPolicyFault>> {
+        Box::pin(async { Ok(AccountScheduleDecision::Delegate) })
+    }
+}
+
+#[derive(Debug)]
+struct NestedRoutingPolicy;
+
+impl RequestPolicyPlan for NestedRoutingPolicy {
+    fn route_model(
+        &self,
+        input: ModelRouteInput,
+    ) -> BoxFuture<'static, Result<ModelRouteDecision, RequestPolicyFault>> {
+        let provider = if input.suppresses_plugin("nested-fixture") {
+            "nested"
+        } else {
+            "openai"
+        };
+        Box::pin(async move {
+            Ok(ModelRouteDecision::Route {
+                provider: Some(ProviderKind::new(provider).unwrap()),
+                model: None,
+            })
+        })
+    }
+
+    fn schedule_account(
+        &self,
+        _: AccountScheduleInput,
+    ) -> BoxFuture<'static, Result<AccountScheduleDecision, RequestPolicyFault>> {
+        Box::pin(async { Ok(AccountScheduleDecision::Delegate) })
+    }
+}
+
+#[derive(Debug)]
+struct EffectObservingPolicy;
+
+impl RequestPolicyPlan for EffectObservingPolicy {
+    fn route_model(
+        &self,
+        input: ModelRouteInput,
+    ) -> BoxFuture<'static, Result<ModelRouteDecision, RequestPolicyFault>> {
+        input.execution_effects().observe();
+        Box::pin(async { Ok(ModelRouteDecision::Unhandled) })
+    }
+
+    fn schedule_account(
+        &self,
+        _: AccountScheduleInput,
+    ) -> BoxFuture<'static, Result<AccountScheduleDecision, RequestPolicyFault>> {
+        Box::pin(async { Ok(AccountScheduleDecision::Delegate) })
+    }
+}
+
+struct ProcessingProvider;
+
+#[async_trait]
+impl Provider for ProcessingProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let candidate = request.candidate();
+        let provider = candidate.provider().clone();
+        let account = ProviderAccountId::new("acct_openai").unwrap();
+        let transport = UpstreamTransport::new("websocket").unwrap();
+        let metadata = ProviderCallMetadata::new(
+            provider,
+            candidate.upstream_model().cloned().unwrap(),
+            account,
+            transport,
+        );
+        let response = ResponseMeta::new("response-policy", "gpt-start");
+        let event = |event_type: &str, fact| {
+            ProviderEvent::canonical_with_wire(
+                vec![fact],
+                ProtocolWireEvent::json(
+                    "openai",
+                    Some(event_type.to_owned()),
+                    json!({"type": event_type, "future": {"nested": true}}),
+                )
+                .unwrap(),
+            )
+        };
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::iter([
+                Ok(event(
+                    "response.created",
+                    GatewayEvent::Started(response.clone()),
+                )),
+                Ok(event(
+                    "response.completed",
+                    GatewayEvent::Completed(response),
+                )),
+            ]),
+            (),
+        ))
+    }
+}
+
+struct PendingNestedProvider;
+
+#[async_trait]
+impl Provider for PendingNestedProvider {
+    fn name(&self) -> &'static str {
+        "nested"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let candidate = request.candidate();
+        let metadata = ProviderCallMetadata::new(
+            candidate.provider().clone(),
+            candidate.upstream_model().cloned().unwrap(),
+            ProviderAccountId::new("acct_nested").unwrap(),
+            UpstreamTransport::new("websocket").unwrap(),
+        );
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::pending::<Result<ProviderEvent, ProviderError>>(),
+            (),
+        ))
+    }
+}
+
+fn request_policy_snapshot(
+    generation: ExtensionSetReference,
+    providers: &[ProviderKind],
+) -> RuntimeSnapshot {
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        providers
+            .iter()
+            .map(|provider| {
+                (
+                    ProviderAccountId::new(format!("acct_{}", provider.as_str())).unwrap(),
+                    RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+                )
+            })
+            .collect(),
+    ));
+    let capabilities =
+        ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
+    RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        gateway_core::settings::SettingsValues::new(2, 1, "smart", Default::default(), None, None),
+        providers.to_vec(),
+        providers
+            .iter()
+            .map(|provider| {
+                ProviderModel::new(
+                    provider.clone(),
+                    UpstreamModelId::new("gpt-start").unwrap(),
+                    capabilities.clone(),
+                )
+            })
+            .collect(),
+        vec![ClientPolicy::new(
+            ClientApiKeyId::new("key_start_test").unwrap(),
+            PlaintextClientApiKey::new("sk_start_test").unwrap(),
+            Arc::new(FrozenAccountScope::new(
+                Arc::clone(&directory),
+                ClientRoutingScope::all_accounts(),
+            )),
+            true,
+            RateLimits::unlimited(),
+        )],
+    )
+    .unwrap()
+    .with_account_directory(directory)
+    .with_extensions(Some(generation))
+}
+
+#[test]
+fn completed_parent_rejects_new_nested_execution_and_cancels_an_active_child() {
+    block_on(async {
+        let parent_provider = Arc::new(ProcessingProvider);
+        let providers = ProviderRegistry::new([
+            parent_provider as Arc<dyn Provider>,
+            Arc::new(PendingNestedProvider) as Arc<dyn Provider>,
+        ])
+        .unwrap();
+        let provider_index = providers;
+        let generation = super::extensions::reference("nested-cancel");
+        let policy_index = RequestPolicyExtensionIndex::default();
+        let _owner = policy_index
+            .register(generation.id().clone(), Arc::new(NestedRoutingPolicy))
+            .unwrap();
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(
+                generation,
+                &[
+                    ProviderKind::new("openai").unwrap(),
+                    ProviderKind::new("nested").unwrap(),
+                ],
+            )),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_policies(policy_index);
+
+        let mut parent = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        let nested_request = |parent_request_id| NestedModelExecutionRequest {
+            parent_request_id,
+            initiating_plugin_instance_id: "nested-fixture".to_owned(),
+            public_model: PublicModelId::new("gpt-start").unwrap(),
+            operation: start_operation(),
+            metadata: ExecutionRequestMetadata {
+                protocol: "openai".to_owned(),
+                endpoint: "host.model".to_owned(),
+                transport: ClientTransport::InternalPlugin,
+                stream: true,
+                client_ip: None,
+                user_agent: None,
+                previous_response_id: None,
+            },
+            provider: Some(ProviderKind::new("nested").unwrap()),
+            account: None,
+            parent_account: None,
+        };
+        let mut child = gateway_core::engine::nested::NestedModelExecutionPort::start(
+            &service,
+            nested_request(parent.request_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        let events = parent.session.collect_uncommitted().await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| { matches!(event.canonical_facts(), [GatewayEvent::Completed(_)]) })
+        );
+        parent.session.commit_downstream(Some(200)).await.unwrap();
+        assert!(parent.session.is_finalized());
+
+        let new_child = gateway_core::engine::nested::NestedModelExecutionPort::start(
+            &service,
+            nested_request(parent.request_id.clone()),
+        )
+        .await;
+        assert!(
+            matches!(new_child, Err(error) if error.kind() == GatewayErrorKind::PolicyDenied),
+            "a finalized parent must be removed from the callback registry"
+        );
+        assert!(
+            matches!(
+                child.session.next_event().await,
+                Err(EngineError::Cancelled)
+            ),
+            "an in-flight child must inherit cancellation from the released parent authority"
+        );
+        child.session.detach_finalize().await;
+        parent.session.detach_finalize().await;
+    });
+}
+
+struct TestNativeResponseTranslator;
+
+impl NativeResponseTranslator for TestNativeResponseTranslator {
+    fn source_protocol(&self) -> &str {
+        "xai"
+    }
+
+    fn target_protocol(&self) -> &str {
+        "openai"
+    }
+
+    fn translate(
+        &mut self,
+        event: &ProtocolWireEvent,
+    ) -> Result<Vec<ProtocolWireEvent>, ProviderError> {
+        if event.data().get("drop").and_then(Value::as_bool) == Some(true) {
+            return Ok(Vec::new());
+        }
+        let count = if event.data().get("expand").and_then(Value::as_bool) == Some(true) {
+            2
+        } else {
+            1
+        };
+        (0..count)
+            .map(|part| {
+                let mut body = event.data().clone();
+                body["native_translated"] = json!(true);
+                body["native_part"] = json!(part);
+                ProtocolWireEvent::json("openai", event.event_type().map(str::to_owned), body)
+                    .map_err(|_| {
+                        ProviderError::new(ProviderErrorKind::Protocol, UpstreamSendState::Sent)
+                    })
+            })
+            .collect()
+    }
+}
+
+struct NativeResponseBoundaryProvider;
+
+#[async_trait]
+impl Provider for NativeResponseBoundaryProvider {
+    fn name(&self) -> &'static str {
+        "xai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let candidate = request.candidate();
+        let response = ResponseMeta::new("response-native-boundary", "gpt-start");
+        let event = |event_type: &str, body: Value, facts: Vec<GatewayEvent>| {
+            let wire = ProtocolWireEvent::json("xai", Some(event_type.to_owned()), body).unwrap();
+            if facts.is_empty() {
+                ProviderEvent::wire(wire)
+            } else {
+                ProviderEvent::canonical_with_wire(facts, wire)
+            }
+        };
+        let events = futures::stream::iter([
+            Ok(event(
+                "response.created",
+                json!({"type":"response.created","future":{"nested":true}}),
+                vec![GatewayEvent::Started(response.clone())],
+            )),
+            Ok(event(
+                "response.internal",
+                json!({"type":"response.internal","drop":true}),
+                vec![GatewayEvent::Usage(Usage {
+                    input_tokens: Some(3),
+                    total_tokens: Some(3),
+                    ..Usage::default()
+                })],
+            )),
+            Ok(event(
+                "response.output_text.delta",
+                json!({"type":"response.output_text.delta","delta":"hi","expand":true}),
+                Vec::new(),
+            )),
+            Ok(event(
+                "response.completed",
+                json!({"type":"response.completed"}),
+                vec![GatewayEvent::Completed(response)],
+            )),
+        ]);
+        let metadata = ProviderCallMetadata::new(
+            candidate.provider().clone(),
+            candidate.upstream_model().unwrap().clone(),
+            ProviderAccountId::new("acct_xai").unwrap(),
+            UpstreamTransport::new("websocket").unwrap(),
+        );
+        Ok(ProviderStream::new(metadata, events, ())
+            .with_native_response_translator(TestNativeResponseTranslator))
+    }
+}
+
+#[test]
+fn native_response_processing_uses_the_real_translation_boundary() {
+    block_on(async {
+        let provider_index =
+            ProviderRegistry::new([Arc::new(NativeResponseBoundaryProvider) as Arc<dyn Provider>])
+                .unwrap();
+        let generation = super::extensions::reference("native-response");
+        let observer_index = RequestObserverExtensionIndex::default();
+        let observer = Arc::new(RecordingRequestObserver::default());
+        let _observer_owner = observer_index
+            .register(generation.id().clone(), observer.clone())
+            .unwrap();
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(
+                generation,
+                &[ProviderKind::new("xai").unwrap()],
+            )),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_observers(observer_index);
+
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        let events = started.session.collect_uncommitted().await.unwrap();
+        assert_eq!(events.len(), 5);
+        assert!(events.iter().all(|event| {
+            event.wire_event().is_none_or(|wire| {
+                wire.protocol() == "openai" && wire.data()["native_translated"] == json!(true)
+            })
+        }));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.wire_event().is_none())
+                .flat_map(ProviderEvent::canonical_facts)
+                .filter(|fact| matches!(fact, GatewayEvent::Usage(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events[0]
+                .wire_event()
+                .and_then(|wire| wire.data().pointer("/future/nested")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event
+                    .wire_event()
+                    .is_some_and(|wire| wire.data()["expand"] == json!(true)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .flat_map(ProviderEvent::canonical_facts)
+                .filter(|fact| matches!(fact, GatewayEvent::Started(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .flat_map(ProviderEvent::canonical_facts)
+                .filter(|fact| matches!(fact, GatewayEvent::Completed(_)))
+                .count(),
+            1
+        );
+
+        {
+            let websocket = observer.websocket_observations.lock().unwrap();
+            assert_eq!(websocket.len(), 4);
+            assert!(websocket.iter().all(|observation| {
+                observation.wire().protocol() == "xai"
+                    && observation.wire().data().get("native_translated").is_none()
+            }));
+        }
+        started.session.commit_downstream(Some(200)).await.unwrap();
+        started.session.detach_finalize().await;
+    });
+}
+
+struct NativeTranslationFactsProvider;
+
+#[async_trait]
+impl Provider for NativeTranslationFactsProvider {
+    fn name(&self) -> &'static str {
+        "xai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let candidate = request.candidate();
+        let response = ResponseMeta::new("response-translated-facts", "gpt-start");
+        let event = |event_type: &str, body: Value, facts: Vec<GatewayEvent>| {
+            ProviderEvent::canonical_with_wire(
+                facts,
+                ProtocolWireEvent::json("xai", Some(event_type.to_owned()), body).unwrap(),
+            )
+        };
+        let events = futures::stream::iter([
+            Ok(event(
+                "response.created",
+                json!({"type":"response.created"}),
+                vec![GatewayEvent::Started(response.clone())],
+            )),
+            Ok(event(
+                "response.usage",
+                json!({"type":"response.usage","drop":true}),
+                vec![GatewayEvent::Usage(Usage {
+                    input_tokens: Some(9),
+                    output_tokens: Some(4),
+                    total_tokens: Some(13),
+                    ..Usage::default()
+                })],
+            )),
+            Ok(event(
+                "response.completed",
+                json!({"type":"response.completed"}),
+                vec![GatewayEvent::Completed(response)],
+            )),
+        ]);
+        let metadata = ProviderCallMetadata::new(
+            candidate.provider().clone(),
+            candidate.upstream_model().unwrap().clone(),
+            ProviderAccountId::new("acct_xai").unwrap(),
+            UpstreamTransport::new("http_sse").unwrap(),
+        );
+        Ok(ProviderStream::new(metadata, events, ())
+            .with_native_response_translator(TestNativeResponseTranslator))
+    }
+}
+
+#[test]
+fn response_translation_zero_output_preserves_canonical_usage_and_finalization() {
+    block_on(async {
+        let provider_index =
+            ProviderRegistry::new([Arc::new(NativeTranslationFactsProvider) as Arc<dyn Provider>])
+                .unwrap();
+        let generation = super::extensions::reference("translated-facts");
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(
+                generation,
+                &[ProviderKind::new("xai").unwrap()],
+            )),
+            store.clone(),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        let events = started.session.collect_uncommitted().await.unwrap();
+        assert_eq!(events.len(), 3);
+        let usage = events
+            .iter()
+            .filter(|event| event.wire_event().is_none())
+            .flat_map(ProviderEvent::canonical_facts)
+            .find_map(|fact| match fact {
+                GatewayEvent::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("wire-filtered Usage must remain client-visible");
+        assert_eq!(usage.total_tokens, Some(13));
+        assert_eq!(
+            events
+                .iter()
+                .flat_map(ProviderEvent::canonical_facts)
+                .filter(|fact| matches!(fact, GatewayEvent::Completed(_)))
+                .count(),
+            1
+        );
+
+        started.session.commit_downstream(Some(200)).await.unwrap();
+        started.session.detach_finalize().await;
+        let finalizations = store.finalizations.lock().unwrap();
+        assert_eq!(finalizations.len(), 1);
+        assert_eq!(finalizations[0].usage, usage.clone());
+    });
+}
+
+#[derive(Default)]
+struct FailingNativeResponseTranslator {
+    translated: bool,
+}
+
+impl NativeResponseTranslator for FailingNativeResponseTranslator {
+    fn source_protocol(&self) -> &str {
+        "xai"
+    }
+
+    fn target_protocol(&self) -> &str {
+        "openai"
+    }
+
+    fn translate(
+        &mut self,
+        event: &ProtocolWireEvent,
+    ) -> Result<Vec<ProtocolWireEvent>, ProviderError> {
+        if self.translated {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                UpstreamSendState::Sent,
+            ));
+        }
+        self.translated = true;
+        Ok(vec![
+            ProtocolWireEvent::json(
+                "openai",
+                event.event_type().map(str::to_owned),
+                event.data().clone(),
+            )
+            .unwrap(),
+        ])
+    }
+}
+
+struct FailingNativeResponseProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for FailingNativeResponseProvider {
+    fn name(&self) -> &'static str {
+        "xai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let candidate = request.candidate();
+        let response = ResponseMeta::new("response-native-failure", "gpt-start");
+        let event = |event_type: &str, fact| {
+            ProviderEvent::canonical_with_wire(
+                vec![fact],
+                ProtocolWireEvent::json(
+                    "xai",
+                    Some(event_type.to_owned()),
+                    json!({"type": event_type}),
+                )
+                .unwrap(),
+            )
+        };
+        let metadata = ProviderCallMetadata::new(
+            candidate.provider().clone(),
+            candidate.upstream_model().unwrap().clone(),
+            ProviderAccountId::new("acct_xai").unwrap(),
+            UpstreamTransport::new("websocket").unwrap(),
+        );
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::iter([
+                Ok(event(
+                    "response.created",
+                    GatewayEvent::Started(response.clone()),
+                )),
+                Ok(event(
+                    "response.completed",
+                    GatewayEvent::Completed(response),
+                )),
+            ]),
+            (),
+        )
+        .with_native_response_translator(FailingNativeResponseTranslator::default()))
+    }
+}
+
+#[test]
+fn native_response_failure_after_downstream_commit_is_not_replayed() {
+    block_on(async {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_index = ProviderRegistry::new([Arc::new(FailingNativeResponseProvider {
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn Provider>])
+        .unwrap();
+        let generation = super::extensions::reference("native-response-failure");
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(
+                generation,
+                &[ProviderKind::new("xai").unwrap()],
+            )),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpSse))
+            .await
+            .unwrap();
+        let first = started.session.next_event().await.unwrap().unwrap();
+        assert_eq!(
+            first.commit_requirement(),
+            CommitRequirement::CommitBeforeDelivery
+        );
+        assert!(first.into_provider_events().iter().all(|event| {
+            event
+                .wire_event()
+                .is_some_and(|wire| wire.protocol() == "openai")
+        }));
+        started.session.commit_downstream(Some(200)).await.unwrap();
+
+        let error = started.session.next_event().await.unwrap_err();
+        assert!(matches!(
+            error,
+            EngineError::Provider(ref error)
+                if error.kind() == ProviderErrorKind::Protocol
+                    && error.send_state() == UpstreamSendState::Sent
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        started.session.detach_finalize().await;
+    });
+}
+
+#[test]
+fn model_routing_policy_selects_native_provider() {
+    block_on(async {
+        let target = "xai";
+        let openai = Arc::new(ObservationProvider {
+            name: "openai",
+            behavior: ObservationProviderBehavior::CompleteWithUsage,
+            calls: AtomicUsize::new(0),
+        });
+        let selected = Arc::new(ObservationProvider {
+            name: target,
+            behavior: ObservationProviderBehavior::CompleteWithUsage,
+            calls: AtomicUsize::new(0),
+        });
+        let provider_index = ProviderRegistry::new([
+            openai.clone() as Arc<dyn Provider>,
+            selected.clone() as Arc<dyn Provider>,
+        ])
+        .unwrap();
+        let generation = super::extensions::reference(&format!("route-{target}"));
+        let policy_index = RequestPolicyExtensionIndex::default();
+        let policy = Arc::new(FixedRoutingPolicy {
+            decision: ModelRouteDecision::Route {
+                provider: Some(ProviderKind::new(target).unwrap()),
+                model: None,
+            },
+            inputs: Mutex::new(Vec::new()),
+        });
+        let _owner = policy_index
+            .register(generation.id().clone(), policy.clone())
+            .unwrap();
+        let providers = [
+            ProviderKind::new("openai").unwrap(),
+            ProviderKind::new(target).unwrap(),
+        ];
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(generation, &providers)),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_policies(policy_index);
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        started.session.collect_uncommitted().await.unwrap();
+        started.session.detach_finalize().await;
+        assert_eq!(openai.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(selected.calls.load(Ordering::SeqCst), 1);
+        let inputs = policy.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].client_key_id().as_str(), "key_start_test");
+        assert_eq!(
+            inputs[0]
+                .available_providers()
+                .iter()
+                .map(ProviderKind::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["openai", target])
+        );
+    });
+}
+
+#[test]
+fn model_routing_reject_stops_before_provider_execution() {
+    block_on(async {
+        let provider = Arc::new(ObservationProvider {
+            name: "openai",
+            behavior: ObservationProviderBehavior::CompleteWithUsage,
+            calls: AtomicUsize::new(0),
+        });
+        let provider_index =
+            ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap();
+        let generation = super::extensions::reference("route-reject");
+        let policy_index = RequestPolicyExtensionIndex::default();
+        let policy: Arc<dyn RequestPolicyPlan> = Arc::new(FixedRoutingPolicy {
+            decision: ModelRouteDecision::Reject,
+            inputs: Mutex::new(Vec::new()),
+        });
+        let _owner = policy_index
+            .register(generation.id().clone(), policy)
+            .unwrap();
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(
+                generation,
+                &[ProviderKind::new("openai").unwrap()],
+            )),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_policies(policy_index);
+        assert!(matches!(
+            service.start(request(&service, ClientTransport::HttpJson)).await,
+            Err(error) if error.kind() == GatewayErrorKind::PolicyDenied
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn model_routing_cannot_expand_the_frozen_key_model_scope() {
+    block_on(async {
+        let kind = ProviderKind::new("openai").unwrap();
+        let provider = Arc::new(ObservationProvider {
+            name: "openai",
+            behavior: ObservationProviderBehavior::CompleteWithUsage,
+            calls: AtomicUsize::new(0),
+        });
+        let provider_index =
+            ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap();
+        let generation = super::extensions::reference("route-model-scope");
+        let policy_index = RequestPolicyExtensionIndex::default();
+        let policy: Arc<dyn RequestPolicyPlan> = Arc::new(FixedRoutingPolicy {
+            decision: ModelRouteDecision::Route {
+                provider: None,
+                model: Some(PublicModelId::new("gpt-blocked").unwrap()),
+            },
+            inputs: Mutex::new(Vec::new()),
+        });
+        let _owner = policy_index
+            .register(generation.id().clone(), policy)
+            .unwrap();
+        let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
+            ProviderAccountId::new("acct_openai").unwrap(),
+            RuntimeAccount::new(kind.clone(), BTreeSet::new()).with_model_access(
+                AccountModelAccess::new(
+                    AccountModelAccessMode::Allowlist,
+                    vec!["gpt-start".to_owned()],
+                )
+                .unwrap(),
+            ),
+        )])));
+        let capabilities =
+            ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
+        let snapshot = RuntimeSnapshot::new(
+            ConfigRevision::new(1).unwrap(),
+            gateway_core::settings::SettingsValues::new(
+                2,
+                1,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
+            vec![kind.clone()],
+            ["gpt-start", "gpt-blocked"]
+                .into_iter()
+                .map(|model| {
+                    ProviderModel::new(
+                        kind.clone(),
+                        UpstreamModelId::new(model).unwrap(),
+                        capabilities.clone(),
+                    )
+                })
+                .collect(),
+            vec![ClientPolicy::new(
+                ClientApiKeyId::new("key_start_test").unwrap(),
+                PlaintextClientApiKey::new("sk_start_test").unwrap(),
+                Arc::new(FrozenAccountScope::new(
+                    Arc::clone(&directory),
+                    ClientRoutingScope::all_accounts(),
+                )),
+                true,
+                RateLimits::unlimited(),
+            )],
+        )
+        .unwrap()
+        .with_account_directory(directory)
+        .with_extensions(Some(generation));
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(snapshot),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_policies(policy_index);
+
+        assert!(matches!(
+            service.start(request(&service, ClientTransport::HttpJson)).await,
+            Err(error) if error.kind() == GatewayErrorKind::NoAvailableProvider
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[derive(Debug, Default)]
+struct RejectingSchedulerPolicy {
+    inputs: Mutex<Vec<AccountScheduleInput>>,
+}
+
+impl RequestPolicyPlan for RejectingSchedulerPolicy {
+    fn route_model(
+        &self,
+        _: ModelRouteInput,
+    ) -> BoxFuture<'static, Result<ModelRouteDecision, RequestPolicyFault>> {
+        Box::pin(async { Ok(ModelRouteDecision::Unhandled) })
+    }
+
+    fn schedule_account(
+        &self,
+        input: AccountScheduleInput,
+    ) -> BoxFuture<'static, Result<AccountScheduleDecision, RequestPolicyFault>> {
+        self.inputs.lock().unwrap().push(input);
+        Box::pin(async { Ok(AccountScheduleDecision::Reject) })
+    }
+}
+
+struct PolicySelectingProvider;
+
+#[async_trait]
+impl Provider for PolicySelectingProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        attempt: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let account = ProviderAccount::new(
+            ProviderAccountId::new("acct_openai").unwrap(),
+            ProviderKind::new("openai").unwrap(),
+            "scheduler test".to_owned(),
+            None,
+            "test".to_owned(),
+            CredentialRevision::new(1).unwrap(),
+            None,
+        )
+        .with_account_facts(
+            true,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            None,
+            None,
+        )
+        .with_scheduling(None, AccountWeight::new(100).unwrap());
+        let candidates = [AccountCandidate {
+            account,
+            signals: AccountRuntimeSignals {
+                in_flight: 0,
+                last_started_at: None,
+                quota_reset_at: None,
+                quota_remaining_rank: None,
+                cooldown: None,
+                failure_rate_basis_points: None,
+                first_output_latency_ms: None,
+            },
+        }];
+        let selection = AccountSelectionContext {
+            policy: attempt.account_selection_policy(),
+            now: SystemTime::now(),
+            excluded_accounts: attempt.excluded_accounts().clone(),
+            preferred_account: attempt.required_account().cloned(),
+            preferred_account_overrides_weight: true,
+            round_robin_cursor: 0,
+            eligibility: AccountEligibilityPolicy::Enforce,
+            account_scope: attempt.account_scope().cloned(),
+            reserved_concurrency: 0,
+        };
+        match attempt
+            .select_account(
+                request.candidate().provider(),
+                request
+                    .candidate()
+                    .upstream_model()
+                    .map(UpstreamModelId::as_str),
+                &candidates,
+                &selection,
+            )
+            .await
+        {
+            Err(AccountPolicyError::Rejected) => Err(ProviderError::new(
+                ProviderErrorKind::RequestPolicyDenied,
+                UpstreamSendState::NotSent,
+            )),
+            Err(AccountPolicyError::Fault | AccountPolicyError::StaleCandidate) => Err(
+                ProviderError::new(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent),
+            ),
+            Ok(_) => panic!("rejecting scheduler unexpectedly selected an account"),
+        }
+    }
+}
+
+#[test]
+fn scheduler_reject_is_a_terminal_policy_rejection_before_upstream_send() {
+    block_on(async {
+        let provider_index =
+            ProviderRegistry::new([Arc::new(PolicySelectingProvider) as Arc<dyn Provider>])
+                .unwrap();
+        let generation = super::extensions::reference("schedule-reject");
+        let policy_index = RequestPolicyExtensionIndex::default();
+        let policy = Arc::new(RejectingSchedulerPolicy::default());
+        let _policy_owner = policy_index
+            .register(generation.id().clone(), policy.clone())
+            .unwrap();
+        let observer_index = RequestObserverExtensionIndex::default();
+        let observer = Arc::new(RecordingRequestObserver::default());
+        let _observer_owner = observer_index
+            .register(generation.id().clone(), observer.clone())
+            .unwrap();
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(request_policy_snapshot(
+                generation,
+                &[ProviderKind::new("openai").unwrap()],
+            )),
+            Arc::new(TrackingExecutionStore::default()),
+            provider_index.clone(),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_policies(policy_index)
+        .with_request_observers(observer_index);
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        let error = started.session.collect_uncommitted().await.unwrap_err();
+        let provider_error = match error {
+            EngineError::Provider(error) => error,
+            error => panic!("unexpected engine error: {error:?}"),
+        };
+        assert_eq!(
+            provider_error.kind(),
+            ProviderErrorKind::RequestPolicyDenied
+        );
+        assert_eq!(provider_error.send_state(), UpstreamSendState::NotSent);
+        assert_eq!(
+            GatewayError::from_provider(&provider_error).kind(),
+            GatewayErrorKind::PolicyDenied
+        );
+        started.session.detach_finalize().await;
+        let observations = observer.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].outcome(),
+            RequestObservationOutcome::Rejected
+        );
+        assert_eq!(observations[0].send_state(), UpstreamSendState::NotSent);
+        assert_eq!(
+            observations[0].attempt_count(),
+            0,
+            "调度拒绝发生在 ProviderStream/上游 attempt 持久化前"
+        );
+        assert_eq!(policy.inputs.lock().unwrap().len(), 1);
+    });
+}
+
 fn known_charge() -> Decimal {
     "1.25".parse().unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum ObservationProviderBehavior {
+    CompleteWithUsage,
+    RetryableFailure,
+    CapacityFailure,
+}
+
+struct ObservationProvider {
+    name: &'static str,
+    behavior: ObservationProviderBehavior,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for ObservationProvider {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        match self.behavior {
+            ObservationProviderBehavior::CompleteWithUsage => {
+                let candidate = request.candidate();
+                let metadata = ProviderCallMetadata::new(
+                    candidate.provider().clone(),
+                    candidate.upstream_model().unwrap().clone(),
+                    ProviderAccountId::new(format!("acct_{}", self.name)).unwrap(),
+                    UpstreamTransport::new("http_sse").unwrap(),
+                );
+                let response = ResponseMeta::new("response-observed", "gpt-start");
+                let mut started: ProviderEvent = GatewayEvent::Started(response.clone()).into();
+                started.attach_observation(
+                    gateway_core::event::ProviderResponseObservation::new(
+                        UpstreamTransport::new("http_sse").unwrap(),
+                    )
+                    .with_upstream_response_model_if_valid("gpt-reported")
+                    .with_service_tier_if_valid("priority"),
+                );
+                Ok(ProviderStream::new(
+                    metadata,
+                    futures::stream::iter([
+                        Ok(started),
+                        Ok(GatewayEvent::Usage(Usage {
+                            input_tokens: Some(11),
+                            output_tokens: Some(7),
+                            total_tokens: Some(18),
+                            ..Usage::default()
+                        })
+                        .into()),
+                        Ok(GatewayEvent::ProviderCost(
+                            ProviderReportedCost::from_usd_ticks(123_000_000).unwrap(),
+                        )
+                        .into()),
+                        Ok(GatewayEvent::Completed(response).into()),
+                    ]),
+                    (),
+                ))
+            }
+            ObservationProviderBehavior::CapacityFailure => Err(ProviderError::new(
+                ProviderErrorKind::NoEligibleAccount,
+                UpstreamSendState::NotSent,
+            )),
+            ObservationProviderBehavior::RetryableFailure => {
+                if call_index > 0 {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::NoEligibleAccount,
+                        UpstreamSendState::NotSent,
+                    ));
+                }
+                let candidate = request.candidate();
+                let metadata = ProviderCallMetadata::new(
+                    candidate.provider().clone(),
+                    candidate.upstream_model().unwrap().clone(),
+                    ProviderAccountId::new(format!("acct_{}", self.name)).unwrap(),
+                    UpstreamTransport::new("http_sse").unwrap(),
+                );
+                let error =
+                    ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::NotSent)
+                        .with_status(503)
+                        .with_retry_after(Duration::from_millis(750))
+                        .with_pre_delivery_retry();
+                Ok(ProviderStream::new(
+                    metadata,
+                    futures::stream::iter([Err(error)]),
+                    (),
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct RecordingRequestObserver {
+    observations: Mutex<Vec<RequestObservation>>,
+    websocket_observations: Mutex<Vec<WebSocketResponseObservation>>,
+}
+
+impl RequestObserverPlan for RecordingRequestObserver {
+    fn dispatch_websocket_response(
+        &self,
+        generation: ExtensionSetReference,
+        observation: WebSocketResponseObservation,
+    ) {
+        assert!(generation.is_ready());
+        self.websocket_observations
+            .lock()
+            .unwrap()
+            .push(observation);
+    }
+
+    fn dispatch(&self, generation: ExtensionSetReference, observation: RequestObservation) {
+        assert!(generation.is_ready());
+        self.observations.lock().unwrap().push(observation);
+    }
+}
+
+fn fallback_observation_snapshot(reference: ExtensionSetReference) -> RuntimeSnapshot {
+    let providers = [
+        ProviderKind::new("openai").unwrap(),
+        ProviderKind::new("xai").unwrap(),
+    ];
+    let enabled_group = AccountGroupId::new("grp_11111111111111111111111111111111").unwrap();
+    let disabled_group = AccountGroupId::new("grp_22222222222222222222222222222222").unwrap();
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        providers
+            .iter()
+            .map(|provider| {
+                (
+                    ProviderAccountId::new(format!("acct_{}", provider.as_str())).unwrap(),
+                    RuntimeAccount::new(provider.clone(), BTreeSet::from([enabled_group.clone()])),
+                )
+            })
+            .collect(),
+    ));
+    let capabilities =
+        ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
+    RuntimeSnapshot::new(
+        ConfigRevision::new(1).unwrap(),
+        gateway_core::settings::SettingsValues::new(2, 1, "smart", Default::default(), None, None),
+        providers.to_vec(),
+        providers
+            .iter()
+            .map(|provider| {
+                ProviderModel::new(
+                    provider.clone(),
+                    UpstreamModelId::new("gpt-start").unwrap(),
+                    capabilities.clone(),
+                )
+            })
+            .collect(),
+        vec![ClientPolicy::new(
+            ClientApiKeyId::new("key_start_test").unwrap(),
+            PlaintextClientApiKey::new("sk_start_test").unwrap(),
+            Arc::new(FrozenAccountScope::new(
+                Arc::clone(&directory),
+                ClientRoutingScope::restricted(
+                    vec![
+                        RoutingGroupSnapshot::new(enabled_group.clone(), "Enabled".to_owned()),
+                        RoutingGroupSnapshot::new(disabled_group, "Disabled".to_owned()),
+                    ],
+                    BTreeSet::from([enabled_group]),
+                    BTreeSet::from(providers),
+                )
+                .unwrap(),
+            )),
+            true,
+            RateLimits::unlimited(),
+        )],
+    )
+    .unwrap()
+    .with_account_directory(directory)
+    .with_extensions(Some(reference))
+}
+
+fn observation_service(
+    behavior: ObservationProviderBehavior,
+    reject_budget: bool,
+) -> (
+    DefaultExecutionService,
+    Arc<RecordingRequestObserver>,
+    Arc<dyn RequestObserverPlan>,
+) {
+    let openai = Arc::new(ObservationProvider {
+        name: "openai",
+        behavior,
+        calls: AtomicUsize::new(0),
+    });
+    let xai = Arc::new(ObservationProvider {
+        name: "xai",
+        behavior: ObservationProviderBehavior::CapacityFailure,
+        calls: AtomicUsize::new(0),
+    });
+    let providers =
+        ProviderRegistry::new([openai as Arc<dyn Provider>, xai as Arc<dyn Provider>]).unwrap();
+    let generation = super::extensions::reference("observer-terminal");
+    let observer_index = RequestObserverExtensionIndex::default();
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let owner = observer_index
+        .register(generation.id().clone(), observer.clone())
+        .unwrap();
+    let admissions = Arc::new(Admissions::default());
+    let budget = Arc::new(Budget {
+        reject: reject_budget,
+        active: admissions.active.clone(),
+        ..Budget::default()
+    });
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(fallback_observation_snapshot(generation)),
+        Arc::new(TrackingExecutionStore::default()),
+        providers,
+        admissions,
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    )
+    .with_budget(budget)
+    .with_request_observers(observer_index);
+    (service, observer, owner)
+}
+
+#[test]
+fn fallback_exhaustion_observation_uses_the_last_actual_provider_not_the_candidate_cursor() {
+    block_on(async {
+        let openai = Arc::new(ObservationProvider {
+            name: "openai",
+            behavior: ObservationProviderBehavior::RetryableFailure,
+            calls: AtomicUsize::new(0),
+        });
+        let xai = Arc::new(ObservationProvider {
+            name: "xai",
+            behavior: ObservationProviderBehavior::CapacityFailure,
+            calls: AtomicUsize::new(0),
+        });
+        let providers = ProviderRegistry::new([
+            openai.clone() as Arc<dyn Provider>,
+            xai.clone() as Arc<dyn Provider>,
+        ])
+        .unwrap();
+        let generation = super::extensions::reference("observer-fallback");
+        let observer_index = RequestObserverExtensionIndex::default();
+        let observer = Arc::new(RecordingRequestObserver::default());
+        let _observer_owner = observer_index
+            .register(generation.id().clone(), observer.clone())
+            .unwrap();
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(fallback_observation_snapshot(generation)),
+            Arc::new(TrackingExecutionStore::default()),
+            providers,
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_observers(observer_index);
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        assert!(matches!(
+            started.session.collect_uncommitted().await,
+            Err(EngineError::Provider(error))
+                if error.kind() == ProviderErrorKind::Transport
+        ));
+        started.session.detach_finalize().await;
+
+        assert_eq!(openai.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(xai.calls.load(Ordering::SeqCst), 1);
+        let observations = observer.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].provider().map(ProviderKind::as_str),
+            Some("openai"),
+            "第二候选的容量拒绝不能覆盖最后一次真实 attempt 的 Provider"
+        );
+        assert_eq!(observations[0].outcome(), RequestObservationOutcome::Failed);
+        assert_eq!(observations[0].upstream_status_code(), Some(503));
+        assert_eq!(observations[0].retry_after_ms(), Some(750));
+        assert_observation_scope(&observations[0]);
+    });
+}
+
+#[test]
+fn routing_external_effect_stops_a_not_sent_provider_retry() {
+    block_on(async {
+        let openai = Arc::new(ObservationProvider {
+            name: "openai",
+            behavior: ObservationProviderBehavior::RetryableFailure,
+            calls: AtomicUsize::new(0),
+        });
+        let xai = Arc::new(ObservationProvider {
+            name: "xai",
+            behavior: ObservationProviderBehavior::CompleteWithUsage,
+            calls: AtomicUsize::new(0),
+        });
+        let providers = ProviderRegistry::new([
+            openai.clone() as Arc<dyn Provider>,
+            xai.clone() as Arc<dyn Provider>,
+        ])
+        .unwrap();
+        let generation = super::extensions::reference("routing-effect");
+        let policy_index = RequestPolicyExtensionIndex::default();
+        let _policy_owner = policy_index
+            .register(generation.id().clone(), Arc::new(EffectObservingPolicy))
+            .unwrap();
+        let observer_index = RequestObserverExtensionIndex::default();
+        let observer = Arc::new(RecordingRequestObserver::default());
+        let _observer_owner = observer_index
+            .register(generation.id().clone(), observer.clone())
+            .unwrap();
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(fallback_observation_snapshot(generation)),
+            Arc::new(TrackingExecutionStore::default()),
+            providers,
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_request_policies(policy_index)
+        .with_request_observers(observer_index);
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        assert!(matches!(
+            started.session.collect_uncommitted().await,
+            Err(EngineError::Provider(error))
+                if error.kind() == ProviderErrorKind::Transport
+        ));
+        started.session.detach_finalize().await;
+
+        assert_eq!(openai.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(xai.calls.load(Ordering::SeqCst), 0);
+        let observations = observer.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].send_state(), UpstreamSendState::Ambiguous);
+        assert_eq!(observations[0].attempt_count(), 1);
+    });
+}
+
+#[test]
+fn final_observation_is_emitted_once_for_success_rejection_and_detached_cancellation() {
+    block_on(async {
+        let (service, observer, _owner) =
+            observation_service(ObservationProviderBehavior::CompleteWithUsage, false);
+        let mut started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        assert_eq!(
+            started.session.collect_uncommitted().await.unwrap().len(),
+            4
+        );
+        started.session.commit_downstream(Some(200)).await.unwrap();
+        started.session.detach_finalize().await;
+        {
+            let observations = observer.observations.lock().unwrap();
+            assert_eq!(observations.len(), 1);
+            assert_eq!(
+                observations[0].account_id().map(ProviderAccountId::as_str),
+                Some("acct_openai")
+            );
+            assert_eq!(
+                observations[0]
+                    .upstream_model()
+                    .map(UpstreamModelId::as_str),
+                Some("gpt-start")
+            );
+            assert_eq!(observations[0].response_model(), Some("gpt-reported"));
+            assert_eq!(observations[0].service_tier(), Some("priority"));
+            assert_eq!(
+                observations[0].outcome(),
+                RequestObservationOutcome::Succeeded
+            );
+            assert_eq!(observations[0].usage().total_tokens, Some(18));
+            assert_eq!(observations[0].attempt_count(), 1);
+            assert_eq!(observations[0].cost().status(), CostEstimateStatus::Known);
+            assert_eq!(
+                observations[0].cost().source(),
+                CostSource::ProviderReported
+            );
+            assert_eq!(
+                observations[0]
+                    .cost()
+                    .total()
+                    .map(|money| money.amount().canonical()),
+                Some("0.0123".to_owned())
+            );
+            assert!(observations[0].timings().latency_ms.is_some());
+            assert_observation_scope(&observations[0]);
+        }
+
+        let (service, observer, _owner) =
+            observation_service(ObservationProviderBehavior::CompleteWithUsage, true);
+        assert!(matches!(
+            service.start(request(&service, ClientTransport::HttpJson)).await,
+            Err(error) if error.kind() == GatewayErrorKind::RateLimited
+        ));
+        {
+            let observations = observer.observations.lock().unwrap();
+            assert_eq!(observations.len(), 1);
+            assert_eq!(
+                observations[0].outcome(),
+                RequestObservationOutcome::Rejected
+            );
+            assert!(observations[0].provider().is_none());
+            assert_eq!(observations[0].attempt_count(), 0);
+            assert_observation_scope(&observations[0]);
+        }
+
+        let (service, observer, _owner) =
+            observation_service(ObservationProviderBehavior::CompleteWithUsage, false);
+        let started = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        started.session.detach_finalize().await;
+        let observations = observer.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].outcome(),
+            RequestObservationOutcome::Cancelled
+        );
+        assert!(observations[0].provider().is_none());
+        assert_eq!(observations[0].attempt_count(), 0);
+        assert_observation_scope(&observations[0]);
+    });
+}
+
+fn assert_observation_scope(observation: &RequestObservation) {
+    assert_eq!(observation.client_key_id().as_str(), "key_start_test");
+    assert_eq!(
+        observation
+            .account_group_ids()
+            .iter()
+            .map(AccountGroupId::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "grp_11111111111111111111111111111111",
+            "grp_22222222222222222222222222222222",
+        ],
+        "冻结观察范围必须保留禁用但已绑定的账号组"
+    );
 }
 
 #[async_trait]
@@ -510,7 +2490,7 @@ impl Provider for ChargedProvider {
     }
 
     async fn execute(
-        &self,
+        self: Arc<Self>,
         request: ProviderRequest,
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -561,7 +2541,6 @@ fn charged_service(
         }) as Arc<dyn Provider>])
         .unwrap(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -820,24 +2799,40 @@ fn settlement_failure_keeps_provider_error_and_releases_concurrency_once() {
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{channel::oneshot, executor::block_on, future::BoxFuture};
-use gateway_core::account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy};
+use gateway_core::account::{
+    AccountCandidate, AccountEligibilityPolicy, AccountModelAccess, AccountModelAccessMode,
+    AccountRuntimeSignals, AccountSelectionContext, AccountWeight, CredentialRevision,
+    CredentialState, ProviderAccount, ProviderAccountId, QuotaState,
+};
 use gateway_core::engine::admission::{
     ClientAdmissionDecision, ClientAdmissionError, ClientAdmissionPort, ClientAdmissionRecovery,
     ClientAdmissionRequest, ClientAdmissionRestoreResult,
+};
+use gateway_core::engine::authentication::{
+    ClientAuthenticationRequest, FrontendAuthenticationDecision, FrontendAuthenticationError,
+    FrontendAuthenticationExtensionIndex, FrontendAuthenticationPlan,
 };
 use gateway_core::engine::continuation::{
     NativeContinuationPin, NativeContinuationPort, NativeContinuationStoreError, PreviousResponseId,
 };
 use gateway_core::engine::execution::{
     ClientApiKeyUsageSink, ClientKeyVerifier, ClientTransport, DefaultExecutionService,
-    ExecutionRequestMetadata, ExecutionService, ExecutionSession, ProviderCircuitDecision,
-    ProviderCircuitError, ProviderCircuitPort, StartExecution, StartProviderExecution,
-    provider_failure_affects_circuit,
+    ExecutionRequestMetadata, ExecutionService, ExecutionSession, StartExecution,
+    StartProviderExecution,
+};
+use gateway_core::engine::nested::NestedModelExecutionRequest;
+use gateway_core::engine::observation::{
+    RequestObservation, RequestObservationOutcome, RequestObserverExtensionIndex,
+    RequestObserverPlan, WebSocketResponseObservation,
+};
+use gateway_core::engine::policy::{
+    AccountPolicyError, AccountScheduleDecision, AccountScheduleInput, ModelRouteDecision,
+    ModelRouteInput, RequestPolicyExtensionIndex, RequestPolicyFault, RequestPolicyPlan,
 };
 use gateway_core::engine::probe::{AccountProbe, AccountProbeErrorSource, AccountProbeRequest};
 use gateway_core::engine::provider::{
-    Provider, ProviderCallMetadata, ProviderRegistry, ProviderRequest, ProviderRequestObservation,
-    ProviderStream,
+    NativeResponseTranslator, Provider, ProviderCallMetadata, ProviderRegistry, ProviderRequest,
+    ProviderRequestObservation, ProviderStream,
 };
 use gateway_core::engine::{
     AttemptContext, AttemptRecord, CommitRequirement, EngineError, ExecutionOutcome,
@@ -848,41 +2843,27 @@ use gateway_core::error::{
     ClientVisibleUpstreamResponse, GatewayErrorKind, ProviderError, ProviderErrorKind, StoreError,
     StoreErrorKind,
 };
-use gateway_core::event::{GatewayEvent, ProviderEvent, ResponseMeta};
-use gateway_core::metering::{Decimal, ProviderReportedCost};
+use gateway_core::event::{GatewayEvent, ProtocolWireEvent, ProviderEvent, ResponseMeta};
+use gateway_core::metering::{
+    CostEstimateStatus, CostSource, Decimal, ProviderReportedCost, Usage,
+};
 use gateway_core::operation::{
     GenerateRequest, ImageRequest, ImageRequestKind, Operation, OperationKind, ProtocolPayload,
-    RawJsonPayload,
+    ProviderHttpMethod, ProviderHttpRequest, RawHttpPayload, RawJsonPayload, TokenCountRequest,
 };
 use gateway_core::policy::{ClientApiKeyId, ClientPolicy, PlaintextClientApiKey, RateLimits};
 use gateway_core::routing::{
-    ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities,
+    AccountGroupId, ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities,
     ProviderCatalogGeneration, ProviderKind, ProviderModel, ProviderModelCapabilities,
-    PublicModelId, RuntimeAccount, RuntimeAccountDirectory, RuntimeSnapshot, UpstreamModelId,
+    PublicModelId, RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory, RuntimeSnapshot,
+    UpstreamModelId,
 };
-use gateway_core::runtime::RuntimeSnapshotHandle;
+use gateway_core::runtime::{
+    RuntimeSnapshotHandle,
+    extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference},
+};
 use gateway_core::upstream::{UpstreamSendState, UpstreamTransport};
-use serde_json::json;
-
-#[test]
-fn only_provider_attributable_failures_should_affect_circuit() {
-    assert!(provider_failure_affects_circuit(ProviderErrorKind::Timeout));
-    assert!(provider_failure_affects_circuit(
-        ProviderErrorKind::Transport
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::RateLimited
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::InvalidRequest
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::ContinuationRecoveryRequired
-    ));
-    assert!(!provider_failure_affects_circuit(
-        ProviderErrorKind::UpstreamCapacityUnavailable
-    ));
-}
+use serde_json::{Value, json};
 
 #[test]
 fn account_probe_should_not_write_to_the_persistent_execution_store() {
@@ -892,17 +2873,19 @@ fn account_probe_should_not_write_to_the_persistent_execution_store() {
         store.clone(),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
 
-    let error = block_on(service.probe(AccountProbeRequest {
-        account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
-        provider_kind: ProviderKind::new("openai").expect("provider kind"),
-        upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
-        operation: probe_operation(),
-    }))
+    let error = block_on(service.probe(
+        AccountProbeRequest {
+            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            provider_kind: ProviderKind::new("openai").expect("provider kind"),
+            upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
+            operation: probe_operation(),
+        },
+        None,
+    ))
     .expect_err("empty Provider registry should stop the probe after it starts");
 
     assert_eq!(error.kind(), GatewayErrorKind::NoAvailableProvider);
@@ -921,17 +2904,19 @@ fn probe_failures_should_be_observable_without_a_model_request_row() {
         store.clone(),
         providers,
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
 
-    let error = block_on(service.probe(AccountProbeRequest {
-        account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
-        provider_kind: ProviderKind::new("openai").expect("provider kind"),
-        upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
-        operation: probe_operation(),
-    }))
+    let error = block_on(service.probe(
+        AccountProbeRequest {
+            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            provider_kind: ProviderKind::new("openai").expect("provider kind"),
+            upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
+            operation: probe_operation(),
+        },
+        None,
+    ))
     .expect_err("the provider rejects every probe");
 
     assert_eq!(error.kind(), GatewayErrorKind::UpstreamUnavailable);
@@ -964,22 +2949,64 @@ fn provider_local_probe_failure_should_remain_distinct_from_upstream() {
         store,
         providers,
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
 
-    let error = block_on(service.probe(AccountProbeRequest {
-        account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
-        provider_kind: ProviderKind::new("openai").expect("provider kind"),
-        upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
-        operation: probe_operation(),
-    }))
+    let error = block_on(service.probe(
+        AccountProbeRequest {
+            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            provider_kind: ProviderKind::new("openai").expect("provider kind"),
+            upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
+            operation: probe_operation(),
+        },
+        None,
+    ))
     .expect_err("the Provider rejects the probe before sending it");
 
     assert_eq!(error.source(), AccountProbeErrorSource::Provider);
     assert_eq!(error.send_state(), Some(UpstreamSendState::NotSent));
     assert!(error.upstream_response().is_none());
+}
+
+#[test]
+fn diagnostic_probe_does_not_apply_data_plane_account_model_policy() {
+    let provider = ProviderKind::new("openai").expect("provider");
+    let account_id = ProviderAccountId::new("acct_probe").expect("account");
+    let snapshot = probe_snapshot().with_account_directory(Arc::new(RuntimeAccountDirectory::new(
+        BTreeMap::from([(
+            account_id.clone(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()).with_model_access(
+                AccountModelAccess::new(
+                    AccountModelAccessMode::Denylist,
+                    vec!["gpt-probe".to_owned()],
+                )
+                .expect("model policy"),
+            ),
+        )]),
+    )));
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::new([Arc::new(LocalFailingProvider) as Arc<dyn Provider>])
+            .expect("providers"),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+
+    let error = block_on(service.probe(
+        AccountProbeRequest {
+            account_id,
+            provider_kind: provider,
+            upstream_model: UpstreamModelId::new("gpt-probe").expect("model"),
+            operation: probe_operation(),
+        },
+        None,
+    ))
+    .expect_err("the diagnostic reaches the selected Provider");
+
+    assert_eq!(error.source(), AccountProbeErrorSource::Provider);
 }
 
 #[test]
@@ -995,17 +3022,19 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
         store.clone(),
         providers,
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
 
-    let error = block_on(service.probe(AccountProbeRequest {
-        account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
-        provider_kind: ProviderKind::new("openai").expect("provider kind"),
-        upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
-        operation: probe_operation(),
-    }))
+    let error = block_on(service.probe(
+        AccountProbeRequest {
+            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            provider_kind: ProviderKind::new("openai").expect("provider kind"),
+            upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
+            operation: probe_operation(),
+        },
+        None,
+    ))
     .expect_err("the provider error must survive observation failure");
 
     assert_eq!(error.kind(), GatewayErrorKind::UpstreamUnavailable);
@@ -1066,7 +3095,7 @@ impl Provider for NativeCatalogProvider {
         ))
     }
     async fn execute(
-        &self,
+        self: Arc<Self>,
         _: ProviderRequest,
         _: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -1076,18 +3105,46 @@ impl Provider for NativeCatalogProvider {
 
 #[test]
 fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models() {
+    #[derive(Debug)]
+    struct Aliases(Vec<gateway_core::routing::ContributedModelAlias>);
+    impl gateway_core::runtime::extensions::ExtensionSetLease for Aliases {
+        fn is_ready(&self) -> bool {
+            true
+        }
+        fn model_aliases(&self) -> &[gateway_core::routing::ContributedModelAlias] {
+            &self.0
+        }
+    }
     for fail in [false, true] {
-        let snapshot = start_snapshot().with_model_mappings(BTreeMap::from([
-            ("alias".to_owned(), "gpt-start".to_owned()),
-            ("missing-alias".to_owned(), "unavailable-model".to_owned()),
-        ]));
+        let snapshot = start_snapshot();
+        let settings = snapshot
+            .settings()
+            .clone()
+            .with_model_mappings(BTreeMap::from([
+                ("alias".to_owned(), "gpt-start".to_owned()),
+                ("missing-alias".to_owned(), "unavailable-model".to_owned()),
+            ]));
+        let snapshot = snapshot
+            .with_settings(&settings)
+            .unwrap()
+            .with_extensions(Some(ExtensionSetReference::new(
+                gateway_core::runtime::extensions::ExtensionSetId::new("catalog-aliases".into())
+                    .unwrap(),
+                Arc::new(Aliases(vec![
+                    gateway_core::routing::ContributedModelAlias {
+                        owner: "catalog-plugin".into(),
+                        id: PublicModelId::new("plugin-alias").unwrap(),
+                        provider: ProviderKind::new("openai").unwrap(),
+                        target: UpstreamModelId::new("gpt-start").unwrap(),
+                    },
+                ])),
+            )));
         let service = DefaultExecutionService::new(
             RuntimeSnapshotHandle::new(snapshot),
             Arc::new(TrackingExecutionStore::default()),
             ProviderRegistry::new([Arc::new(NativeCatalogProvider { fail }) as Arc<dyn Provider>])
                 .expect("registry"),
             Arc::new(UnusedAdmissions),
-            Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
         );
@@ -1113,9 +3170,13 @@ fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models(
             .collect::<Vec<_>>();
         assert_eq!(
             pairs.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            ["gpt-start", "alias"]
+            ["gpt-start", "alias", "plugin-alias"]
         );
         assert_eq!(pairs[0].1, pairs[1].1, "Core preserves alias payload bytes");
+        assert_eq!(
+            pairs[0].1, pairs[2].1,
+            "插件别名使用相同原生对象，不伪造字段"
+        );
     }
 }
 
@@ -1136,7 +3197,7 @@ impl Provider for FailingProvider {
     }
 
     async fn execute(
-        &self,
+        self: Arc<Self>,
         _request: ProviderRequest,
         _context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -1170,7 +3231,7 @@ impl Provider for LocalFailingProvider {
     }
 
     async fn execute(
-        &self,
+        self: Arc<Self>,
         _: ProviderRequest,
         _: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -1209,7 +3270,7 @@ impl Provider for ColdFailingProvider {
     }
 
     async fn execute(
-        &self,
+        self: Arc<Self>,
         request: ProviderRequest,
         _: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -1239,7 +3300,6 @@ fn successful_authentication_should_record_client_key_usage() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         usage.clone(),
     );
@@ -1259,7 +3319,6 @@ fn client_key_verification_should_not_record_client_key_usage() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         usage.clone(),
     );
@@ -1270,6 +3329,32 @@ fn client_key_verification_should_not_record_client_key_usage() {
 
     assert_eq!(key_id.as_str(), "key_usage_test");
     assert!(usage.recorded().is_empty());
+}
+
+#[test]
+fn request_verification_should_apply_entry_authentication_without_recording_key_usage() {
+    block_on(async {
+        let usage = Arc::new(RecordingClientApiKeyUsage::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(client_snapshot()),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedContinuation),
+            usage.clone(),
+        );
+
+        let client = service
+            .verify_request(
+                ClientAuthenticationRequest::bearer("sk_usage_test")
+                    .expect("client authentication request"),
+            )
+            .await
+            .expect("request verification");
+
+        assert_eq!(client.policy().key_id().as_str(), "key_usage_test");
+        assert!(usage.recorded().is_empty());
+    });
 }
 
 #[test]
@@ -1288,7 +3373,6 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
         }) as Arc<dyn Provider>])
         .expect("provider registry"),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1307,6 +3391,7 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
     let mut started = block_on(service.start_provider_endpoint(StartProviderExecution {
         client,
         provider: ProviderKind::new("openai").expect("provider"),
+        upstream_model: None,
         operation,
         metadata: ExecutionRequestMetadata {
             protocol: "openai".to_owned(),
@@ -1334,83 +3419,13 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
 }
 
 #[test]
-fn circuit_store_failure_should_fail_open_during_request_start() {
-    let service = DefaultExecutionService::new(
-        RuntimeSnapshotHandle::new(start_snapshot()),
-        Arc::new(TrackingExecutionStore::default()),
-        ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
-        Arc::new(FailingDecisionCircuits),
-        Arc::new(UnusedContinuation),
-        Arc::new(RecordingClientApiKeyUsage::default()),
-    );
-    let client = service
-        .authenticate("sk_start_test")
-        .expect("authenticated client");
-
-    let started = block_on(service.start(StartExecution {
-        client,
-        public_model: PublicModelId::new("gpt-start").expect("public model"),
-        operation: start_operation(),
-        metadata: ExecutionRequestMetadata {
-            protocol: "openai".to_owned(),
-            endpoint: "/v1/responses".to_owned(),
-            transport: ClientTransport::HttpJson,
-            stream: false,
-            client_ip: None,
-            user_agent: None,
-            previous_response_id: None,
-        },
-    }))
-    .expect("recoverable circuit state must not reject the request");
-
-    assert!(!started.session.is_finalized());
-}
-
-#[test]
-fn slow_circuit_store_should_time_out_and_fail_open_during_request_start() {
-    let service = DefaultExecutionService::new(
-        RuntimeSnapshotHandle::new(start_snapshot()),
-        Arc::new(TrackingExecutionStore::default()),
-        ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
-        Arc::new(PendingDecisionCircuits),
-        Arc::new(UnusedContinuation),
-        Arc::new(RecordingClientApiKeyUsage::default()),
-    );
-    let client = service
-        .authenticate("sk_start_test")
-        .expect("authenticated client");
-    let started_at = Instant::now();
-
-    let started = block_on(service.start(StartExecution {
-        client,
-        public_model: PublicModelId::new("gpt-start").expect("public model"),
-        operation: start_operation(),
-        metadata: ExecutionRequestMetadata {
-            protocol: "openai".to_owned(),
-            endpoint: "/v1/responses".to_owned(),
-            transport: ClientTransport::HttpJson,
-            stream: false,
-            client_ip: None,
-            user_agent: None,
-            previous_response_id: None,
-        },
-    }))
-    .expect("slow recoverable circuit state must not reject the request");
-
-    assert!(started_at.elapsed() < Duration::from_secs(2));
-    assert!(!started.session.is_finalized());
-}
-
-#[test]
 fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
+    let store = Arc::new(TrackingExecutionStore::default());
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(start_snapshot()),
-        Arc::new(TrackingExecutionStore::default()),
+        store.clone(),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1444,6 +3459,10 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
             "the requested model was not found in the provider catalogs available to this API key; check the model name",
         )
     );
+    let rejections = store.entry_rejections.lock().unwrap();
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].error.kind(), GatewayErrorKind::ModelNotFound);
+    assert!(store.requests.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1453,7 +3472,6 @@ fn continuation_owned_by_another_client_api_key_should_fail_closed() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(RejectedContinuation::OwnershipMismatch),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1481,7 +3499,6 @@ fn invalid_continuation_record_should_not_be_forwarded_as_an_external_handle() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         Arc::new(UnusedAdmissions),
-        Arc::new(UnusedCircuits),
         Arc::new(RejectedContinuation::InvalidData),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -1538,6 +3555,7 @@ impl ClientApiKeyUsageSink for RecordingClientApiKeyUsage {
 struct TrackingExecutionStore {
     touched: AtomicBool,
     probe_failures: Mutex<Vec<String>>,
+    entry_rejections: Mutex<Vec<gateway_core::engine::EntryRejection>>,
     requests: Mutex<Vec<NewModelRequest>>,
     attempts: Mutex<Vec<AttemptRecord>>,
     finalizations: Mutex<Vec<ModelRequestFinalization>>,
@@ -1600,6 +3618,14 @@ impl TrackingExecutionStore {
 
 #[async_trait]
 impl ExecutionStore for TrackingExecutionStore {
+    async fn record_entry_rejection(
+        &self,
+        rejection: gateway_core::engine::EntryRejection,
+    ) -> Result<(), StoreError> {
+        self.entry_rejections.lock().unwrap().push(rejection);
+        Ok(())
+    }
+
     async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError> {
         self.touch();
         self.creates.fetch_add(1, Ordering::SeqCst);
@@ -1717,81 +3743,6 @@ impl ClientAdmissionPort for UnusedAdmissions {
     }
 }
 
-struct UnusedCircuits;
-
-impl ProviderCircuitPort for UnusedCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(async { Ok(ProviderCircuitDecision::Allow) })
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct FailingDecisionCircuits;
-
-impl ProviderCircuitPort for FailingDecisionCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(async { Err(ProviderCircuitError) })
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct PendingDecisionCircuits;
-
-impl ProviderCircuitPort for PendingDecisionCircuits {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(futures::future::pending())
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
 struct UnusedContinuation;
 
 impl NativeContinuationPort for UnusedContinuation {
@@ -1854,11 +3805,7 @@ fn probe_snapshot() -> RuntimeSnapshot {
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("config revision"),
-        AccountSelectionPolicy::new(
-            RotationStrategy::Smart,
-            std::num::NonZeroU32::new(1).expect("concurrency"),
-            Duration::from_millis(1),
-        ),
+        gateway_core::settings::SettingsValues::new(1, 1, "smart", Default::default(), None, None),
         vec![provider.clone()],
         vec![ProviderModel::new(
             provider,
@@ -1874,11 +3821,7 @@ fn client_snapshot() -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("config revision"),
-        AccountSelectionPolicy::new(
-            RotationStrategy::Smart,
-            std::num::NonZeroU32::new(1).expect("concurrency"),
-            Duration::from_millis(1),
-        ),
+        gateway_core::settings::SettingsValues::new(1, 1, "smart", Default::default(), None, None),
         vec![provider.clone()],
         Vec::new(),
         vec![ClientPolicy::new(
@@ -1893,20 +3836,21 @@ fn client_snapshot() -> RuntimeSnapshot {
 }
 
 fn start_snapshot() -> RuntimeSnapshot {
-    start_snapshot_with_policy(1, true, RateLimits::unlimited())
+    start_snapshot_with_policy(1, true, RateLimits::unlimited(), false)
 }
 
-fn start_snapshot_with_policy(revision: u64, enabled: bool, limits: RateLimits) -> RuntimeSnapshot {
+fn start_snapshot_with_policy(
+    revision: u64,
+    enabled: bool,
+    limits: RateLimits,
+    disable_fast: bool,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
         ConfigRevision::new(revision).expect("config revision"),
-        AccountSelectionPolicy::new(
-            RotationStrategy::Smart,
-            std::num::NonZeroU32::new(1).expect("concurrency"),
-            Duration::from_millis(1),
-        ),
+        gateway_core::settings::SettingsValues::new(1, 1, "smart", Default::default(), None, None),
         vec![provider.clone()],
         vec![ProviderModel::new(
             provider.clone(),
@@ -1916,7 +3860,12 @@ fn start_snapshot_with_policy(revision: u64, enabled: bool, limits: RateLimits) 
         vec![ClientPolicy::new(
             ClientApiKeyId::new("key_start_test").expect("client API key ID"),
             PlaintextClientApiKey::new("sk_start_test").expect("plaintext client API key"),
-            account_scope(&provider, "acct_start"),
+            Arc::new(
+                account_scope(&provider, "acct_start")
+                    .as_ref()
+                    .clone()
+                    .with_disable_fast(disable_fast),
+            ),
             enabled,
             limits,
         )],
@@ -1980,7 +3929,7 @@ impl Provider for QueuedAccountProvider {
     }
 
     async fn execute(
-        &self,
+        self: Arc<Self>,
         _: ProviderRequest,
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -2013,11 +3962,10 @@ fn account_wait_inherits_the_budget_spent_during_client_admission() {
                 max_concurrency: 1,
                 requests_per_minute: 0,
             },
-        )
-        .with_client_queue_policy(gateway_core::concurrency::ConcurrencyQueuePolicy {
-            max_waiting: 1,
-            timeout: Duration::from_secs(1),
-        });
+            false,
+        );
+        let settings = snapshot.settings().clone().with_concurrency_queues(1, 0, 1);
+        let snapshot = snapshot.with_settings(&settings).unwrap();
         let service = DefaultExecutionService::new(
             RuntimeSnapshotHandle::new(snapshot),
             Arc::new(TrackingExecutionStore::default()),
@@ -2026,7 +3974,6 @@ fn account_wait_inherits_the_budget_spent_during_client_admission() {
             )
             .unwrap(),
             admissions.clone(),
-            Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
         );
@@ -2123,17 +4070,19 @@ fn queue_service(
             max_concurrency,
             requests_per_minute: 0,
         },
-    )
-    .with_client_queue_policy(gateway_core::concurrency::ConcurrencyQueuePolicy {
+        false,
+    );
+    let settings = snapshot.settings().clone().with_concurrency_queues(
         max_waiting,
-        timeout,
-    });
+        0,
+        u32::try_from(timeout.as_secs()).unwrap(),
+    );
+    let snapshot = snapshot.with_settings(&settings).unwrap();
     let service = DefaultExecutionService::new(
         RuntimeSnapshotHandle::new(snapshot),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
         admissions.clone(),
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
@@ -2213,7 +4162,7 @@ fn cancelled_waiter_releases_its_place_and_new_requests_do_not_overtake_fifo() {
 #[test]
 fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
     block_on(async {
-        let (service, admissions) = queue_service(1, 1, Duration::from_millis(20));
+        let (service, admissions) = queue_service(1, 1, Duration::from_secs(1));
         let running = service
             .start(request(&service, ClientTransport::HttpJson))
             .await
@@ -2249,7 +4198,7 @@ fn cancelling_pending_admission_cleans_up_a_slot_acquired_before_the_reply() {
 }
 
 #[test]
-fn reused_websocket_client_gets_fast_policy_from_each_new_request_snapshot() {
+fn reused_websocket_client_gets_group_fast_policy_from_each_new_request_snapshot() {
     let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
     let admissions = Arc::new(Admissions::default());
     let provider = Arc::new(ChargedProvider::default());
@@ -2258,16 +4207,17 @@ fn reused_websocket_client_gets_fast_policy_from_each_new_request_snapshot() {
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
         admissions,
-        Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
     );
     let client = service.authenticate("sk_start_test").unwrap();
     for (revision, disable_fast) in [(2, true), (3, false)] {
-        snapshots.publish(
-            start_snapshot_with_policy(revision, true, RateLimits::unlimited())
-                .with_disable_fast(disable_fast),
-        );
+        snapshots.publish(start_snapshot_with_policy(
+            revision,
+            true,
+            RateLimits::unlimited(),
+            disable_fast,
+        ));
         let mut next = request(&service, ClientTransport::WebSocket);
         next.client = client.clone();
         let mut started = block_on(service.start(next)).unwrap();
@@ -2275,4 +4225,544 @@ fn reused_websocket_client_gets_fast_policy_from_each_new_request_snapshot() {
         block_on(started.session.detach_finalize());
     }
     assert_eq!(*provider.policies.lock().unwrap(), vec![true, false]);
+}
+
+#[test]
+fn request_settings_recompute_routing_and_admission_without_changing_sibling_or_published_snapshot()
+{
+    block_on(async {
+        let limits = RateLimits {
+            max_concurrency: 3,
+            requests_per_minute: 9,
+        };
+        let snapshot = start_snapshot_with_policy(1, true, limits, true);
+        let settings = snapshot
+            .settings()
+            .clone()
+            .with_concurrency_queues(0, 0, 30);
+        let snapshot = snapshot.with_settings(&settings).unwrap();
+        let snapshots = RuntimeSnapshotHandle::new(snapshot);
+        let admissions = Arc::new(Admissions::default());
+        let provider = Arc::new(ChargedProvider::default());
+        let service = DefaultExecutionService::new(
+            snapshots.clone(),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+            admissions.clone(),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let client = service.authenticate("sk_start_test").unwrap();
+        let mut modified = service.prepare_verified_execution(client.clone()).unwrap();
+        let sibling = service.prepare_verified_execution(client).unwrap();
+        let baseline = sibling.request_settings().execution_values().unwrap();
+        let mut settings =
+            serde_json::to_value(modified.request_settings().execution_values().unwrap()).unwrap();
+        settings["runtime"]["model_mappings"] = json!({"request-alias":"gpt-start"});
+        settings["runtime"]["request_interval_ms"] = json!(0);
+        settings["runtime"]["request_profiles"] = json!({"openai":{"identity":"request-local"}});
+        settings["disable_fast"] = json!(false);
+        settings["client_limits"] = json!({"max_concurrency":0,"requests_per_minute":0});
+        settings["timeout_ms"] = json!(120_000);
+        let settings = modified
+            .request_settings()
+            .replace_execution(
+                &serde_json::from_value(settings).unwrap(),
+                "settings-plugin",
+            )
+            .unwrap();
+        modified.apply_settings(&settings).unwrap();
+        assert_eq!(
+            modified
+                .deadline_at()
+                .duration_since(modified.started_at())
+                .unwrap(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            modified.client().snapshot().mapped_model("request-alias"),
+            "gpt-start"
+        );
+        assert_eq!(
+            sibling.request_settings().execution_values().unwrap(),
+            baseline
+        );
+        assert_eq!(
+            serde_json::to_value(
+                modified
+                    .client()
+                    .policy()
+                    .account_scope()
+                    .request_profiles()
+            )
+            .unwrap(),
+            json!({"openai":{"identity":"request-local"}})
+        );
+        assert!(
+            sibling
+                .client()
+                .policy()
+                .account_scope()
+                .request_profiles()
+                .is_empty()
+        );
+        assert_eq!(
+            sibling.client().snapshot().mapped_model("request-alias"),
+            "request-alias"
+        );
+        assert_eq!(
+            snapshots.acquire().unwrap().mapped_model("request-alias"),
+            "request-alias"
+        );
+        assert_eq!(
+            modified.client().snapshot().revision(),
+            sibling.client().snapshot().revision()
+        );
+        for (prepared, model) in [(modified, "request-alias"), (sibling, "gpt-start")] {
+            let input = request(&service, ClientTransport::HttpJson);
+            let mut started = service
+                .start_prepared(
+                    prepared,
+                    gateway_core::engine::execution::PreparedExecutionRequest {
+                        public_model: PublicModelId::new(model).unwrap(),
+                        operation: input.operation,
+                        metadata: input.metadata,
+                    },
+                )
+                .await
+                .unwrap();
+            started.session.collect_uncommitted().await.unwrap();
+            started.session.detach_finalize().await;
+        }
+        assert_eq!(*provider.policies.lock().unwrap(), vec![false, true]);
+        assert_eq!(
+            *admissions.limits.lock().unwrap(),
+            vec![RateLimits::unlimited(), limits]
+        );
+    });
+}
+
+#[test]
+fn invalid_request_settings_leave_the_prepared_execution_unchanged() {
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let client = service.authenticate("sk_start_test").unwrap();
+    let prepared = service.prepare_verified_execution(client).unwrap();
+    let baseline = prepared.request_settings().execution_values().unwrap();
+    let mut invalid = serde_json::to_value(&baseline).unwrap();
+    invalid["runtime"]["responses_max_decompressed_body_bytes"] = json!(0);
+    invalid["disable_fast"] = json!(true);
+    assert!(
+        prepared
+            .request_settings()
+            .replace_execution(&serde_json::from_value(invalid).unwrap(), "settings-plugin")
+            .is_err()
+    );
+    assert_eq!(
+        prepared.request_settings().execution_values().unwrap(),
+        baseline
+    );
+}
+
+#[test]
+fn execution_settings_must_match_the_prepared_key() {
+    use gateway_core::settings::RequestSettings;
+
+    let service = service(Arc::new(Admissions::default()), Arc::new(Budget::default()));
+    let client = service.authenticate("sk_start_test").unwrap();
+    let mut prepared = service.prepare_verified_execution(client).unwrap();
+    let baseline = prepared.request_settings().execution_values().unwrap();
+    let snapshot = prepared.client().snapshot().clone();
+    let settings = RequestSettings::new(snapshot.clone())
+        .replace(
+            baseline
+                .runtime
+                .clone()
+                .with_responses_max_decompressed_body_bytes(1024),
+            "settings-plugin",
+        )
+        .unwrap();
+    let other_key = ClientApiKeyId::new("other-key").unwrap();
+    for settings in [
+        settings.clone(),
+        settings.with_execution(
+            &ClientPolicy::new(
+                other_key,
+                prepared.client().policy().plaintext_key().clone(),
+                prepared.client().policy().account_scope().clone(),
+                true,
+                RateLimits::unlimited(),
+            ),
+            baseline.timeout_ms,
+        ),
+    ] {
+        assert!(prepared.apply_settings(&settings).is_err());
+        assert!(Arc::ptr_eq(prepared.client().snapshot(), &snapshot));
+        assert_eq!(
+            prepared.request_settings().execution_values().unwrap(),
+            baseline
+        );
+        assert!(prepared.client().request_settings().is_none());
+    }
+}
+
+#[test]
+fn repeated_connection_failures_never_block_later_requests_for_the_provider() {
+    let store = Arc::new(TrackingExecutionStore::default());
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(client_snapshot()),
+        store.clone(),
+        ProviderRegistry::new([Arc::new(ColdFailingProvider {
+            requested_model: None,
+        }) as Arc<dyn Provider>])
+        .expect("provider registry"),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    for _ in 0..5 {
+        let client = service
+            .authenticate("sk_usage_test")
+            .expect("authenticated client");
+        let operation = Operation::GenerateImage(ImageRequest::from_raw_json(
+            ImageRequestKind::Generation,
+            RawJsonPayload::new(
+                "openai",
+                Bytes::from_static(br#"{"model":"gpt-image-2","prompt":"hello"}"#),
+            )
+            .expect("image payload"),
+        ));
+
+        let mut started = block_on(service.start_provider_endpoint(StartProviderExecution {
+            client,
+            provider: ProviderKind::new("openai").expect("provider"),
+            upstream_model: None,
+            operation,
+            metadata: ExecutionRequestMetadata {
+                protocol: "openai".to_owned(),
+                endpoint: "/v1/images/generations".to_owned(),
+                transport: ClientTransport::HttpJson,
+                stream: false,
+                client_ip: None,
+                user_agent: None,
+                previous_response_id: None,
+            },
+        }))
+        .expect("provider endpoint request should start without a text catalog entry");
+
+        let _error = block_on(started.session.collect_uncommitted())
+            .expect_err("the cold provider stops execution after persistence");
+    }
+    assert_eq!(store.requests.lock().unwrap().len(), 5);
+    assert!(store.entry_rejections.lock().unwrap().is_empty());
+}
+
+#[test]
+fn entry_settings_freeze_authentication_and_rebase_only_explicit_overrides() {
+    block_on(async {
+        use gateway_core::settings::RequestSettings;
+        let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+        let service = DefaultExecutionService::new(
+            snapshots.clone(),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let baseline = service.request_settings().unwrap();
+        let mut values = serde_json::to_value(baseline.values()).unwrap();
+        values["responses_max_decompressed_body_bytes"] = json!(1024);
+        values["request_interval_ms"] = json!(0);
+        let first = baseline
+            .replace(serde_json::from_value(values).unwrap(), "first")
+            .unwrap();
+        let mut values = serde_json::to_value(first.values()).unwrap();
+        values["responses_max_decompressed_body_bytes"] = json!(2048);
+        values["min_codex_cli_version"] = json!("0.40.0");
+        let second = first
+            .replace(serde_json::from_value(values).unwrap(), "second")
+            .unwrap();
+        let mut values = serde_json::to_value(second.values()).unwrap();
+        values["min_codex_cli_version"] = Value::Null;
+        let second = second
+            .replace(serde_json::from_value(values).unwrap(), "second")
+            .unwrap();
+        let source = second.inspect();
+        assert_eq!(
+            source["overrides"]["request_interval_ms"]["instance_id"],
+            "first"
+        );
+        assert_eq!(
+            source["overrides"]["responses_max_decompressed_body_bytes"]["instance_id"],
+            "second"
+        );
+        assert!(source["overrides"]["min_codex_cli_version"]["value"].is_null());
+        assert_eq!(
+            first.snapshot().responses_max_decompressed_body_bytes(),
+            1024
+        );
+        assert_eq!(
+            baseline.snapshot().responses_max_decompressed_body_bytes(),
+            64 * 1024 * 1024
+        );
+        let request = ClientAuthenticationRequest::bearer("sk_start_test")
+            .unwrap()
+            .with_settings(second.clone());
+        let client = service.authenticate_request(request).await.unwrap();
+        snapshots.publish(start_snapshot_with_policy(
+            2,
+            true,
+            RateLimits {
+                max_concurrency: 7,
+                requests_per_minute: 17,
+            },
+            true,
+        ));
+        let prepared = service.prepare_execution(client.clone()).await.unwrap();
+        assert_eq!(prepared.client().snapshot().revision().get(), 1);
+        assert_eq!(
+            prepared
+                .request_settings()
+                .execution_values()
+                .unwrap()
+                .runtime,
+            second.values().clone()
+        );
+        let fresh = second
+            .rebase(service.request_settings().unwrap().snapshot())
+            .unwrap();
+        let prepared = service
+            .prepare_execution(client.with_request_settings(fresh))
+            .await
+            .unwrap();
+        assert_eq!(prepared.client().snapshot().revision().get(), 2);
+        assert_eq!(
+            prepared
+                .request_settings()
+                .execution_values()
+                .unwrap()
+                .client_limits
+                .max_concurrency,
+            7
+        );
+        assert!(
+            prepared
+                .request_settings()
+                .execution_values()
+                .unwrap()
+                .disable_fast
+        );
+        assert_eq!(
+            prepared
+                .client()
+                .snapshot()
+                .responses_max_decompressed_body_bytes(),
+            2048
+        );
+        let original = RequestSettings::new(snapshots.acquire().unwrap());
+        assert_eq!(
+            original.snapshot().responses_max_decompressed_body_bytes(),
+            64 * 1024 * 1024
+        );
+    });
+}
+
+#[test]
+fn unchanged_and_precompiled_request_settings_reuse_the_frozen_snapshot() {
+    use gateway_core::settings::RequestSettings;
+
+    let snapshot = Arc::new(start_snapshot());
+    let baseline = RequestSettings::new(snapshot.clone());
+    let unchanged = baseline
+        .replace(baseline.values().clone(), "pass-through")
+        .unwrap();
+    assert!(Arc::ptr_eq(&snapshot, &unchanged.snapshot()));
+    assert!(
+        unchanged.inspect()["overrides"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+
+    let fresh = Arc::new(start_snapshot_with_policy(
+        2,
+        true,
+        RateLimits::unlimited(),
+        true,
+    ));
+    let rebased = unchanged.rebase(fresh.clone()).unwrap();
+    assert!(Arc::ptr_eq(&fresh, &rebased.snapshot()));
+    let values = rebased
+        .values()
+        .clone()
+        .with_responses_max_decompressed_body_bytes(1024);
+    let changed = rebased.replace(values, "settings-plugin").unwrap();
+    assert!(Arc::ptr_eq(
+        &changed.snapshot(),
+        &changed.rebase(fresh).unwrap().snapshot()
+    ));
+
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(start_snapshot()),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let client = service.authenticate("sk_start_test").unwrap();
+    let mut prepared = service.prepare_verified_execution(client).unwrap();
+    let mut settings = prepared.request_settings().execution_values().unwrap();
+    let original = prepared.request_settings();
+    let policy_scope = prepared.client().policy().account_scope().clone();
+    let deadline = prepared.deadline_at();
+    prepared.apply_settings(&original).unwrap();
+    assert!(Arc::ptr_eq(
+        prepared.client().snapshot(),
+        &original.snapshot()
+    ));
+    assert!(Arc::ptr_eq(
+        prepared.client().policy().account_scope(),
+        &policy_scope
+    ));
+    assert_eq!(prepared.deadline_at(), deadline);
+    settings.runtime = settings
+        .runtime
+        .with_responses_max_decompressed_body_bytes(1024);
+    let changed = original
+        .replace_execution(&settings, "settings-plugin")
+        .unwrap();
+    prepared.apply_settings(&changed).unwrap();
+    assert!(Arc::ptr_eq(
+        prepared.client().snapshot(),
+        &changed.snapshot()
+    ));
+    assert_eq!(
+        prepared.request_settings().execution_values().unwrap(),
+        settings
+    );
+}
+
+#[test]
+fn child_settings_recompute_key_scope_without_inheriting_parent_defaults() {
+    block_on(async {
+        use gateway_core::{account::OpaqueProviderData, settings::RequestSettings};
+        let provider = ProviderKind::new("openai").unwrap();
+        let profiles = |name: &str| {
+            BTreeMap::from([(
+                provider.clone(),
+                OpaqueProviderData::new(json!({"identity":name}).as_object().unwrap().clone()),
+            )])
+        };
+        let original = start_snapshot();
+        let parent_key = ClientApiKeyId::new("parent").unwrap();
+        let child_key = ClientApiKeyId::new("child").unwrap();
+        let policies = [
+            (&parent_key, "sk_parent", "parent-default", 3),
+            (&child_key, "sk_child", "child-default", 9),
+        ]
+        .into_iter()
+        .map(|(key, token, name, max_concurrency)| {
+            ClientPolicy::new(
+                key.clone(),
+                PlaintextClientApiKey::new(token).unwrap(),
+                Arc::new(
+                    account_scope(&provider, "acct_start")
+                        .as_ref()
+                        .clone()
+                        .with_disable_fast(true)
+                        .with_request_profiles(profiles(name)),
+                ),
+                true,
+                RateLimits {
+                    max_concurrency,
+                    requests_per_minute: 10,
+                },
+            )
+        })
+        .collect();
+        let snapshot = RuntimeSnapshot::new(
+            ConfigRevision::new(1).unwrap(),
+            gateway_core::settings::SettingsValues::new(
+                1,
+                0,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
+            vec![provider],
+            vec![],
+            policies,
+        )
+        .unwrap()
+        .with_settings(original.settings())
+        .unwrap();
+        let snapshots = RuntimeSnapshotHandle::new(snapshot);
+        let service = DefaultExecutionService::new(
+            snapshots.clone(),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let parent = service
+            .prepare_execution(service.authenticate("sk_parent").unwrap())
+            .await
+            .unwrap();
+        let previous = parent.request_settings().execution_values().unwrap();
+        let configuration = RequestSettings::new(snapshots.acquire().unwrap())
+            .with_execution(parent.client().policy(), previous.timeout_ms);
+        let mut values = previous.clone();
+        values.disable_fast = false;
+        values.client_limits = RateLimits::unlimited();
+        values.timeout_ms = 90_000;
+        let mut runtime = serde_json::to_value(&values.runtime).unwrap();
+        runtime["model_mappings"] = json!({"child-alias":"model"});
+        values.runtime = serde_json::from_value(runtime).unwrap();
+        let changed = configuration
+            .replace_execution(&values, "settings-plugin")
+            .unwrap();
+        for (token, expected_limit, expected_fast, expected_timeout, profile) in [
+            ("sk_parent", 0, false, 90, "parent-default"),
+            ("sk_child", 9, true, 600, "child-default"),
+        ] {
+            let request = ClientAuthenticationRequest::bearer(token)
+                .unwrap()
+                .with_settings(changed.clone());
+            let client = service.authenticate_request(request).await.unwrap();
+            let mut prepared = service.prepare_execution(client).await.unwrap();
+            let settings = prepared.request_settings();
+            let compiled = settings.snapshot();
+            prepared.apply_settings(&settings).unwrap();
+            assert!(Arc::ptr_eq(prepared.client().snapshot(), &compiled));
+            let actual = prepared.request_settings().execution_values().unwrap();
+            assert_eq!(
+                prepared.request_settings().execution_values(),
+                Some(actual.clone())
+            );
+            assert_eq!(actual.client_limits.max_concurrency, expected_limit);
+            assert_eq!(actual.disable_fast, expected_fast);
+            assert_eq!(actual.timeout_ms, expected_timeout * 1000);
+            let facts = serde_json::to_value(actual.runtime).unwrap();
+            assert_eq!(facts["request_profiles"]["openai"]["identity"], profile);
+            assert_eq!(facts["model_mappings"]["child-alias"], "model");
+        }
+        assert!(
+            changed.inspect()["overrides"]
+                .get("request_profiles")
+                .is_none()
+        );
+        assert_eq!(
+            changed.inspect()["execution"]["client_limits"]["value"]["max_concurrency"],
+            0
+        );
+        assert!(
+            configuration.inspect()["overrides"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    });
 }

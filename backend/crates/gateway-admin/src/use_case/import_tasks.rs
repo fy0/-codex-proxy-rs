@@ -16,7 +16,7 @@ use gateway_core::{
 use tokio::{sync::Notify, time::Instant};
 use uuid::Uuid;
 
-use super::{openai::OpenAiService, xai::XaiService};
+use super::credentials::CredentialsService;
 use crate::model::{
     AdminError, AdminErrorKind, MutationActor, MutationContext,
     import_tasks::{
@@ -129,17 +129,15 @@ struct Registry {
 pub(crate) struct DefaultImportTasksService {
     registry: Mutex<Registry>,
     notify: Notify,
-    openai: Arc<dyn OpenAiService>,
-    xai: Arc<dyn XaiService>,
+    credentials: Arc<CredentialsService>,
 }
 
 impl DefaultImportTasksService {
-    pub(crate) fn new(openai: Arc<dyn OpenAiService>, xai: Arc<dyn XaiService>) -> Arc<Self> {
+    pub(crate) fn new(credentials: Arc<CredentialsService>) -> Arc<Self> {
         Arc::new(Self {
             registry: Mutex::default(),
             notify: Notify::new(),
-            openai,
-            xai,
+            credentials,
         })
     }
 
@@ -177,11 +175,10 @@ impl DefaultImportTasksService {
 
     async fn execute(&self, id: Uuid, index: usize, input: ImportTaskInput) {
         let operation = async {
-            match input.provider.as_str() {
-                "openai" => self.openai.import_document(input.command).await,
-                "xai" => self.xai.import_document(input.command).await,
-                _ => Err(AdminError::invalid("不支持的导入平台")),
-            }
+            self.credentials
+                .for_provider(&input.provider)?
+                .import_document(input.command)
+                .await
         };
         let result = AssertUnwindSafe(operation).catch_unwind().await;
         let mut registry = self.registry();
@@ -222,7 +219,7 @@ impl ImportTasksService for DefaultImportTasksService {
         if command.items.is_empty()
             || command.items.len() > MAX_IMPORT_TASK_ITEMS
             || command.items.iter().any(|item| {
-                !matches!(item.provider.as_str(), "openai" | "xai")
+                self.credentials.for_provider(&item.provider).is_err()
                     || item.command.context.actor != command.context.actor
             })
         {

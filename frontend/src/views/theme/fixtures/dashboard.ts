@@ -111,11 +111,15 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
 
   return {
     id: options.id,
+    clientApiKeyName: '演示 Key',
     provider: options.provider,
     authenticationKind: options.authenticationKind,
     accountId: `account_${options.id}`,
     accountEmail: options.accountEmail,
     accountName: options.accountEmail.split('@')[0] ?? null,
+    accountNotes: null,
+    accountPlanType: null,
+    accountPlanTypeDisplay: null,
     route: stream ? '/v1/responses' : '/v1/chat/completions',
     model: options.model,
     requestedModel: options.model,
@@ -147,6 +151,7 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
       totalTokensDisplay: totalTokens.toLocaleString('zh-CN'),
     },
     billing: {
+      longContextBillingApplied: false,
       inputAmountDisplay: options.estimatedCost,
       outputAmountDisplay: options.estimatedCost,
       cacheReadAmountDisplay: '$0.0004',
@@ -179,6 +184,8 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
 }
 
 export const themeDashboardSummary: DashboardSummaryResponse = {
+  asOf: '2026-08-23T10:30:00+08:00',
+  asOfDisplay: '2026-08-23 10:30:00',
   cards: {
     credentials: {
       total: '52',
@@ -232,6 +239,7 @@ export const themeDashboardSummary: DashboardSummaryResponse = {
       const failedRequests = status === 'unstable' ? 18 : status === 'low_sample' ? 2 : index % 11
 
       return {
+        bucketStart: `2026-09-14T${hour}:${minute}:00Z`,
         time: `${hour}:${minute}`,
         status,
         reliabilityDisplay: status === 'unstable' ? '94.8%' : status === 'low_sample' ? '98.2%' : '99.8%',
@@ -333,6 +341,7 @@ export const themeDashboardSummary: DashboardSummaryResponse = {
       requestBuckets: requestSeries.slice(-12).map((requestCount, index) => ({
         bucketStart: `2026-08-23T${String(index + 12).padStart(2, '0')}:00:00+08:00`,
         requestCount: Math.round(requestCount / 3),
+        label: `08-23 ${index + 12}:00–${index + 13}:00 · ${Math.round(requestCount / 3)} 次请求`,
       })),
       quotaUsedPercent: null,
       metricLabel: '次数',
@@ -356,6 +365,7 @@ export const themeDashboardSummary: DashboardSummaryResponse = {
           requestBuckets: requestSeries.slice(-12).map((requestCount, index) => ({
             bucketStart: `2026-08-23T${String(index + 12).padStart(2, '0')}:00:00+08:00`,
             requestCount: Math.round(requestCount / 3),
+            label: `08-23 ${index + 12}:00–${index + 13}:00 · ${Math.round(requestCount / 3)} 次请求`,
           })),
         },
       },

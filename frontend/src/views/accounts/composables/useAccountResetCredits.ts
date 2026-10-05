@@ -1,15 +1,13 @@
-import type { Account, AccountResetCredit } from '@/api'
+import type { AccountResetCredit } from '@/api'
+import { toast } from '@codex-proxy/ui'
 import { computed, shallowReactive, shallowRef, watch } from 'vue'
+
 import {
   consumeAccountResetCredit,
   getAccountResetCredits,
-  refreshAccountQuota,
 } from '@/api'
-
 import { ApiError } from '@/api/request'
-import { toast } from '@/components/base/BaseToast'
-import { errorMessage } from '@/utils/async'
-import { generateRequestId } from '@/utils/uuid'
+import { errorMessage, generateRequestId } from '@/utils/operation'
 
 interface PendingResetCreditOperation {
   accountId: string
@@ -33,7 +31,6 @@ interface ResetCreditsSession {
   loadError: string
   loadSequence: number
   loadController?: AbortController
-  accountUpdatedListeners: Set<(account: Account) => void>
 }
 
 // 库存仍以主动查询的上游结果为准；未决操作和消费锁必须跨展开行卸载存续。
@@ -50,7 +47,6 @@ function getResetCreditsSession(accountId: string) {
       loading: false,
       loadError: '',
       loadSequence: 0,
-      accountUpdatedListeners: new Set(),
     })
     sessionsByAccountId.set(accountId, session)
   }
@@ -85,7 +81,8 @@ async function loadSessionCredits(session: ResetCreditsSession, silent = false) 
 
 export function useAccountResetCredits(options: {
   accountId: () => string
-  onAccountUpdated: (account: Account) => void
+  onConsumed: (accountId: string) => void
+  capabilities: () => { consumeResetCredit: boolean }
 }) {
   const session = shallowRef(getResetCreditsSession(options.accountId()))
   const credits = computed(() => session.value.snapshot?.credits ?? [])
@@ -113,7 +110,7 @@ export function useAccountResetCredits(options: {
     && (selectedCredit.value !== undefined || availableCredits.value.length === 0),
   )
   const canRequestConsume = computed(() =>
-    ambiguous.value || canStartConsume.value,
+    options.capabilities().consumeResetCredit && (ambiguous.value || canStartConsume.value),
   )
 
   function reconcileSelectedCredit() {
@@ -163,7 +160,7 @@ export function useAccountResetCredits(options: {
 
   async function confirmConsume(): Promise<boolean> {
     const target = session.value
-    if (!showConfirm.value || target.consuming || target.loading)
+    if (!options.capabilities().consumeResetCredit || !showConfirm.value || target.consuming || target.loading)
       return false
 
     const credit = selectedCredit.value
@@ -200,21 +197,13 @@ export function useAccountResetCredits(options: {
       const successMessage = result.code === 'already_redeemed'
         ? '上次重置已完成'
         : '额度已重置'
+      // 消费已确认就结束交互，账号页负责额度回读，避免收起展开行后丢失更新。
+      if (session.value === target)
+        showConfirm.value = false
+      options.onConsumed(operation.accountId)
+      toast.success(successMessage)
       applyConfirmedConsumption(target, operation)
       await loadSessionCredits(target, true)
-      try {
-        const quota = await refreshAccountQuota({ accountId: operation.accountId }, { silent: true })
-        // 原组件可能已经卸载或换号，只通知仍订阅该账号的实例。
-        for (const listener of target.accountUpdatedListeners)
-          listener(quota.account)
-        toast.success(successMessage)
-      }
-      catch (error: unknown) {
-        toast.warning(
-          `${successMessage}，但最新额度加载失败：${errorMessage(error, '请手动刷新额度')}`,
-          { duration: 5000 },
-        )
-      }
       return true
     }
     catch (error: unknown) {
@@ -223,7 +212,7 @@ export function useAccountResetCredits(options: {
           ...operation,
           hasTransportFailure: true,
         }
-        toast.warning('消费结果暂不确定；重试会复用同一个请求标识', { duration: 5000 })
+        toast.warning('消费结果暂不确定，重试会复用同一个请求标识', { duration: 5000 })
       }
       else {
         target.pendingOperation = null
@@ -239,14 +228,11 @@ export function useAccountResetCredits(options: {
 
   watch(
     options.accountId,
-    (accountId, _, onCleanup) => {
+    (accountId) => {
       const target = getResetCreditsSession(accountId)
       session.value = target
       selectedCreditId.value = ''
       showConfirm.value = false
-      const listener = (account: Account) => options.onAccountUpdated(account)
-      target.accountUpdatedListeners.add(listener)
-      onCleanup(() => target.accountUpdatedListeners.delete(listener))
     },
     { immediate: true, flush: 'sync' },
   )

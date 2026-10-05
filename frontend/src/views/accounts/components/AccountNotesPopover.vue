@@ -1,9 +1,8 @@
 <script setup lang="ts">
+import { BasePopover, BaseScrollbar } from '@codex-proxy/ui'
+
 import { useEventListener } from '@vueuse/core'
 import { computed, shallowRef, useId, useTemplateRef, watch } from 'vue'
-
-import BasePopover from '@/components/base/BasePopover.vue'
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 
 const props = defineProps<{
   notes: string
@@ -55,7 +54,7 @@ watch(() => props.notes, recheckOpen, { flush: 'post' })
 
     <section :id="detailId" class="w-max max-w-[min(20rem,calc(100vw-1rem))] overflow-hidden rounded-cp-lg" role="dialog" aria-label="账号备注">
       <BaseScrollbar max-height="min(240px, calc(100dvh - 2rem))">
-        <div class="px-3 py-2.5 text-cp leading-5 whitespace-pre-wrap text-cp-text select-text wrap-anywhere">
+        <div class="px-3 py-2.5 text-cp-sm leading-5 whitespace-pre-wrap text-cp-text select-text wrap-anywhere">
           {{ notes }}
         </div>
       </BaseScrollbar>

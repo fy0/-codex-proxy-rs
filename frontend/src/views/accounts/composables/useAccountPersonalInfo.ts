@@ -1,17 +1,21 @@
 import type { Ref } from 'vue'
-import type { AccountPersonalInfoResponse } from '@/api'
+import type { AccountCapabilities, AccountPersonalInfoResponse } from '@/api'
 import { computed, shallowRef, watch } from 'vue'
 
 import { getAccountPersonalInfo } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
 
-export function useAccountPersonalInfo(accountId: Ref<string>, open: Ref<boolean>) {
+export function useAccountPersonalInfo({ accountId, open, capabilities }: {
+  accountId: Ref<string>
+  open: Ref<boolean>
+  capabilities: Ref<AccountCapabilities>
+}) {
   const info = shallowRef<AccountPersonalInfoResponse | null>(null)
   const request = useRequestState()
   const { loading } = request
-  const profile = computed(() => info.value?.profile ?? null)
-  const subscription = computed(() => info.value?.subscription ?? null)
-  const error = computed(() => request.error.value || info.value?.profileError || '')
+  const profile = computed(() => capabilities.value.profile ? info.value?.profile ?? null : null)
+  const subscription = computed(() => capabilities.value.subscription ? info.value?.subscription ?? null : null)
+  const error = computed(() => request.error.value || (capabilities.value.profile ? info.value?.profileError : '') || '')
 
   async function load() {
     const targetAccountId = accountId.value
@@ -35,12 +39,13 @@ export function useAccountPersonalInfo(accountId: Ref<string>, open: Ref<boolean
   }
 
   // 打开或切换账号只请求一次；关闭取消等待，刷新按钮复用同一入口。
-  watch([open, accountId], ([isOpen]) => {
-    request.invalidate()
+  watch([open, accountId, () => capabilities.value.profile, () => capabilities.value.subscription], ([isOpen]) => {
+    request.invalidate({ resetLoading: isOpen })
+    if (!isOpen)
+      return
     info.value = null
     request.error.value = ''
-    if (isOpen)
-      void load()
+    void load()
   }, { immediate: true })
 
   return {

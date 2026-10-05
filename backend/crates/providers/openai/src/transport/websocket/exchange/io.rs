@@ -25,6 +25,7 @@ pub(super) fn reused_stream_receive_error(
 ) -> CodexWebSocketExchangeError {
     match error {
         CodexWebSocketExchangeError::ClosedBeforeTerminal(_)
+        | CodexWebSocketExchangeError::StreamEndedBeforeTerminal { .. }
         | CodexWebSocketExchangeError::ReceiveIdleTimeout { .. }
         | CodexWebSocketExchangeError::Transport(_) => {
             reused_connection_died_before_first_event(error)

@@ -1,18 +1,11 @@
 <script setup lang="ts">
-import { CalendarClock, Save } from '@lucide/vue'
+import { BaseButton, BaseCard, BaseCheckbox, BaseForm, BaseFormItem, BaseInput } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseForm from '@/components/base/BaseForm/index.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
+import { CalendarClock, Save } from '@lucide/vue'
 
 interface ScheduleForm {
   scheduleEnabled: boolean
   cronExpression: string
-  scheduleTimezone: string
   retentionDays: string
   retentionCount: string
 }
@@ -28,20 +21,12 @@ const emit = defineEmits<{
 }>()
 
 const schedule = defineModel<ScheduleForm>('schedule', { required: true })
-
-const TIMEZONE_OPTIONS = [
-  { label: 'Asia/Shanghai（中国标准时间）', value: 'Asia/Shanghai' },
-  { label: 'UTC', value: 'UTC' },
-  { label: 'America/New_York（东部时间）', value: 'America/New_York' },
-  { label: 'Europe/London', value: 'Europe/London' },
-  { label: 'Asia/Tokyo', value: 'Asia/Tokyo' },
-]
 </script>
 
 <template>
   <BaseCard
-    title="定时备份"
-    description="配置自动定时备份"
+    title="备份计划"
+    description="配置自动备份的执行时间与保留策略"
   >
     <template #actions>
       <BaseButton variant="primary" :loading="saving" :disabled="loading" @click="emit('save')">
@@ -63,10 +48,6 @@ const TIMEZONE_OPTIONS = [
           />
         </div>
 
-        <BaseFormItem label="时区" description="显式 IANA 时区">
-          <BaseSelect v-model="schedule.scheduleTimezone" :options="TIMEZONE_OPTIONS" />
-        </BaseFormItem>
-
         <BaseFormItem
           label="Cron 表达式"
           description="5 段格式，例如 0 2 * * * 表示每天凌晨 2 点"
@@ -78,13 +59,13 @@ const TIMEZONE_OPTIONS = [
           </BaseInput>
         </BaseFormItem>
 
-        <BaseFormItem label="备份过期天数" description="超过此天数自动删除，0 = 永不过期">
-          <BaseInput v-model="schedule.retentionDays" aria-label="备份过期天数" type="number" min="0" />
+        <BaseFormItem label="保留天数" description="超过此天数自动删除，0 表示不按天数清理，仍受最大保留份数限制">
+          <BaseInput v-model="schedule.retentionDays" aria-label="备份保留天数" type="number" min="0" />
         </BaseFormItem>
 
         <BaseFormItem
           label="最大保留份数"
-          description="最多保留的备份数量，0 = 不限制"
+          description="最多保留的备份数量，0 表示不按份数清理，仍受保留天数限制"
         >
           <BaseInput v-model="schedule.retentionCount" aria-label="最大保留份数" type="number" min="0" />
         </BaseFormItem>

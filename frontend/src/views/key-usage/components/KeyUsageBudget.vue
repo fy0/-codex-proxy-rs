@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import type { KeyUsageBudget } from '@/api/modules/key-usage'
+import { BaseCard } from '@codex-proxy/ui'
 import { Clock3, Gauge, Network } from '@lucide/vue'
 import { computed } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import { keyUsageTime, money } from '../utils/format'
+import { money } from '../utils/format'
 
 const props = defineProps<{ budget: KeyUsageBudget }>()
 const windows = computed(() => [
-  { label: '今日额度', limit: props.budget.dailyLimitUsd, used: props.budget.dailyUsedUsd, reset: props.budget.dailyResetsAt },
-  { label: '七日额度', limit: props.budget.weeklyLimitUsd, used: props.budget.weeklyUsedUsd, reset: props.budget.weeklyResetsAt },
+  { label: '今日额度', limit: props.budget.dailyLimitUsd, used: props.budget.dailyUsedUsd, reset: props.budget.dailyResetsAt, resetDisplay: props.budget.dailyResetsAtDisplay },
+  { label: '周额度', limit: props.budget.weeklyLimitUsd, used: props.budget.weeklyUsedUsd, reset: props.budget.weeklyResetsAt, resetDisplay: props.budget.weeklyResetsAtDisplay },
 ].map(window => ({
   ...window,
   limited: Number(window.limit) > 0,
@@ -33,7 +33,7 @@ const windows = computed(() => [
           </div>
           <div>
             <div class="grid grid-cols-[repeat(20,minmax(0,1fr))] gap-0.75" :aria-label="window.limited ? `已用 ${window.percentage.toFixed(1)}%` : '不限额'">
-              <span v-for="block in 20" :key="block" class="h-5 rounded-xs" :class="block <= Math.ceil(Math.min(100, window.percentage) / 5) ? (window.percentage >= 100 ? 'bg-cp-error' : 'bg-cp-success') : 'bg-cp-fill-secondary'" />
+              <span v-for="block in 20" :key="block" class="h-7 rounded-xs" :class="block <= Math.ceil(Math.min(100, window.percentage) / 5) ? (window.percentage >= 100 ? 'bg-cp-error' : 'bg-cp-success') : 'bg-cp-fill-secondary'" />
             </div>
             <div class="mt-2 flex justify-between gap-2 font-mono text-cp-xs text-cp-text-secondary">
               <span>已用 {{ money(window.used) }}</span><span v-if="window.limited">{{ window.percentage.toFixed(1) }}%</span>
@@ -41,16 +41,16 @@ const windows = computed(() => [
           </div>
           <div class="text-cp-xs leading-relaxed text-cp-text-tertiary">
             <span class="flex items-center gap-1.5"><Clock3 class="size-3" />重置时间</span>
-            <span class="mt-1 block font-mono">{{ window.reset ? keyUsageTime(window.reset) : '首次使用后开始计时' }}</span>
+            <span class="mt-1 block font-mono">{{ window.reset ? window.resetDisplay ?? '—' : '首次使用后开始计时' }}</span>
           </div>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div class="flex items-center justify-between gap-2 rounded-cp bg-cp-fill-quaternary p-3 text-cp-xs text-cp-text-secondary">
-          <span class="flex items-center gap-1.5"><Network class="size-3.5" />并发上限</span><strong class="font-mono">{{ budget.maxConcurrency || '∞' }}</strong>
+          <span class="flex items-center gap-1.5 leading-none"><Network class="size-3.5 shrink-0 -translate-y-px" />并发上限</span><strong class="font-mono">{{ budget.maxConcurrency || '∞' }}</strong>
         </div>
         <div class="flex items-center justify-between gap-2 rounded-cp bg-cp-fill-quaternary p-3 text-cp-xs text-cp-text-secondary">
-          <span class="flex items-center gap-1.5"><Gauge class="size-3.5" />每分钟请求</span><strong class="font-mono">{{ budget.requestsPerMinute || '∞' }}</strong>
+          <span class="flex items-center gap-1.5 leading-none"><Gauge class="size-3.5 shrink-0 -translate-y-px" />每分钟请求</span><strong class="font-mono">{{ budget.requestsPerMinute || '∞' }}</strong>
         </div>
       </div>
     </div>

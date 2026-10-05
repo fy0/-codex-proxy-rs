@@ -1,0 +1,513 @@
+use std::sync::Arc;
+
+use gateway_core::account::ProviderAccountId;
+
+use gateway_admin::{
+    AdminServices,
+    model::provider_credentials::{
+        AuthorizationMutationTarget, CompleteAuthorization, CredentialDeletion, ImportCredentials,
+        ProviderQuotaRequest, StartAuthorization,
+    },
+    ports::provider::ProviderAdminErrorKind,
+};
+
+use super::super::accounts::{
+    FakeAccountStore, FakeProviderAdmin, context, document, events, recorded, revision,
+};
+
+#[tokio::test]
+async fn openai_delete_should_commit_then_release_provider_resources() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider, store.clone()).await;
+
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .delete(deletion("acct_test"))
+        .await
+        .expect("delete credential");
+
+    assert_eq!(
+        recorded(&events),
+        [
+            "store.credential_details",
+            "store.delete",
+            "provider.account_unavailable",
+            "provider.account_facts_changed",
+        ]
+    );
+    assert_eq!(store.audit_requests(), ["request-openai"]);
+}
+
+#[tokio::test]
+async fn openai_import_should_prepare_before_atomic_store_commit() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider.clone(), store.clone()).await;
+
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .import_document(ImportCredentials {
+            outbound_proxy_id: None,
+            settings: Some(super::super::accounts::import_settings()),
+            context: context("import-openai"),
+            document: document(),
+        })
+        .await
+        .expect("import credential");
+
+    provider.wait_for_quota_requests(1).await;
+
+    assert_eq!(
+        recorded(&events),
+        [
+            "provider.prepare_import",
+            "store.commit_import",
+            "provider.account_facts_changed",
+            "provider.quota",
+        ]
+    );
+    assert_eq!(
+        provider.quota_requests(),
+        [ProviderQuotaRequest {
+            account_id: ProviderAccountId::new("acct_prepared").expect("account ID"),
+            refresh: true,
+            rolling_usage: None,
+        }]
+    );
+    assert_eq!(
+        store.import_settings(),
+        [Some(super::super::accounts::import_settings())]
+    );
+    assert_eq!(store.audit_requests(), ["import-openai"]);
+}
+
+#[tokio::test]
+async fn openai_import_should_expose_only_explicit_public_errors_without_committing() {
+    use gateway_admin::model::AdminErrorKind;
+
+    for (provider_kind, admin_kind) in [
+        (ProviderAdminErrorKind::Invalid, AdminErrorKind::Invalid),
+        (
+            ProviderAdminErrorKind::Unavailable,
+            AdminErrorKind::Unavailable,
+        ),
+        (
+            ProviderAdminErrorKind::BadGateway,
+            AdminErrorKind::BadGateway,
+        ),
+    ] {
+        let events = events();
+        let provider = FakeProviderAdmin::new("openai", events.clone());
+        provider
+            .fail_next_with_public_message(provider_kind, "Codex PAT 验证失败，请检查令牌后重试");
+        let store = FakeAccountStore::new("openai", events.clone());
+        let services = service(provider, store.clone()).await;
+        let error = services
+            .credentials()
+            .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+            .unwrap()
+            .import_document(ImportCredentials {
+                outbound_proxy_id: None,
+                settings: None,
+                context: context("import-openai-pat-failure"),
+                document: document(),
+            })
+            .await
+            .expect_err("validation must fail before committing accounts");
+        assert_eq!(error.kind(), admin_kind);
+        assert_eq!(error.to_string(), "Codex PAT 验证失败，请检查令牌后重试");
+        assert!(!format!("{error:?}").contains("secret token"));
+        assert_eq!(recorded(&events), ["provider.prepare_import"]);
+        assert!(store.audit_requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn openai_import_should_refresh_quota_for_every_imported_account() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    provider.set_import_account_ids(&["acct_first", "acct_second"]);
+    let store = FakeAccountStore::new("openai", events);
+    let services = service(provider.clone(), store).await;
+
+    let result = services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .import_document(ImportCredentials {
+            outbound_proxy_id: None,
+            settings: None,
+            context: context("import-openai-batch"),
+            document: document(),
+        })
+        .await
+        .expect("import credentials");
+
+    provider.wait_for_quota_requests(2).await;
+
+    assert_eq!(
+        result.credential_ids,
+        [
+            ProviderAccountId::new("acct_first").expect("first account ID"),
+            ProviderAccountId::new("acct_second").expect("second account ID"),
+        ]
+    );
+    assert_eq!(
+        provider.quota_requests(),
+        [
+            ProviderQuotaRequest {
+                account_id: ProviderAccountId::new("acct_first").expect("first account ID"),
+                refresh: true,
+                rolling_usage: None,
+            },
+            ProviderQuotaRequest {
+                account_id: ProviderAccountId::new("acct_second").expect("second account ID"),
+                refresh: true,
+                rolling_usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_import_should_remain_successful_when_quota_refresh_fails() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    provider.fail_next_quota(ProviderAdminErrorKind::Unavailable);
+    let store = FakeAccountStore::new("openai", events);
+    let services = service(provider.clone(), store).await;
+
+    let result = services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .import_document(ImportCredentials {
+            outbound_proxy_id: None,
+            settings: None,
+            context: context("import-openai-quota-failure"),
+            document: document(),
+        })
+        .await
+        .expect("committed import remains successful");
+
+    provider.wait_for_quota_requests(1).await;
+
+    assert_eq!(
+        result.credential_ids,
+        [ProviderAccountId::new("acct_prepared").expect("account ID")]
+    );
+    assert_eq!(provider.quota_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn openai_authorization_create_should_observe_initial_quota() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider.clone(), store.clone()).await;
+
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("oauth-start-openai-create"),
+            name: "new OpenAI credential".to_owned(),
+            reauthorization: None,
+        })
+        .await
+        .expect("start authorization");
+    services
+        .credentials()
+        .complete_authorization(
+            &gateway_core::routing::ProviderKind::new("openai").unwrap(),
+            CompleteAuthorization {
+                settings: Some(super::super::accounts::import_settings()),
+                context: context("oauth-start-openai-create"),
+                flow_id: "flow-test".to_owned(),
+                callback_url: "http://localhost/callback?code=test&state=test".to_owned(),
+            },
+        )
+        .await
+        .expect("complete authorization");
+
+    provider.wait_for_quota_requests(1).await;
+
+    assert_eq!(
+        recorded(&events),
+        [
+            "provider.start_authorization",
+            "provider.complete_authorization",
+            "store.commit_authorization",
+            "provider.account_facts_changed",
+            "provider.quota",
+        ]
+    );
+    assert_eq!(
+        provider.quota_requests(),
+        [ProviderQuotaRequest {
+            account_id: ProviderAccountId::new("acct_prepared").expect("account ID"),
+            refresh: true,
+            rolling_usage: None,
+        }]
+    );
+    assert_eq!(
+        store.import_settings(),
+        [Some(super::super::accounts::import_settings())]
+    );
+    assert_eq!(store.audit_requests(), ["oauth-start-openai-create"]);
+}
+
+#[tokio::test]
+async fn openai_authorization_create_should_remain_successful_when_initial_quota_fails() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    provider.fail_next_quota(ProviderAdminErrorKind::Unavailable);
+    let store = FakeAccountStore::new("openai", events);
+    let services = service(provider.clone(), store).await;
+
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("oauth-start-openai-quota-failure"),
+            name: "new OpenAI credential".to_owned(),
+            reauthorization: None,
+        })
+        .await
+        .expect("start authorization");
+    let result = services
+        .credentials()
+        .complete_authorization(
+            &gateway_core::routing::ProviderKind::new("openai").unwrap(),
+            CompleteAuthorization {
+                settings: None,
+                context: context("oauth-start-openai-quota-failure"),
+                flow_id: "flow-test".to_owned(),
+                callback_url: "http://localhost/callback?code=test&state=test".to_owned(),
+            },
+        )
+        .await
+        .expect("quota observation must not fail authorization");
+
+    provider.wait_for_quota_requests(1).await;
+
+    assert_eq!(result.account_id.as_str(), "acct_prepared");
+    assert_eq!(provider.quota_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn openai_authorization_store_failure_should_release_claim_for_retry() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    provider.retry_authorization_after_abort();
+    let store = FakeAccountStore::new("openai", events.clone());
+    store.fail_next_commit();
+    let services = service(provider.clone(), store).await;
+    let command = || CompleteAuthorization {
+        settings: None,
+        context: context("oauth-store-retry"),
+        flow_id: "flow-test".to_owned(),
+        callback_url: "http://localhost/callback?code=test&state=test".to_owned(),
+    };
+
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("oauth-store-retry"),
+            name: "new OpenAI credential".to_owned(),
+            reauthorization: None,
+        })
+        .await
+        .expect("start authorization");
+    services
+        .credentials()
+        .complete_authorization(
+            &gateway_core::routing::ProviderKind::new("openai").unwrap(),
+            command(),
+        )
+        .await
+        .expect_err("Store commit must fail");
+    services
+        .credentials()
+        .complete_authorization(
+            &gateway_core::routing::ProviderKind::new("openai").unwrap(),
+            command(),
+        )
+        .await
+        .expect("released claim must permit retry");
+
+    provider.wait_for_quota_requests(1).await;
+
+    assert_eq!(
+        recorded(&events),
+        [
+            "provider.start_authorization",
+            "provider.complete_authorization",
+            "store.commit_authorization",
+            "authorization_guard.abort",
+            "provider.complete_authorization",
+            "store.commit_authorization",
+            "authorization_guard.commit",
+            "provider.account_facts_changed",
+            "provider.quota",
+        ]
+    );
+    assert!(provider.pending().is_none());
+}
+
+#[tokio::test]
+async fn openai_import_provider_error_should_not_touch_store_transaction() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    provider.fail_next(ProviderAdminErrorKind::Invalid);
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider, store).await;
+
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .import_document(ImportCredentials {
+            outbound_proxy_id: None,
+            settings: None,
+            context: context("import-openai-error"),
+            document: document(),
+        })
+        .await
+        .expect_err("invalid Provider document");
+
+    assert_eq!(recorded(&events), ["provider.prepare_import"]);
+}
+
+#[tokio::test]
+async fn openai_reauthorization_should_commit_after_credential_revision_advances() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider.clone(), store.clone()).await;
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("oauth-start-openai"),
+            name: "reauthorize".to_owned(),
+            reauthorization: Some(ProviderAccountId::new("acct_test").expect("account ID")),
+        })
+        .await
+        .expect("start reauthorization");
+
+    let pending = provider.pending().expect("pending envelope");
+    assert_eq!(pending.provider_kind().as_str(), "openai");
+    assert_eq!(
+        pending.owner_binding().started_request_id(),
+        "oauth-start-openai"
+    );
+    assert!(matches!(
+        pending.target(),
+        AuthorizationMutationTarget::Reauthorize { account_id }
+            if account_id.as_str() == "acct_test"
+    ));
+    assert!(!format!("{pending:?}").contains("admin-test"));
+
+    provider.set_current_credential_revision(revision(2));
+
+    let result = services
+        .credentials()
+        .complete_authorization(
+            &gateway_core::routing::ProviderKind::new("openai").unwrap(),
+            CompleteAuthorization {
+                settings: None,
+                context: context("oauth-complete-openai"),
+                flow_id: "flow-test".to_owned(),
+                callback_url: "http://localhost/callback?code=test&state=test".to_owned(),
+            },
+        )
+        .await
+        .expect("complete reauthorization");
+
+    provider.wait_for_quota_requests(1).await;
+
+    assert_eq!(result.credential_revision, Some(revision(3)));
+
+    assert_eq!(
+        recorded(&events),
+        [
+            "store.credential_details",
+            "provider.start_authorization",
+            "provider.complete_authorization",
+            "store.commit_authorization",
+            "guard.finish",
+            "provider.account_facts_changed",
+            "provider.quota",
+        ]
+    );
+    assert_eq!(provider.quota_requests().len(), 1);
+    assert_eq!(store.audit_requests(), ["oauth-complete-openai"]);
+}
+
+async fn service(provider: Arc<FakeProviderAdmin>, store: Arc<FakeAccountStore>) -> AdminServices {
+    super::super::AdminHarness::new()
+        .provider(provider)
+        .accounts(store)
+        .build()
+        .await
+}
+
+fn deletion(account_id: &str) -> CredentialDeletion {
+    CredentialDeletion {
+        context: context("request-openai"),
+        account_ids: vec![ProviderAccountId::new(account_id).expect("account ID")],
+    }
+}
+
+#[tokio::test]
+async fn reauthorization_with_import_settings_releases_claim_without_committing() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider, store.clone()).await;
+    services
+        .credentials()
+        .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("reauthorization-settings"),
+            name: "existing account".to_owned(),
+            reauthorization: Some(ProviderAccountId::new("acct_test").expect("account ID")),
+        })
+        .await
+        .expect("start reauthorization");
+    let error = services
+        .credentials()
+        .complete_authorization(
+            &gateway_core::routing::ProviderKind::new("openai").unwrap(),
+            CompleteAuthorization {
+                settings: Some(super::super::accounts::import_settings()),
+                context: context("reauthorization-settings"),
+                flow_id: "flow-test".to_owned(),
+                callback_url: "http://localhost/callback?code=test&state=test".to_owned(),
+            },
+        )
+        .await
+        .expect_err("reauthorization must preserve settings");
+    assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Invalid);
+    assert!(!recorded(&events).contains(&"store.commit_authorization"));
+    assert!(store.import_settings().is_empty());
+}

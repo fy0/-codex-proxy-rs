@@ -1,17 +1,8 @@
-use std::num::NonZeroU32;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use gateway_core::account::{CredentialRevision, ProviderAccountId};
-use gateway_core::policy::ClientApiKeyId;
-use gateway_core::provider_ports::{
-    ProviderLeaseAcquisition, ProviderLeasePort, ProviderLeaseRequest,
-    ProviderSchedulingLeaseRequest,
-};
-use gateway_core::routing::{ProviderKind, UpstreamChannel};
 use gateway_store::redis::{
     CredentialBoundedLeaseAcquisition, CredentialBoundedLeaseRequest, CredentialLeaseRepository,
     CredentialLeaseRequest, CredentialLeaseScope, RedisCredentialLeaseRepository,
-    RedisProviderLeaseCoordinator,
 };
 use redis::aio::ConnectionManager;
 use uuid::Uuid;
@@ -28,9 +19,101 @@ fn credential_lease_rejects_zero_ttl() {
 }
 
 #[test]
-fn scheduling_lease_rejects_zero_concurrency() {
-    let request = scheduling_request("acct_invalid", "worker-invalid", 0, Duration::ZERO);
-    assert!(request.validate().is_err());
+fn only_account_scheduling_leases_allow_unlimited_concurrency() {
+    let mut request = scheduling_request("acct_unlimited", "worker-unlimited", 0, Duration::ZERO);
+    request.validate().expect("unlimited account concurrency");
+    for scope in [
+        CredentialLeaseScope::OAuthRefresh,
+        CredentialLeaseScope::OAuthRefreshCapacity,
+    ] {
+        request.scope = scope;
+        assert!(request.validate().is_err());
+    }
+}
+
+#[tokio::test]
+async fn unlimited_scheduling_leases_still_count_release_and_enforce_request_interval() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let request = scheduling_request("acct_unlimited", "worker-unlimited", 0, Duration::ZERO);
+    let mut leases = Vec::new();
+    for _ in 0..5 {
+        leases.push(acquired(
+            repository
+                .try_acquire_bounded_lease(&request)
+                .await
+                .expect("unlimited slot"),
+        ));
+    }
+    assert_eq!(
+        repository
+            .credential_runtime_signals(std::slice::from_ref(&request.resource_id))
+            .await
+            .expect("signals")[0]
+            .in_flight,
+        5
+    );
+    let limited = CredentialBoundedLeaseRequest {
+        max_concurrent: 3,
+        ..request.clone()
+    };
+    assert!(matches!(
+        repository
+            .try_acquire_bounded_lease(&limited)
+            .await
+            .expect("positive limit still applies"),
+        CredentialBoundedLeaseAcquisition::Busy { .. }
+    ));
+    for lease in leases {
+        assert!(lease.release().await.expect("release unlimited slot"));
+    }
+    assert_eq!(
+        repository
+            .credential_runtime_signals(std::slice::from_ref(&request.resource_id))
+            .await
+            .expect("released signals")[0]
+            .in_flight,
+        0
+    );
+    let interval = scheduling_request(
+        "acct_unlimited_interval",
+        "worker-interval",
+        0,
+        Duration::from_secs(30),
+    );
+    acquired(
+        repository
+            .try_acquire_bounded_lease(&interval)
+            .await
+            .expect("first start"),
+    )
+    .release()
+    .await
+    .expect("release interval slot");
+    assert!(
+        matches!(repository.try_acquire_bounded_lease(&interval).await.expect("interval decision"), CredentialBoundedLeaseAcquisition::Busy { retry_after: Some(value) } if value > Duration::ZERO)
+    );
+    let keys = redis::cmd("KEYS")
+        .arg(format!("{namespace}:*"))
+        .query_async::<Vec<String>>(&mut connection)
+        .await
+        .expect("isolated keys");
+    for key in &keys {
+        assert!(
+            redis::cmd("PTTL")
+                .arg(key)
+                .query_async::<i64>(&mut connection)
+                .await
+                .expect("TTL")
+                > 0
+        );
+    }
+    redis::cmd("DEL")
+        .arg(keys)
+        .query_async::<i64>(&mut connection)
+        .await
+        .expect("cleanup isolated keys");
 }
 
 #[tokio::test]
@@ -394,138 +477,6 @@ async fn refresh_capacity_is_shared_across_provider_callers() {
             .query_async::<i64>(&mut connection)
             .await
             .expect("clean isolated capacity keys");
-    }
-}
-
-#[tokio::test]
-async fn scheduling_lease_nests_channel_sub_pool_inside_account_slots() {
-    let Some((repository, mut connection, namespace)) = repository().await else {
-        return;
-    };
-    let coordinator = RedisProviderLeaseCoordinator::new(repository.clone());
-    let client_key = ClientApiKeyId::new("key_bps_pool").expect("client key");
-    let provider = ProviderKind::new("openai").expect("provider");
-    let account = ProviderAccountId::new("acct_bps_pool").expect("account");
-    let lease = |channel: UpstreamChannel, cap: Option<NonZeroU32>| {
-        ProviderLeaseRequest::Scheduling(
-            ProviderSchedulingLeaseRequest::new(
-                provider.clone(),
-                account.clone(),
-                CredentialRevision::new(1).expect("revision"),
-                NonZeroU32::new(2).expect("account concurrency"),
-                Duration::ZERO,
-                SystemTime::now() + Duration::from_secs(60),
-            )
-            .with_channel_limit(channel, cap),
-        )
-    };
-    let bps = || lease(UpstreamChannel::BasisPoints, NonZeroU32::new(1));
-    let default = || lease(UpstreamChannel::Default, None);
-
-    // 账号总槽 2、BPS 子槽 1：第二个 BPS 请求因子池占满被拒，且不占用账号槽。
-    let first_bps = acquired_scheduling(
-        coordinator
-            .try_acquire(bps())
-            .await
-            .expect("first BPS scheduling lease"),
-    );
-    assert!(matches!(
-        coordinator
-            .try_acquire(bps())
-            .await
-            .expect("second BPS scheduling lease"),
-        ProviderLeaseAcquisition::Busy { .. }
-    ));
-    // 子池拒绝后账号槽立即归还，普通请求仍可拿到。
-    let default_slot = acquired_scheduling(
-        coordinator
-            .try_acquire(default())
-            .await
-            .expect("default scheduling lease"),
-    );
-    // 账号总槽也已占满。
-    assert!(matches!(
-        coordinator
-            .try_acquire(default())
-            .await
-            .expect("overflow scheduling lease"),
-        ProviderLeaseAcquisition::Busy { .. }
-    ));
-
-    let state = coordinator
-        .load_state(
-            &client_key,
-            &provider,
-            std::slice::from_ref(&account),
-            &[UpstreamChannel::BasisPoints],
-        )
-        .await
-        .expect("load channel signals");
-    let signals = state.signals().get(&account).expect("account signals");
-    assert_eq!(signals.in_flight, 2);
-    assert_eq!(signals.bps_in_flight, 1);
-
-    drop(first_bps);
-    for _ in 0..100 {
-        let state = coordinator
-            .load_state(
-                &client_key,
-                &provider,
-                std::slice::from_ref(&account),
-                &[UpstreamChannel::BasisPoints],
-            )
-            .await
-            .expect("poll released signals");
-        let signals = state.signals().get(&account).expect("account signals");
-        if signals.in_flight == 1 && signals.bps_in_flight == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let state = coordinator
-        .load_state(
-            &client_key,
-            &provider,
-            std::slice::from_ref(&account),
-            &[UpstreamChannel::BasisPoints],
-        )
-        .await
-        .expect("released signals");
-    let signals = state.signals().get(&account).expect("account signals");
-    assert_eq!(signals.in_flight, 1);
-    assert_eq!(signals.bps_in_flight, 0);
-
-    // 释放后子池重新可用。
-    acquired_scheduling(
-        coordinator
-            .try_acquire(bps())
-            .await
-            .expect("reacquire BPS slot"),
-    );
-    drop(default_slot);
-
-    let keys = redis::cmd("KEYS")
-        .arg(format!("{namespace}:*"))
-        .query_async::<Vec<String>>(&mut connection)
-        .await
-        .expect("list isolated sub-pool keys");
-    if !keys.is_empty() {
-        redis::cmd("DEL")
-            .arg(keys)
-            .query_async::<i64>(&mut connection)
-            .await
-            .expect("clean isolated sub-pool keys");
-    }
-}
-
-fn acquired_scheduling(
-    acquisition: ProviderLeaseAcquisition,
-) -> Box<dyn gateway_core::provider_ports::ProviderLeaseGuard> {
-    match acquisition {
-        ProviderLeaseAcquisition::Acquired(guard) => guard,
-        ProviderLeaseAcquisition::Busy { retry_after } => {
-            panic!("expected acquired scheduling lease, retry after {retry_after:?}")
-        }
     }
 }
 

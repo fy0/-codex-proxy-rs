@@ -101,6 +101,8 @@ pub struct QuotaForecastSample {
     pub observation_count: usize,
     pub pending_request_count: u64,
     pub discontinuous: bool,
+    /// 本周期已记录用量；近期采样仅用于预测剩余量，不能覆盖这份累计值。
+    pub cycle_usage: QuotaForecastUsage,
     pub usage: QuotaForecastUsage,
 }
 
@@ -113,12 +115,13 @@ pub fn select_forecast_sample(
     current: QuotaForecastPoint,
     mut history: Vec<QuotaForecastPoint>,
     pending_request_count: u64,
+    interrupted: bool,
 ) -> QuotaForecastSample {
     history.retain(|point| {
         start_at <= point.observed_at
             && point.observed_at < current.observed_at
             && point.used_percent.is_finite()
-            && (0.0..100.0).contains(&point.used_percent)
+            && (0.0..=100.0).contains(&point.used_percent)
     });
     history.sort_by_key(|point| point.observed_at);
     let mut sample = QuotaForecastSample {
@@ -131,10 +134,13 @@ pub fn select_forecast_sample(
         block_count: 0,
         observation_count: history.len(),
         pending_request_count,
-        discontinuous: false,
+        discontinuous: interrupted,
+        cycle_usage: current.usage.clone(),
         usage: current.usage.clone(),
     };
     history.push(current);
+    // 重置边界不在查询起点时，从首个新观测重新计数，避免把旧周期累计带入总量。
+    let mut cycle_baseline = interrupted.then(|| &history[0]);
     let mut anchors: Vec<&QuotaForecastPoint> = Vec::new();
     let mut high_water: Option<&QuotaForecastPoint> = None;
     for point in &history {
@@ -149,6 +155,7 @@ pub fn select_forecast_sample(
                 }
                 sample.discontinuous = true;
                 anchors.clear();
+                cycle_baseline = Some(point);
             }
         }
         high_water = Some(point);
@@ -162,6 +169,13 @@ pub fn select_forecast_sample(
     let Some(current) = history.last() else {
         return sample;
     };
+    if let Some(baseline) = cycle_baseline {
+        let Some(usage) = current.usage.difference(&baseline.usage) else {
+            sample.discontinuous = true;
+            return sample;
+        };
+        sample.cycle_usage = usage;
+    }
     if anchors.len() < 2 {
         return sample;
     }

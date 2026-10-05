@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { RotateCcw } from '@lucide/vue'
+import { BaseColorPicker, BaseIconButton } from '@codex-proxy/ui'
 
-import BaseColorPicker from '@/components/base/BaseColorPicker/index.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
+import { themeTokenAllowsAlpha } from '@codex-proxy/ui/theme'
+import { RotateCcw } from '@lucide/vue'
 
 withDefaults(defineProps<{
   label: string
@@ -46,7 +46,7 @@ const emit = defineEmits<{
       <BaseColorPicker
         :model-value="value"
         :presets="presets"
-        :allow-alpha="false"
+        :allow-alpha="themeTokenAllowsAlpha(token)"
         :label="`编辑 ${label}`"
         @update:model-value="emit('change', $event)"
       />

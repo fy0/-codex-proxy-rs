@@ -57,7 +57,10 @@ pub enum OperationError {
 /// 路由快照或 Route Plan 不满足不变量。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RoutingError {
-    /// 动态 Provider/model 标识无法构造。
+    /// 请求设置无法编译。
+    #[error("runtime settings are invalid")]
+    InvalidSettings,
+    /// Provider/model 路由标识无法构造。
     #[error("routing identifier is invalid")]
     InvalidIdentifier,
     /// 配置 revision 必须为正数。
@@ -106,6 +109,14 @@ pub enum RoutingError {
     NoCapableProviderEndpoint {
         /// adapter 已绑定的 Provider。
         provider: String,
+    },
+    /// 固定 Provider 可用，但未声明该原生端点操作所需能力。
+    #[error("provider endpoint `{provider}` does not support `{operation}`")]
+    UnsupportedProviderEndpoint {
+        /// adapter 已绑定的 Provider。
+        provider: String,
+        /// 请求的稳定操作名。
+        operation: &'static str,
     },
 }
 

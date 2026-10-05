@@ -56,6 +56,9 @@ pub struct CostCoverageView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingView {
+    pub long_context_billing_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageBillingView>,
     pub input_amount_display: String,
     pub output_amount_display: String,
     pub cache_read_amount_display: String,
@@ -70,16 +73,29 @@ pub struct BillingView {
     pub multiplier_display: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBillingView {
+    pub input_amount_display: String,
+    pub cache_read_amount_display: String,
+    pub input_price_display: String,
+    pub cache_read_price_display: String,
+}
+
 /// 使用记录表格的窄展示。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageListRecordView {
+    pub client_api_key_name: Option<String>,
     pub id: String,
     pub provider: Option<String>,
     pub authentication_kind: Option<String>,
     pub account_id: Option<String>,
     pub account_email: Option<String>,
     pub account_name: Option<String>,
+    pub account_notes: Option<String>,
+    pub account_plan_type: Option<String>,
+    pub account_plan_type_display: Option<String>,
     pub route: String,
     pub model: Option<String>,
     pub requested_model: Option<String>,
@@ -378,20 +394,12 @@ pub struct DashboardAccountUsageView {
     pub plan_type_display: String,
     pub tokens: String,
     pub request_count: u64,
-    pub request_buckets: Vec<DashboardAccountRequestBucketView>,
+    pub request_buckets: Vec<crate::time::RequestBucketView>,
     pub quota_used_percent: Option<f64>,
     pub usage_window: Option<crate::admin::accounts::AccountQuotaWindowView>,
     pub metric_label: String,
     pub metric_value: String,
     pub last_used: String,
-}
-
-/// Dashboard 账号单小时请求数。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DashboardAccountRequestBucketView {
-    pub bucket_start: DateTime<Utc>,
-    pub request_count: u64,
 }
 
 /// Provider 账号池的持久事实汇总。
@@ -411,7 +419,7 @@ pub struct DashboardPoolSummaryView {
 #[serde(rename_all = "camelCase")]
 pub struct DashboardCapacityInfoView {
     pub max_concurrent_per_account: u64,
-    pub total_slots: u64,
+    pub total_slots: Option<u64>,
     pub used_slots: Option<u64>,
     pub available_slots: Option<u64>,
 }
@@ -454,6 +462,7 @@ pub struct AttemptMetricsView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthTimelinePointView {
+    pub bucket_start: DateTime<Utc>,
     pub time: String,
     pub status: String,
     pub reliability_display: String,
@@ -494,6 +503,7 @@ pub struct DashboardWireProfileView {
     pub attributes: Vec<DashboardWireAttributeView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<DateTime<Utc>>,
+    pub verified_at_display: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release: Option<DashboardDesktopReleaseView>,
 }
@@ -521,6 +531,7 @@ pub struct DashboardDesktopReleaseView {
     pub status: DashboardDesktopReleaseStatusView,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checked_at: Option<DateTime<Utc>>,
+    pub checked_at_display: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -554,6 +565,8 @@ impl From<domain::DesktopReleaseStatus> for DashboardDesktopReleaseStatusView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardDataView {
+    pub as_of: DateTime<Utc>,
+    pub as_of_display: String,
     pub cards: DashboardCardsView,
     pub trend: TrendData,
     pub health_timeline: HealthTimelineView,
@@ -732,6 +745,8 @@ pub struct UsageInsightsOverviewView {
 pub struct DiagnosticItemView {
     pub key: String,
     pub name: String,
+    pub account_plan_type: Option<String>,
+    pub account_plan_type_display: Option<String>,
     pub request_count: u64,
     pub success_count: u64,
     pub error_count: u64,
@@ -744,7 +759,6 @@ pub struct DiagnosticItemView {
     pub non_completion_rate: f64,
     pub retry_count: u64,
     pub retry_rate: f64,
-    pub impact_score: f64,
     pub estimated_cost: Option<String>,
     pub attempt_count: u64,
     pub total_tokens: u64,
@@ -762,6 +776,7 @@ pub struct DiagnosticsView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsErrorView {
+    pub client_api_key_name: Option<String>,
     pub id: String,
     pub request_id: Option<String>,
     pub client_api_key_id: Option<String>,
@@ -774,6 +789,8 @@ pub struct OpsErrorView {
     pub account_id: Option<String>,
     pub account_name: Option<String>,
     pub account_email: Option<String>,
+    pub account_plan_type: Option<String>,
+    pub account_plan_type_display: Option<String>,
     pub route: String,
     pub model: Option<String>,
     pub requested_model: Option<String>,

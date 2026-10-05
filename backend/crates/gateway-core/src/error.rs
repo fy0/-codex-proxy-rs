@@ -28,6 +28,8 @@ pub enum ProviderErrorKind {
     Unauthorized,
     /// Credential 没有权限。
     PermissionDenied,
+    /// 冻结的请求策略在 Provider 发送前明确拒绝本次请求。
+    RequestPolicyDenied,
     /// Provider 限流。
     RateLimited,
     /// Credential 配额耗尽。
@@ -46,6 +48,9 @@ pub enum ProviderErrorKind {
     Transport,
     /// 上游协议不合法。
     Protocol,
+    /// 上游以 message too big 拒收当前请求（如 WebSocket close 1009）。
+    /// 这是请求自身的问题：换账号或暂停 Provider 都无法让它成功。
+    MessageTooBig,
     /// Provider 暂不可用。
     Unavailable,
     /// 上游明确拒绝当前请求的模型容量；不证明整个 Provider 的基础设施故障。
@@ -66,6 +71,7 @@ impl ProviderErrorKind {
             Self::Unsupported => "unsupported",
             Self::Unauthorized => "unauthorized",
             Self::PermissionDenied => "permission_denied",
+            Self::RequestPolicyDenied => "request_policy_denied",
             Self::RateLimited => "rate_limited",
             Self::QuotaExhausted => "quota_exhausted",
             Self::AccountCapacityUnavailable => "account_capacity_unavailable",
@@ -76,6 +82,7 @@ impl ProviderErrorKind {
             Self::Timeout => "timeout",
             Self::Transport => "transport",
             Self::Protocol => "protocol",
+            Self::MessageTooBig => "message_too_big",
             Self::Unavailable => "unavailable",
             Self::UpstreamCapacityUnavailable => "upstream_capacity_unavailable",
             Self::Cancelled => "cancelled",
@@ -127,6 +134,11 @@ pub enum PreDeliveryRetry {
         retry_index: NonZeroU32,
         /// 发起下一次传输尝试前的退避时长。
         delay: Duration,
+    },
+    /// 可靠 NotSent 的建连恢复；次数与时间由 Core 的请求级预算裁决。
+    SameAccountConnectionRetry {
+        /// Provider 明确指定实际失败的传输，避免 HTTP 恢复重新进入 WS。
+        transport: crate::engine::AttemptTransport,
     },
     /// 固定本次账号，并要求 Provider 使用备用传输。
     SameAccountTransportFallback,
@@ -344,7 +356,7 @@ impl ProviderConnectionObservation {
 /// 投影不能覆盖 [`ProviderError`] 中用于诊断和记账的真实上游事实。
 ///
 /// 该值不属于稳定诊断事实，不能进入日志或持久化。它刻意不实现 [`Clone`]；
-/// [`ProviderError`] 的普通 clone 会丢弃它，只有最终失败的原对象才能把响应交给
+/// [`ProviderError::stable_snapshot`] 会丢弃它，只有最终失败的原对象才能把响应交给
 /// 原客户端协议，或由认证管理端的账号连接测试显式复制到请求局部结果。
 #[derive(PartialEq, Eq)]
 pub struct ClientVisibleUpstreamResponse {
@@ -445,15 +457,8 @@ struct ProviderErrorUpstreamValues {
     request_id: Option<OpaqueUpstreamValue>,
 }
 
-/// 本地无可用账号错误的可公开原因，不改变错误分类与重试边界。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoEligibleAccountReason {
-    MissingTurnState,
-}
-
 #[derive(Clone, Default)]
 struct ProviderErrorFailureObservation {
-    no_eligible_account_reason: Option<NoEligibleAccountReason>,
     continuation_unavailable_reason: Option<&'static str>,
     connection: Option<ProviderConnectionObservation>,
 }
@@ -462,20 +467,6 @@ struct ProviderErrorFailureObservation {
 struct AtomicClientEvents(Vec<ProviderEvent>);
 
 impl ProviderError {
-    /// 保留选号时的结构化原因，客户端消息不依赖诊断字符串反推。
-    #[must_use]
-    pub fn with_no_eligible_account_reason(mut self, reason: NoEligibleAccountReason) -> Self {
-        self.failure_observation_mut().no_eligible_account_reason = Some(reason);
-        self
-    }
-
-    #[must_use]
-    pub fn no_eligible_account_reason(&self) -> Option<NoEligibleAccountReason> {
-        self.failure_observation
-            .as_ref()
-            .and_then(|observation| observation.no_eligible_account_reason)
-    }
-
     /// 创建 Provider 错误。
     #[must_use]
     pub const fn new(kind: ProviderErrorKind, send_state: UpstreamSendState) -> Self {
@@ -586,11 +577,6 @@ impl ProviderError {
         self
     }
 
-    /// 原地标记 Provider 已证明本次失败可从已交付的状态检查点安全恢复。
-    pub const fn set_replay_safe(&mut self) {
-        self.replay_safe = true;
-    }
-
     /// 允许 Core 仅在客户端尚未收到任何事件时执行一次受预算约束的换号恢复。
     ///
     /// 该标记不证明上游未执行，也不等价于 [`Self::with_replay_safe`]；它只表达
@@ -637,6 +623,14 @@ impl ProviderError {
             retry_index,
             delay,
         }));
+    }
+
+    #[must_use]
+    pub fn with_connection_retry(mut self, transport: crate::engine::AttemptTransport) -> Self {
+        self.pre_delivery_retry = Some(Box::new(PreDeliveryRetry::SameAccountConnectionRetry {
+            transport,
+        }));
+        self
     }
 
     /// 要求 Core 在账号凭据已恢复后仅对原账号重放一次。
@@ -851,8 +845,8 @@ impl ProviderError {
 
     /// 取走只供本次重试/提交决策使用的原子客户端事件。
     ///
-    /// Core 必须在克隆错误、记录中间失败或构造终态前调用本方法，避免原始 wire
-    /// 进入诊断或持久化对象。
+    /// Core 必须在创建稳定快照、记录中间失败或构造终态前调用本方法，避免原始
+    /// wire 进入诊断或持久化对象。
     #[must_use]
     pub fn take_atomic_client_events(&mut self) -> Vec<ProviderEvent> {
         self.atomic_client_events
@@ -865,10 +859,12 @@ impl ProviderError {
     pub fn has_atomic_client_events(&self) -> bool {
         self.atomic_client_events.is_some()
     }
-}
 
-impl Clone for ProviderError {
-    fn clone(&self) -> Self {
+    /// 复制可安全进入诊断和持久化边界的稳定错误事实。
+    ///
+    /// 请求局部的原始上游响应与尚未提交的客户端事件不会进入快照。
+    #[must_use]
+    pub fn stable_snapshot(&self) -> Self {
         Self {
             kind: self.kind,
             send_state: self.send_state,
@@ -996,6 +992,9 @@ pub enum GatewayErrorKind {
     RateLimited,
     /// 上游暂不可用。
     UpstreamUnavailable,
+    /// 上游拒收当前请求：消息过大（如 WebSocket close 1009）。
+    /// 客户端必须缩小或重建请求；重试或换账号都无法成功。
+    MessageTooBig,
     /// 请求超时。
     Timeout,
     /// 请求取消。
@@ -1021,6 +1020,7 @@ impl GatewayErrorKind {
             Self::ProviderInfrastructureUnavailable => "provider_infrastructure_unavailable",
             Self::RateLimited => "rate_limited",
             Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::MessageTooBig => "message_too_big",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
             Self::Internal => "internal_error",
@@ -1100,6 +1100,10 @@ impl GatewayError {
                 GatewayErrorKind::UpstreamUnavailable,
                 "upstream authentication resource is unavailable",
             ),
+            ProviderErrorKind::RequestPolicyDenied => Self::new(
+                GatewayErrorKind::PolicyDenied,
+                "request policy rejected the request",
+            ),
             ProviderErrorKind::RateLimited | ProviderErrorKind::QuotaExhausted => Self::new(
                 GatewayErrorKind::RateLimited,
                 "upstream capacity is temporarily unavailable",
@@ -1118,13 +1122,7 @@ impl GatewayError {
             ),
             ProviderErrorKind::NoEligibleAccount => Self::new(
                 GatewayErrorKind::NoAvailableProvider,
-                if error.no_eligible_account_reason()
-                    == Some(NoEligibleAccountReason::MissingTurnState)
-                {
-                    "no upstream account is currently available: waiting for a valid installed turn state for the requested model"
-                } else {
-                    "no upstream provider is currently available for this request"
-                },
+                "no upstream provider is currently available for this request",
             ),
             ProviderErrorKind::ProviderInfrastructureUnavailable => Self::new(
                 GatewayErrorKind::ProviderInfrastructureUnavailable,
@@ -1133,6 +1131,10 @@ impl GatewayError {
             ProviderErrorKind::Timeout => {
                 Self::new(GatewayErrorKind::Timeout, "upstream request timed out")
             }
+            ProviderErrorKind::MessageTooBig => Self::new(
+                GatewayErrorKind::MessageTooBig,
+                "upstream rejected the request because the message is too large",
+            ),
             ProviderErrorKind::Cancelled => {
                 Self::new(GatewayErrorKind::Cancelled, "request was cancelled")
             }

@@ -8,15 +8,18 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
+use gateway_core::engine::execution::ClientTransport;
 use gateway_core::error::{GatewayError, GatewayErrorKind};
-use gateway_core::operation::{Operation, RawJsonPayload, StandaloneSearchRequest};
+use gateway_core::operation::{Operation, OperationKind, RawJsonPayload, StandaloneSearchRequest};
 
 use crate::ApiState;
+use crate::middleware::headers::encode_headers;
+use crate::openai::middleware::RequestInput;
 use crate::openai::{
     auth::{authenticate_client, client_access_error_response},
-    endpoint::collect_raw_json_response,
-    error::gateway_error_response,
+    endpoint::provider_endpoint_response,
     responses::{OpenAiRequestHeaders, request_client_context},
+    router::SEARCH_PATH,
 };
 
 const OPENAI_PROTOCOL: &str = "openai";
@@ -29,7 +32,7 @@ pub(crate) async fn standalone_search(
     body: Bytes,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
@@ -37,18 +40,23 @@ pub(crate) async fn standalone_search(
         &headers,
         connect_info.map(|Extension(ConnectInfo(address))| address),
     );
-    let operation = match search_operation(body, &headers) {
-        Ok(operation) => operation,
-        Err(error) => return gateway_error_response(&error),
-    };
-    let started = match service
-        .start_provider_endpoint(client, operation, client_ip, user_agent, "/v1/alpha/search")
-        .await
-    {
-        Ok(started) => started,
-        Err(error) => return gateway_error_response(&error),
-    };
-    collect_raw_json_response(started).await
+    provider_endpoint_response(
+        service.clone(),
+        client,
+        RequestInput {
+            endpoint: SEARCH_PATH.to_owned(),
+            protocol: OPENAI_PROTOCOL.to_owned(),
+            operation: Some(OperationKind::Search),
+            transport: ClientTransport::HttpJson,
+            model_hint: None,
+            headers: encode_headers(&headers),
+            body,
+        },
+        client_ip,
+        user_agent,
+        search_operation,
+    )
+    .await
 }
 
 fn search_operation(body: Bytes, headers: &HeaderMap) -> Result<Operation, GatewayError> {

@@ -2,7 +2,6 @@
 import type { AccountQuotaWindow } from '../../constants'
 import type { AccountUsageWindowVariant } from './presenter'
 import { computed } from 'vue'
-import { useUiClock } from '@/composables/useUiClock'
 import AccountRequestTimeline from './AccountRequestTimeline.vue'
 import { resolveAccountUsageWindowPresentation } from './presenter'
 
@@ -22,12 +21,10 @@ const props = withDefaults(
   },
 )
 
-const now = useUiClock()
 const view = computed(() => resolveAccountUsageWindowPresentation({
   window: props.window,
   variant: props.variant,
   showLocalValue: props.showLocalValue,
-  now: now.value.getTime(),
 }))
 </script>
 
@@ -83,6 +80,7 @@ const view = computed(() => resolveAccountUsageWindowPresentation({
         </span>
       </div>
       <div
+        class="col-span-full"
         :class="[view.classes.track, view.classes.trackOffset]"
         role="progressbar"
         :aria-label="window.labelDisplay"
@@ -118,6 +116,7 @@ const view = computed(() => resolveAccountUsageWindowPresentation({
         </strong>
       </div>
       <AccountRequestTimeline
+        class="col-span-full"
         :bars="view.local.requestBars"
         :label="view.local.timelineTitle"
         :show-native-tooltip="showNativeTooltip"
@@ -127,7 +126,6 @@ const view = computed(() => resolveAccountUsageWindowPresentation({
 
     <div v-else :class="view.classes.header">
       <span class="min-w-0 text-cp-text-secondary">额度待观测</span>
-      <span class="shrink-0 font-mono text-cp-text-quaternary" :class="view.classes.value">—</span>
     </div>
   </div>
 </template>

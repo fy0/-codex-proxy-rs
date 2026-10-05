@@ -1,14 +1,8 @@
 <script setup lang="ts">
+import { BaseCard, BaseCheckbox, BaseForm, BaseFormItem, BaseInput, BasePopover, BaseSwitch } from '@codex-proxy/ui'
+
 import { Activity, CircleAlert, Gauge, Snowflake, Timer } from '@lucide/vue'
 import { useId } from 'vue'
-
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseForm from '@/components/base/BaseForm/index.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BasePopover from '@/components/base/BasePopover.vue'
-import BaseSwitch from '@/components/base/BaseSwitch.vue'
 
 const enabled = defineModel<boolean>('enabled', { required: true })
 const threshold = defineModel<string>('threshold', { required: true })
@@ -22,25 +16,25 @@ const adaptiveConcurrencyHintId = useId()
 
 <template>
   <BaseCard
-    title="过载策略"
-    description="上游繁忙或服务不可用时，使用过载策略保护"
+    title="过载保护"
+    description="上游容量类错误累计达到阈值时，暂停账号调度并进入冷却"
   >
     <BaseForm class="max-w-6xl sm:grid-cols-2">
       <BaseSwitch
         v-model="enabled"
         class="col-span-full justify-self-start"
-        label="启用策略"
+        label="启用过载保护"
         show-label
       />
 
       <BaseFormItem
-        label="触发阈值"
-        description="窗口内累计失败尝试达到此次数后触发"
+        label="失败次数阈值"
+        description="统计窗口内累计容量类失败达到此次数后触发"
       >
         <BaseInput
           v-model="threshold"
           :disabled="!enabled"
-          aria-label="触发阈值"
+          aria-label="失败次数阈值"
           type="number"
           min="2"
           max="1000"

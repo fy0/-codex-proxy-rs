@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt as _};
 use gateway_admin::model::{
     AdminError as AdminServiceError, PageSize,
@@ -22,19 +22,18 @@ use gateway_admin::model::{
         AccountConcurrencyLimit, AccountConnectionTestEvent as DomainConnectionTestEvent,
         AccountCost, AccountGroupFilter, AccountListQuery, AccountModelUsage, AccountSort,
         AccountSortField, AccountStatus as DomainAccountStatus, AccountUpdateResult, AccountUsage,
-        AccountWeight, AccountsUpdateResult, BatchUpdateAccounts, SetAccountTurnStateOverride,
-        SortDirection, UpdateAccount,
+        AccountWeight, AccountsUpdateResult, BatchUpdateAccounts, SortDirection, UpdateAccount,
     },
     provider_credentials::{
         AccountDirectoryItem, AccountDirectoryPage, AccountExportBundle, AccountPersonalInfo,
         AccountRefreshResult, AccountUsagePeriod, AuthorizationStarted, CompleteAuthorization,
         ConsumeProviderResetCredit, CredentialDeletion, CredentialDeletionResult,
         CredentialImportResult, CredentialMutation, CredentialMutationResult, ImportCredentials,
-        ProviderDocument, ProviderModels, ProviderProfileActivityInsights, ProviderProfileAvatar,
-        ProviderProfileDailyUsage, ProviderProfileInvocation, ProviderProfileStatistics,
-        ProviderProfileStatisticsSummary, ProviderQuota, ProviderQuotaWindow, ProviderResetCredit,
-        ProviderResetCreditResult, ProviderResetCredits, ProviderSubscription, RotateCredential,
-        StartAuthorization,
+        ProviderDocument, ProviderModelCatalogDocument, ProviderModels,
+        ProviderProfileActivityInsights, ProviderProfileAvatar, ProviderProfileDailyUsage,
+        ProviderProfileInvocation, ProviderProfileStatistics, ProviderProfileStatisticsSummary,
+        ProviderQuota, ProviderQuotaWindow, ProviderResetCredit, ProviderResetCreditResult,
+        ProviderResetCredits, ProviderSubscription, RotateCredential, StartAuthorization,
     },
 };
 use gateway_core::{
@@ -57,9 +56,6 @@ const MAX_SEARCH_BYTES: usize = 256;
 const MAX_ID_BYTES: usize = 256;
 const MAX_NAME_BYTES: usize = 512;
 const MAX_IMPORT_DATA_BYTES: usize = 64 * 1024 * 1024;
-const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
-const MAX_REFRESH_TOKEN_BYTES: usize = 64 * 1024;
-const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_CALLBACK_URL_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_DELETE_BATCH: usize = 200;
 const MAX_ACCOUNT_GROUP_BATCH: usize = 1000;
@@ -69,7 +65,6 @@ mod credentials;
 mod handlers;
 mod import_tasks;
 mod presenter;
-mod turn_state;
 mod wire;
 
 pub use credentials::*;
@@ -78,8 +73,8 @@ pub(super) use presenter::quota_window_view;
 pub use wire::*;
 
 use credentials::{
-    AccountProvider, parse_account_weight, parse_concurrency_limit, provider_document_value,
-    require_account_id, validate_wire_group_ids,
+    parse_account_weight, parse_concurrency_limit, provider_document_value, require_account_id,
+    validate_wire_group_ids,
 };
 use presenter::*;
 use wire::BatchUpdatedAccountsData;

@@ -1,16 +1,12 @@
 <script setup lang="ts">
 import type { ApiKeyFormValue } from '../composables/useApiKeyMutations'
 import type { AccountGroup } from '@/api'
+import { BaseButton, BaseForm, BaseFormItem, BaseIconButton, BaseInput, BaseModal } from '@codex-proxy/ui'
+
 import { Copy, DollarSign, KeyRound, Upload } from '@lucide/vue'
 import { computed } from 'vue'
-
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseForm from '@/components/base/BaseForm/index.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
+import ProviderRequestProfilesEditor from '@/components/client-profile/ProviderRequestProfilesEditor.vue'
 
 const props = defineProps<{
   groups: AccountGroup[]
@@ -23,20 +19,24 @@ const emit = defineEmits<{
   save: []
   copy: [text: string]
   importCcs: []
+  afterLeave: []
+  createdAfterLeave: []
 }>()
 const open = defineModel<boolean>({ default: false })
 const createdOpen = defineModel<boolean>('createdOpen', { default: false })
 const form = defineModel<ApiKeyFormValue>('form', { required: true })
-const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key')
+const title = computed(() => props.editing ? '编辑密钥' : '创建 API Key')
 </script>
 
 <template>
   <BaseModal
     v-model="open"
     :title="title"
+    description="配置密钥信息、分组与使用限制"
     tone="info"
-    size="md"
+    size="lg"
     :dismissible="!saving"
+    @after-leave="emit('afterLeave')"
   >
     <template #icon>
       <KeyRound class="text-cp-text" :size="20" aria-hidden="true" />
@@ -52,35 +52,46 @@ const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key'
         />
       </BaseFormItem>
 
-      <BaseFormItem label="标签（可选）">
-        <BaseInput
-          v-model="form.label"
-          aria-label="标签（可选）"
-          placeholder="例如：后端服务"
-          :disabled="saving"
-        />
-      </BaseFormItem>
+      <div class="grid gap-6" :class="{ 'sm:grid-cols-2': !editing }">
+        <BaseFormItem label="标签（可选）">
+          <BaseInput
+            v-model="form.label"
+            aria-label="标签（可选）"
+            placeholder="例如：后端服务"
+            :disabled="saving"
+          />
+        </BaseFormItem>
 
-      <BaseFormItem
-        v-if="!editing"
-        label="自定义 Key（可选）"
-      >
-        <BaseInput
-          v-model="form.customKey"
-          type="password"
-          autocomplete="new-password"
-          :spellcheck="false"
-          aria-label="自定义 Key（可选）"
-          placeholder="留空自动生成"
-          :disabled="saving"
-        />
-      </BaseFormItem>
+        <BaseFormItem
+          v-if="!editing"
+          label="自定义 Key（可选）"
+        >
+          <BaseInput
+            v-model="form.customKey"
+            type="password"
+            autocomplete="new-password"
+            :spellcheck="false"
+            aria-label="自定义 Key（可选）"
+            placeholder="留空自动生成"
+            :disabled="saving"
+          />
+        </BaseFormItem>
+      </div>
 
       <BaseFormItem label="分组">
         <AccountGroupCheckboxGrid
           v-model="form.groupIds"
           :groups="groups"
           :loading="groupLoading"
+          :disabled="saving"
+        />
+      </BaseFormItem>
+
+      <BaseFormItem label="上游身份">
+        <ProviderRequestProfilesEditor
+          v-model="form.providerRequestProfileOverrides"
+          allow-inherit
+          :active="open"
           :disabled="saving"
         />
       </BaseFormItem>
@@ -165,6 +176,7 @@ const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key'
     description="复制密钥，或直接导入 CCSwitch"
     tone="success"
     size="md"
+    @after-leave="emit('createdAfterLeave')"
   >
     <div class="flex flex-col gap-4">
       <div class="rounded-cp border border-cp-warning-border bg-cp-warning-container px-4 py-3">

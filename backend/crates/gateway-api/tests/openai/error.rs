@@ -7,9 +7,126 @@ use gateway_core::error::{
 use gateway_core::upstream::UpstreamSendState;
 
 use gateway_api::openai::error::{
-    gateway_error_contract, gateway_error_from_engine, gateway_error_response,
-    openai_error_response,
+    engine_error_response, gateway_error_contract, gateway_error_from_engine,
+    gateway_error_response, openai_error_response,
 };
+
+#[tokio::test]
+async fn capacity_errors_offer_client_retry_without_changing_upstream_facts() {
+    use bytes::Bytes;
+    use gateway_core::error::ClientVisibleUpstreamResponse;
+    use gateway_core::event::ProviderResponseHeader;
+    use gateway_core::upstream::OpaqueUpstreamValue;
+    use serde_json::{Value, json};
+
+    for code in ["server_is_overloaded", "slow_down"] {
+        for status in [400, 429, 503] {
+            for raw_response in [false, true] {
+                let original = json!({"error": {
+                    "code": code, "type": "service_unavailable_error", "message": "busy",
+                    "param": "model", "future": {"keep": true}
+                }});
+                let mut provider = ProviderError::new(
+                    ProviderErrorKind::UpstreamCapacityUnavailable,
+                    UpstreamSendState::Sent,
+                )
+                .with_status(status)
+                .with_upstream_code(OpaqueUpstreamValue::new(code.to_owned()))
+                .with_client_visible_upstream_error(
+                    ClientVisibleUpstreamError::new(
+                        "busy",
+                        Some(code.to_owned()),
+                        Some("service_unavailable_error".to_owned()),
+                    ),
+                );
+                if raw_response {
+                    provider = provider.with_client_visible_upstream_response(
+                        ClientVisibleUpstreamResponse::new(
+                            status,
+                            Some(b"application/json".to_vec()),
+                            Bytes::from(original.to_string()),
+                        )
+                        .with_headers(vec![
+                            ProviderResponseHeader::new(
+                                "x-request-id",
+                                Bytes::from_static(b"req_capacity"),
+                            ),
+                            ProviderResponseHeader::new("retry-after", Bytes::from_static(b"7")),
+                        ]),
+                    );
+                }
+                let error = EngineError::Provider(provider);
+                let response = engine_error_response(&error);
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                if raw_response {
+                    assert_eq!(response.headers()["x-request-id"], "req_capacity");
+                    assert_eq!(response.headers()["retry-after"], "7");
+                }
+                let body: Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), 4096)
+                        .await
+                        .expect("response body"),
+                )
+                .expect("JSON");
+                assert_eq!(body["error"]["code"], "server_error");
+                assert_eq!(body["error"]["message"], "busy");
+                assert_eq!(body["error"]["type"], "service_unavailable_error");
+                if raw_response {
+                    let mut expected = original.clone();
+                    expected["error"]["code"] = json!("server_error");
+                    assert_eq!(body, expected);
+                }
+                let EngineError::Provider(provider) = error else {
+                    unreachable!()
+                };
+                assert_eq!(provider.upstream_status(), Some(status));
+                assert_eq!(
+                    provider.upstream_code().map(OpaqueUpstreamValue::as_str),
+                    Some(code)
+                );
+                assert_eq!(
+                    provider
+                        .client_visible_upstream_error()
+                        .expect("detail")
+                        .code(),
+                    Some(code)
+                );
+                if let Some(raw) = provider.client_visible_upstream_response() {
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(raw.body()).expect("original JSON"),
+                        original
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn classified_capacity_error_without_special_code_returns_retryable_http_status() {
+    use bytes::Bytes;
+    use gateway_core::error::ClientVisibleUpstreamResponse;
+
+    let body = Bytes::from_static(br#"{"error":{"code":null,"type":"server_error","message":"Selected model is at capacity. Please try a different model."}}"#);
+    let error = EngineError::Provider(
+        ProviderError::new(
+            ProviderErrorKind::UpstreamCapacityUnavailable,
+            UpstreamSendState::Sent,
+        )
+        .with_status(400)
+        .with_client_visible_upstream_response(ClientVisibleUpstreamResponse::new(
+            400,
+            Some(b"application/json".to_vec()),
+            body.clone(),
+        )),
+    );
+    let response = engine_error_response(&error);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        to_bytes(response.into_body(), 4096).await.expect("body"),
+        body
+    );
+}
 
 #[tokio::test]
 async fn key_budget_errors_preserve_limit_code_and_retry_after() {
@@ -329,6 +446,27 @@ fn engine_provider_quota_exhaustion_should_use_the_retryable_capacity_contract()
     );
 }
 
+#[tokio::test]
+async fn locally_exhausted_account_pool_returns_official_usage_limit_contract() {
+    let error = EngineError::Provider(
+        ProviderError::new(
+            ProviderErrorKind::QuotaExhausted,
+            UpstreamSendState::NotSent,
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            "All eligible accounts have exhausted their quota.",
+            Some("usage_limit_reached".to_owned()),
+            Some("usage_limit_reached".to_owned()),
+        )),
+    );
+    let response = engine_error_response(&error);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["type"], "usage_limit_reached");
+    assert_eq!(body["error"]["code"], "usage_limit_reached");
+}
+
 #[test]
 fn engine_provider_timeout_and_cancellation_should_remain_distinct() {
     let timeout = EngineError::Provider(ProviderError::new(
@@ -434,6 +572,36 @@ async fn gateway_error_response_should_expose_only_structured_client_visible_ups
 }
 
 #[tokio::test]
+async fn upstream_message_too_big_returns_actionable_http_error() {
+    let error = EngineError::Provider(
+        ProviderError::new(
+            ProviderErrorKind::MessageTooBig,
+            UpstreamSendState::Ambiguous,
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            "message too big",
+            Some("message_too_big".to_owned()),
+            Some("invalid_request_error".to_owned()),
+        )),
+    );
+
+    let response = engine_error_response(&error);
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), 4096)
+        .await
+        .expect("read message-too-big response");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("OpenAI error JSON");
+    assert_eq!(
+        body["error"],
+        serde_json::json!({
+            "message": "message too big",
+            "type": "invalid_request_error",
+            "code": "message_too_big",
+        })
+    );
+}
+
+#[tokio::test]
 async fn continuation_recovery_should_preserve_the_official_retry_signal() {
     let error = GatewayError::from_provider(
         &ProviderError::new(
@@ -471,18 +639,14 @@ async fn continuation_recovery_should_preserve_the_official_retry_signal() {
 mod model_routing {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
 
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use futures::future::BoxFuture;
-    use gateway_core::engine::execution::{
-        DefaultExecutionService, ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
-    };
+    use gateway_core::engine::execution::DefaultExecutionService;
     use gateway_core::engine::provider::ProviderRegistry;
-    use gateway_core::routing::{ProviderKind, RuntimeSnapshot};
+    use gateway_core::routing::RuntimeSnapshot;
     use gateway_core::runtime::RuntimeSnapshotHandle;
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -491,53 +655,16 @@ mod model_routing {
         IgnoredClientApiKeyUsage, UnusedAdmissions, UnusedContinuation, UnusedExecutionStore,
     };
 
-    struct TestCircuits {
-        blocked: bool,
-    }
-
-    impl ProviderCircuitPort for TestCircuits {
-        fn decision<'a>(
-            &'a self,
-            _: &'a ProviderKind,
-        ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-            Box::pin(async move {
-                Ok(if self.blocked {
-                    ProviderCircuitDecision::BlockedUntil(
-                        SystemTime::now() + Duration::from_secs(30),
-                    )
-                } else {
-                    ProviderCircuitDecision::Allow
-                })
-            })
-        }
-
-        fn observe_failure<'a>(
-            &'a self,
-            _: &'a ProviderKind,
-        ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-            Box::pin(async { unreachable!("routing rejection must not execute a provider") })
-        }
-
-        fn observe_success<'a>(
-            &'a self,
-            _: &'a ProviderKind,
-        ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-            Box::pin(async { unreachable!("routing rejection must not execute a provider") })
-        }
-    }
-
     async fn request_model(
         snapshot: RuntimeSnapshot,
         model: &str,
         stream: bool,
-        blocked: bool,
     ) -> (StatusCode, Value) {
         let execution = DefaultExecutionService::new(
             RuntimeSnapshotHandle::new(snapshot),
             Arc::new(UnusedExecutionStore),
             ProviderRegistry::default(),
             Arc::new(UnusedAdmissions),
-            Arc::new(TestCircuits { blocked }),
             Arc::new(UnusedContinuation),
             Arc::new(IgnoredClientApiKeyUsage),
         );
@@ -576,9 +703,13 @@ mod model_routing {
             ),
         ] {
             for stream in [false, true] {
-                let snapshot = crate::openai::snapshot("sk_model_routing", "openai")
+                let snapshot = crate::openai::snapshot("sk_model_routing", "openai");
+                let settings = snapshot
+                    .settings()
+                    .clone()
                     .with_model_mappings(mappings.clone());
-                let response = request_model(snapshot, model, stream, false).await;
+                let snapshot = snapshot.with_settings(&settings).unwrap();
+                let response = request_model(snapshot, model, stream).await;
 
                 assert_eq!(
                     response,
@@ -594,25 +725,6 @@ mod model_routing {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn an_existing_model_with_a_blocked_provider_should_remain_service_unavailable() {
-        let response = request_model(
-            crate::openai::snapshot("sk_model_routing", "openai"),
-            "model-a",
-            true,
-            true,
-        )
-        .await;
-
-        assert_eq!(
-            (response.0, response.1["error"]["code"].as_str()),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some("no_available_provider")
-            ),
-        );
     }
 }
 
@@ -644,4 +756,28 @@ async fn quota_recovery_http_response_uses_projection_without_replacing_upstream
         provider.upstream_code().unwrap().as_str(),
         "usage_limit_reached"
     );
+}
+
+#[test]
+fn final_connection_failures_and_local_capacity_have_distinct_http_statuses() {
+    for (kind, expected) in [
+        (ProviderErrorKind::Transport, StatusCode::BAD_GATEWAY),
+        (ProviderErrorKind::Timeout, StatusCode::GATEWAY_TIMEOUT),
+        (
+            ProviderErrorKind::ProviderInfrastructureUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let error = EngineError::Provider(ProviderError::new(kind, UpstreamSendState::NotSent));
+        assert_eq!(engine_error_response(&error).status(), expected);
+    }
+    for kind in [
+        GatewayErrorKind::NoAvailableProvider,
+        GatewayErrorKind::AccountCapacityUnavailable,
+    ] {
+        assert_eq!(
+            gateway_error_response(&GatewayError::new(kind, "temporarily unavailable")).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

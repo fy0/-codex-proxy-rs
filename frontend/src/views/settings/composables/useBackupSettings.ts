@@ -1,5 +1,6 @@
 import type { BackupSettingsView, UpdateBackupStoragePayload } from '@/api'
 
+import { toast } from '@codex-proxy/ui'
 import { reactive, shallowRef } from 'vue'
 import {
   getBackupSettings,
@@ -7,8 +8,7 @@ import {
   updateBackupSchedule,
   updateBackupStorage,
 } from '@/api'
-import { toast } from '@/components/base/BaseToast'
-import { errorMessage } from '@/utils/async'
+import { errorMessage } from '@/utils/operation'
 
 /** 存储与计划配置共用的加载/保存/测试 composable。 */
 export function useBackupSettings() {
@@ -36,7 +36,6 @@ export function useBackupSettings() {
   const schedule = reactive({
     scheduleEnabled: false,
     cronExpression: '0 2 * * *',
-    scheduleTimezone: 'Asia/Shanghai',
     retentionDays: '7',
     retentionCount: '7',
   })
@@ -71,7 +70,6 @@ export function useBackupSettings() {
     storage.forcePathStyle = data.forcePathStyle
     schedule.scheduleEnabled = data.scheduleEnabled
     schedule.cronExpression = data.cronExpression ?? '0 2 * * *'
-    schedule.scheduleTimezone = data.scheduleTimezone ?? 'Asia/Shanghai'
     schedule.retentionDays = String(data.retentionDays)
     schedule.retentionCount = String(data.retentionCount)
   }
@@ -132,12 +130,11 @@ export function useBackupSettings() {
       const data = await updateBackupSchedule({
         scheduleEnabled: schedule.scheduleEnabled,
         cronExpression: schedule.cronExpression.trim(),
-        scheduleTimezone: schedule.scheduleTimezone.trim(),
         retentionDays: Number(schedule.retentionDays) || 0,
         retentionCount: Number(schedule.retentionCount) || 0,
       })
       applySettings(data)
-      toast.success('调度配置已保存')
+      toast.success('备份计划已保存')
       return true
     }
     catch {

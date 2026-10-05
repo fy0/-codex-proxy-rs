@@ -41,127 +41,24 @@ struct StoredAccount {
     state_observed_at: Option<SystemTime>,
 }
 
+type CredentialLoadHook = dyn for<'a> Fn(
+        &'a MemoryAccountStore,
+        &'a ProviderAccountId,
+        usize,
+    ) -> BoxFuture<'a, Result<(), StoreError>>
+    + Send
+    + Sync;
+
 #[derive(Default)]
 pub(crate) struct MemoryAccountStore {
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
     quota_reads: AtomicUsize,
     fail_provider_listing: AtomicBool,
-    routing_cookies: Mutex<Vec<gateway_core::account::RoutingCookie>>,
-    turn_states: Mutex<BTreeMap<(String, String), gateway_core::account::TurnStateBucket>>,
-    turn_observations: Mutex<Vec<gateway_core::account::TurnStateObservation>>,
-    turn_proxies: Mutex<BTreeMap<String, gateway_core::account::OutboundProxy>>,
-    turn_notifications: Mutex<Vec<gateway_core::account::TurnStateNotification>>,
-    turn_notification_results: Mutex<Vec<bool>>,
+    credential_load_hook: Mutex<Option<Arc<CredentialLoadHook>>>,
+    credential_loads: AtomicUsize,
 }
 
 impl MemoryAccountStore {
-    pub(crate) fn seed_turn_notification(
-        &self,
-        notice: gateway_core::account::TurnStateNotification,
-    ) {
-        self.turn_notifications.lock().unwrap().push(notice);
-    }
-
-    pub(crate) fn turn_notification_results(&self) -> Vec<bool> {
-        self.turn_notification_results.lock().unwrap().clone()
-    }
-
-    pub(crate) fn seed_turn_proxy(&self, id: &str, proxy: gateway_core::account::OutboundProxy) {
-        self.turn_proxies
-            .lock()
-            .unwrap()
-            .insert(id.to_owned(), proxy);
-    }
-    pub(crate) fn seed_turn_state(
-        &self,
-        account: &str,
-        model: &str,
-        config: gateway_core::account::TurnStateConfig,
-    ) {
-        let identity = self.account(account);
-        self.turn_states.lock().unwrap().insert(
-            (account.to_owned(), model.to_owned()),
-            gateway_core::account::TurnStateBucket {
-                account_id: account.to_owned(),
-                upstream_account_id: identity
-                    .as_ref()
-                    .and_then(|account| account.upstream_account_id().map(str::to_owned)),
-                upstream_user_id: identity
-                    .as_ref()
-                    .and_then(|account| account.upstream_user_id().map(str::to_owned)),
-                model: model.to_owned(),
-                config,
-                routing_cookies: Vec::new(),
-                cookie_override_pod: None,
-                cookie_override_issued_at: None,
-                cookie_override_name: None,
-                cookie_override_value: None,
-                cookie_override_expires_at: None,
-                cookie_override_observation_id: None,
-                cookie_override_cflb_name: None,
-                cookie_override_cflb_value: None,
-                current: None,
-                current_issued_at: None,
-                current_expires_at: None,
-                installed_pair: None,
-                current_length: None,
-                candidate: None,
-                candidate_expires_at: None,
-                candidate_pair: None,
-                hunt_attempts: 0,
-                next_probe_at: None,
-                manual_probe_requested_at: None,
-                manual_override: false,
-                attached_model: None,
-            },
-        );
-    }
-
-    pub(crate) fn turn_observations(&self) -> Vec<gateway_core::account::TurnStateObservation> {
-        self.turn_observations.lock().unwrap().clone()
-    }
-
-    pub(crate) fn set_current_turn_state(
-        &self,
-        account: &str,
-        model: &str,
-        token: gateway_core::account::TurnStateToken,
-        manual: bool,
-    ) {
-        let mut states = self.turn_states.lock().unwrap();
-        let state = states
-            .get_mut(&(account.to_owned(), model.to_owned()))
-            .unwrap();
-        state.current_issued_at = Some(token.issued_at);
-        state.current_length = Some(token.value.len());
-        state.current = Some(token);
-        state.manual_override = manual;
-        state.attached_model = None;
-    }
-
-    pub(crate) fn set_installed_pair(
-        &self,
-        account: &str,
-        model: &str,
-        pair: gateway_core::account::RoutingCookie,
-    ) {
-        self.turn_states
-            .lock()
-            .unwrap()
-            .get_mut(&(account.to_owned(), model.to_owned()))
-            .unwrap()
-            .installed_pair = Some(pair);
-    }
-
-    pub(crate) fn request_turn_probe(&self, account: &str, model: &str) {
-        self.turn_states
-            .lock()
-            .unwrap()
-            .get_mut(&(account.to_owned(), model.to_owned()))
-            .unwrap()
-            .manual_probe_requested_at = Some(chrono::Utc::now().timestamp());
-    }
-
     pub(crate) fn repository(self: &Arc<Self>) -> CodexCredentialRepository {
         CodexCredentialRepository::new(self.clone())
     }
@@ -175,11 +72,26 @@ impl MemoryAccountStore {
             .expect("seed test OAuth credential");
     }
 
+    pub(crate) fn set_oauth_transport(
+        &self,
+        id: &str,
+        transport: provider_openai::credential::ResponsesTransport,
+    ) {
+        use provider_openai::credential::CodexCredentialCodec;
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .unwrap();
+        let mut data = CodexCredentialCodec::decode_complete(&stored.credential).unwrap();
+        data.oauth_mut().unwrap().transport = transport;
+        stored.credential = CodexCredentialCodec::encode_complete(data).unwrap();
+    }
+
     pub(crate) async fn seed_api_key(
         &self,
         id: &str,
         base_url: String,
-        transport: provider_openai::credential::ApiKeyTransport,
+        transport: provider_openai::credential::ResponsesTransport,
     ) {
         let credential = provider_openai::credential::CodexCredentialCodec::encode_complete(
             provider_openai::credential::CodexCredentialData::ApiKey(
@@ -225,16 +137,6 @@ impl MemoryAccountStore {
             .expect("account store lock")
             .get(&id)
             .map(|stored| stored.account.clone())
-    }
-
-    pub(crate) fn set_turn_state_override(&self, id: &str, value: Option<&str>) {
-        let id = ProviderAccountId::new(id).expect("valid account ID");
-        let mut accounts = self.accounts.lock().expect("account store lock");
-        let stored = accounts.get_mut(&id).expect("seeded account");
-        stored.account = stored
-            .account
-            .clone()
-            .with_turn_state_override(value.map(str::to_owned));
     }
 
     pub(crate) fn set_scheduling(
@@ -298,351 +200,21 @@ impl MemoryAccountStore {
     pub(crate) fn fail_provider_listing(&self) {
         self.fail_provider_listing.store(true, Ordering::SeqCst);
     }
+
+    pub(crate) fn on_credential_load(&self, hook: Arc<CredentialLoadHook>) {
+        *self
+            .credential_load_hook
+            .lock()
+            .expect("credential hook lock") = Some(hook);
+    }
+
+    pub(crate) fn credential_loads(&self) -> usize {
+        self.credential_loads.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl ProviderAccountStore for MemoryAccountStore {
-    async fn routing_cookies(
-        &self,
-    ) -> Result<Vec<gateway_core::account::RoutingCookie>, StoreError> {
-        Ok(self.routing_cookies.lock().unwrap().clone())
-    }
-    async fn observe_routing_cookie(
-        &self,
-        observation: gateway_core::account::RoutingCookieObservation,
-    ) -> Result<(), StoreError> {
-        let mut cookies = self.routing_cookies.lock().unwrap();
-        if let Some(sent) = &observation.sent
-            && (observation.deleted
-                || observation
-                    .received
-                    .as_ref()
-                    .is_some_and(|cookie| cookie.pod != sent.pod))
-        {
-            // 与 PG 实现一致：按 pair 全字段精确匹配，旧水位不得误删同 pod 的新凭据。
-            let same_pair = |cookie: &gateway_core::account::RoutingCookie| {
-                cookie.origin == sent.origin
-                    && cookie.pod == sent.pod
-                    && cookie.name == sent.name
-                    && cookie.value == sent.value
-                    && cookie.cflb_name == sent.cflb_name
-                    && cookie.cflb_value == sent.cflb_value
-                    && cookie.observed_at <= observation.observed_at
-            };
-            cookies.retain(|cookie| !same_pair(cookie));
-            // 桶上的安装位/候选位/固定位若还绑着这把 pair，连同票据正文一起摘除；
-            // 签发水位保留，调度置空以便尽快补打。
-            let sent = sent.clone();
-            for state in self.turn_states.lock().unwrap().values_mut() {
-                if state.installed_pair.as_ref().is_some_and(same_pair) {
-                    state.installed_pair = None;
-                    state.current = None;
-                    state.current_expires_at = None;
-                    state.attached_model = None;
-                    state.manual_override = false;
-                    state.next_probe_at = None;
-                }
-                if state.candidate_pair.as_ref().is_some_and(same_pair) {
-                    state.candidate = None;
-                    state.candidate_pair = None;
-                    state.candidate_expires_at = None;
-                }
-                if state.cookie_override_name.as_deref() == Some(sent.name.as_str())
-                    && state.cookie_override_value.as_deref() == Some(sent.value.as_str())
-                    && state
-                        .cookie_override_cflb_name
-                        .as_deref()
-                        .unwrap_or_default()
-                        == sent.cflb_name
-                    && state
-                        .cookie_override_cflb_value
-                        .as_deref()
-                        .unwrap_or_default()
-                        == sent.cflb_value
-                    && state
-                        .cookie_override_issued_at
-                        .is_none_or(|at| at * 1000 <= observation.observed_at)
-                {
-                    state.cookie_override_pod = None;
-                    state.cookie_override_issued_at = None;
-                    state.cookie_override_name = None;
-                    state.cookie_override_value = None;
-                    state.cookie_override_cflb_name = None;
-                    state.cookie_override_cflb_value = None;
-                    state.cookie_override_expires_at = None;
-                    state.cookie_override_observation_id = None;
-                }
-            }
-        }
-        if !observation.deleted
-            && let Some(mut cookie) = observation.received.or(observation.sent)
-            && let Some(model) = observation.reported_model
-        {
-            cookie.reported_model = model;
-            cookie.observed_at = observation.observed_at;
-            // 与生产存储一致：池里只保留完整 pair。
-            if cookie.has_pair() {
-                cookies.retain(|old| old.origin != cookie.origin || old.pod != cookie.pod);
-                cookies.push(cookie);
-            }
-        }
-        Ok(())
-    }
-
-    async fn claim_turn_state_notifications(
-        &self,
-    ) -> Result<Vec<gateway_core::account::TurnStateNotification>, StoreError> {
-        Ok(std::mem::take(
-            &mut *self.turn_notifications.lock().unwrap(),
-        ))
-    }
-
-    async fn finish_turn_state_notification(
-        &self,
-        _account: &ProviderAccountId,
-        _model: &str,
-        _issued_at: i64,
-        delivered: bool,
-    ) -> Result<(), StoreError> {
-        self.turn_notification_results
-            .lock()
-            .unwrap()
-            .push(delivered);
-        Ok(())
-    }
-
-    async fn claim_turn_state_probe(
-        &self,
-        account: &ProviderAccountId,
-        model: &str,
-    ) -> Result<bool, StoreError> {
-        Ok(self
-            .turn_states
-            .lock()
-            .unwrap()
-            .get_mut(&(account.as_str().to_owned(), model.to_owned()))
-            .is_some_and(|state| state.manual_probe_requested_at.take().is_some()))
-    }
-
-    async fn schedule_turn_state(
-        &self,
-        account: &ProviderAccountId,
-        model: &str,
-        next_probe_at: i64,
-    ) -> Result<(), StoreError> {
-        if let Some(state) = self
-            .turn_states
-            .lock()
-            .unwrap()
-            .get_mut(&(account.as_str().to_owned(), model.to_owned()))
-        {
-            state.next_probe_at = Some(next_probe_at);
-        }
-        Ok(())
-    }
-    async fn turn_state_proxies(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<gateway_core::account::OutboundProxy>, StoreError> {
-        let proxies = self.turn_proxies.lock().unwrap();
-        Ok(ids
-            .iter()
-            .filter_map(|id| proxies.get(id).cloned())
-            .collect())
-    }
-    async fn turn_state_buckets(
-        &self,
-    ) -> Result<Vec<gateway_core::account::TurnStateBucket>, StoreError> {
-        let cookies = self.routing_cookies.lock().unwrap().clone();
-        Ok(self
-            .turn_states
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .map(|mut bucket| {
-                bucket.routing_cookies = cookies.clone();
-                bucket
-            })
-            .collect())
-    }
-
-    async fn turn_state_bucket(
-        &self,
-        account: &ProviderAccountId,
-        model: &str,
-    ) -> Result<Option<gateway_core::account::TurnStateBucket>, StoreError> {
-        Ok(self
-            .turn_states
-            .lock()
-            .unwrap()
-            .get(&(account.as_str().to_owned(), model.to_owned()))
-            .cloned()
-            .map(|mut bucket| {
-                bucket.routing_cookies = self.routing_cookies.lock().unwrap().clone();
-                bucket
-            }))
-    }
-
-    async fn observe_turn_state(
-        &self,
-        observation: gateway_core::account::TurnStateObservation,
-        candidate: Option<gateway_core::account::TurnStateToken>,
-    ) -> Result<(), StoreError> {
-        if self
-            .account(&observation.account_id)
-            .is_none_or(|account| !account.enabled())
-        {
-            return Ok(());
-        }
-        let mut states = self.turn_states.lock().unwrap();
-        // 与 PG 实现一致：未托管桶仍记录带路由 Cookie 的观测。
-        let mut record = observation.probe_trigger.as_deref() == Some("manual")
-            || observation.cookie_value.is_some();
-        if let Some(state) =
-            states.get_mut(&(observation.account_id.clone(), observation.model.clone()))
-        {
-            record |= state.config.enabled || state.config.cookie_lock_enabled;
-            // 与 PG 实现一致：云端打票也计主动尝试。
-            if (observation.source == "probe" && observation.probe_id.is_some())
-                || observation.source == "cloud_mint"
-            {
-                state.hunt_attempts += 1;
-            }
-            // 与生产存储一致：候选槽只收命中目标长度的票，非目标票正文只留在观测记录里。
-            // 需要路由 pair 的模式必须带完整 pair；mint 票按有效期限判断新鲜度。
-            let pair = observation
-                .pair
-                .clone()
-                .filter(|pair| !state.config.requires_route_pair() || pair.has_pair());
-            if let Some(candidate) = candidate.filter(|token| {
-                (!state.config.requires_route_pair() || pair.is_some())
-                    && token.value.len() == state.config.target_length
-                    && token.live(
-                        chrono::Utc::now().timestamp(),
-                        state.config.ttl_seconds,
-                        observation.expires_at,
-                    )
-                    && token.is_newer_than(state.current_issued_at)
-                    && token.is_newer_than(state.candidate.as_ref().map(|old| old.issued_at))
-            }) {
-                state.candidate_pair = pair;
-                state.candidate_expires_at = observation.expires_at;
-                state.candidate = Some(candidate);
-            }
-        }
-        if record {
-            self.turn_observations.lock().unwrap().push(observation);
-        }
-        Ok(())
-    }
-
-    async fn install_turn_state(
-        &self,
-        account: &ProviderAccountId,
-        model: &str,
-    ) -> Result<bool, StoreError> {
-        if self
-            .account(account.as_str())
-            .is_none_or(|account| !account.enabled())
-        {
-            return Ok(false);
-        }
-        let mut states = self.turn_states.lock().unwrap();
-        let Some(state) = states.get_mut(&(account.as_str().to_owned(), model.to_owned())) else {
-            return Ok(false);
-        };
-        if !state.config.enabled {
-            return Ok(false);
-        }
-        // 长度等条件不满足时保留候选，与生产 UPDATE 未命中不动候选的行为一致。
-        // 需要路由 pair 的模式要求候选带完整 pair；有效期限以记录到期点为准。
-        let installable = state.candidate.as_ref().is_some_and(|token| {
-            token.value.len() == state.config.target_length
-                && token.is_newer_than(state.current_issued_at)
-                && token.live(
-                    chrono::Utc::now().timestamp(),
-                    state.config.ttl_seconds,
-                    state.candidate_expires_at,
-                )
-                && (!state.config.requires_route_pair()
-                    || state
-                        .candidate_pair
-                        .as_ref()
-                        .is_some_and(|pair| pair.has_pair()))
-        });
-        let Some(candidate) = installable.then(|| state.candidate.take()).flatten() else {
-            return Ok(false);
-        };
-        state.installed_pair = state.candidate_pair.take();
-        state.current_expires_at = state.candidate_expires_at.take();
-        let reported = self
-            .turn_observations
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|item| {
-                item.account_id == account.as_str()
-                    && item.model == model
-                    && item.token.as_deref() == Some(candidate.value.as_str())
-            })
-            .and_then(|item| item.reported_model.clone());
-        state.current_issued_at = Some(candidate.issued_at);
-        state.current_length = Some(candidate.value.len());
-        state.current = Some(candidate);
-        state.hunt_attempts = 0;
-        state.attached_model = reported;
-        Ok(true)
-    }
-
-    async fn observe_installed_model(
-        &self,
-        account: &ProviderAccountId,
-        model: &str,
-        sent_state: &str,
-        reported_model: &str,
-        revoke_on_change: bool,
-        sent_cookie: Option<&gateway_core::account::RoutingCookie>,
-    ) -> Result<bool, StoreError> {
-        if reported_model.is_empty() || reported_model.len() > 256 {
-            return Ok(false);
-        }
-        let mut states = self.turn_states.lock().unwrap();
-        let Some(state) = states.get_mut(&(account.as_str().to_owned(), model.to_owned())) else {
-            return Ok(false);
-        };
-        if state.current.as_ref().map(|token| token.value.as_str()) != Some(sent_state) {
-            return Ok(false);
-        }
-        // 与生产实现一致：上报模型与请求模型不一致才作废；否则记录实际模型。
-        if reported_model.eq_ignore_ascii_case(model) || !revoke_on_change {
-            state.attached_model = Some(reported_model.to_owned());
-            return Ok(false);
-        }
-        state.current = None;
-        state.installed_pair = None;
-        state.current_expires_at = None;
-        state.manual_override = false;
-        state.next_probe_at = None;
-        state.attached_model = None;
-        if let Some(sent) = sent_cookie
-            && state.cookie_override_name.as_deref() == Some(sent.name.as_str())
-            && state.cookie_override_value.as_deref() == Some(sent.value.as_str())
-            && state.cookie_override_cflb_value.as_deref() == Some(sent.cflb_value.as_str())
-        {
-            state.cookie_override_pod = None;
-            state.cookie_override_issued_at = None;
-            state.cookie_override_name = None;
-            state.cookie_override_value = None;
-            state.cookie_override_cflb_name = None;
-            state.cookie_override_cflb_value = None;
-            state.cookie_override_expires_at = None;
-            state.cookie_override_observation_id = None;
-        }
-        Ok(true)
-    }
-
     async fn create_account(&self, input: NewProviderAccount) -> Result<(), StoreError> {
         let mut accounts = self.accounts.lock().expect("account store lock");
         if accounts.contains_key(input.account.id()) {
@@ -730,6 +302,16 @@ impl ProviderAccountStore for MemoryAccountStore {
         account: &ProviderAccountId,
         expected_revision: CredentialRevision,
     ) -> Result<LoadedCredential, StoreError> {
+        let count = self.credential_loads.fetch_add(1, Ordering::SeqCst) + 1;
+        let hook = self
+            .credential_load_hook
+            .lock()
+            .expect("credential hook lock")
+            .clone();
+        // 在列表快照与凭据读取之间确定性提交并发变更，不依赖线程调度或延时。
+        if let Some(hook) = hook {
+            hook(self, account, count).await?;
+        }
         let loaded = self.load_current_credential(account).await?;
         if loaded.account.revision() != expected_revision {
             return Err(store_error(StoreErrorKind::Conflict));
@@ -1073,6 +655,7 @@ pub(crate) struct TestLeaseCoordinator {
     pub(crate) requests: Mutex<Vec<ProviderSchedulingLeaseRequest>>,
     pub(crate) busy: Mutex<bool>,
     pub(crate) busy_accounts: Mutex<BTreeSet<ProviderAccountId>>,
+    pub(crate) signals: Mutex<BTreeMap<ProviderAccountId, AccountRuntimeSignals>>,
     round_robin_cursor: Mutex<u64>,
 }
 
@@ -1082,26 +665,26 @@ impl ProviderLeasePort for TestLeaseCoordinator {
         _client_api_key_id: &'a ClientApiKeyId,
         _provider_kind: &'a ProviderKind,
         accounts: &'a [ProviderAccountId],
-        _signal_channels: &'a [gateway_core::routing::UpstreamChannel],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
+            let overrides = self.signals.lock().expect("scheduling signals lock");
             let signals = accounts
                 .iter()
-                .cloned()
                 .map(|account| {
                     (
-                        account,
-                        AccountRuntimeSignals {
-                            turn_state: Default::default(),
-                            in_flight: 0,
-                            bps_in_flight: 0,
-                            last_started_at: None,
-                            quota_reset_at: None,
-                            quota_remaining_rank: None,
-                            cooldown: None,
-                            failure_rate_basis_points: None,
-                            first_output_latency_ms: None,
-                        },
+                        account.clone(),
+                        overrides
+                            .get(account)
+                            .cloned()
+                            .unwrap_or(AccountRuntimeSignals {
+                                in_flight: 0,
+                                last_started_at: None,
+                                quota_reset_at: None,
+                                quota_remaining_rank: None,
+                                cooldown: None,
+                                failure_rate_basis_points: None,
+                                first_output_latency_ms: None,
+                            }),
                     )
                 })
                 .collect();

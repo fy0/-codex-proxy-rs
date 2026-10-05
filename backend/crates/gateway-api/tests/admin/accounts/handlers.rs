@@ -8,97 +8,195 @@ use tower::ServiceExt as _;
 use super::super::{AdminTestFixture, AdminTestState};
 
 #[tokio::test]
-async fn turn_state_copy_and_preview_require_admin_and_never_cache_responses() {
+async fn account_cooldown_returns_an_instant_and_server_formatted_recovery() {
+    use chrono::{DateTime, Duration, Utc};
+    use gateway_admin::model::{
+        Revision,
+        accounts::{AccountCapacity, AccountPageItem, AccountRecord},
+    };
+    use gateway_core::account::{
+        AccountCooldown, AccountCooldownKind, AccountStatusFacts, CredentialState, QuotaState,
+        resolve_account_status,
+    };
+
+    for zone in ["Asia/Shanghai", "UTC", "Asia/Kathmandu", "America/New_York"] {
+        let zone = zone
+            .parse::<gateway_core::time::DeploymentTimeZone>()
+            .unwrap();
+        let fixture = AdminTestFixture::with_timezone(zone).await;
+        fixture.auth.insert_session("valid-session");
+        for (seconds, kind, expected) in [
+            (
+                Some(1200),
+                AccountCooldownKind::RateLimit,
+                Some("剩余 20 分钟"),
+            ),
+            (
+                Some(7200),
+                AccountCooldownKind::CapacityFreeze,
+                Some("剩余 2 小时"),
+            ),
+            (
+                Some(7500),
+                AccountCooldownKind::CapacityFreezeProbe,
+                Some("剩余 2 小时 5 分"),
+            ),
+            (
+                Some(-60),
+                AccountCooldownKind::CapacityFreezeProbe,
+                Some("等待探测成功"),
+            ),
+            (Some(20), AccountCooldownKind::RateLimit, None),
+            (None, AccountCooldownKind::RateLimit, None),
+        ] {
+            let now = Utc::now();
+            let until = seconds.map(|seconds| now + Duration::seconds(seconds));
+            let facts = AccountStatusFacts {
+                enabled: true,
+                credential_state: CredentialState::Ready,
+                access_token_expires_at: None,
+                quota: QuotaState::unknown(),
+                cooldown: until.map(|until| AccountCooldown {
+                    until: until.into(),
+                    kind,
+                }),
+                last_error_reason: None,
+                last_error_message: None,
+            };
+            *fixture.account.lock().unwrap() = Some(AccountPageItem {
+                account: AccountRecord {
+                    id: "acct_cooldown".to_owned(),
+                    provider_kind: gateway_core::routing::ProviderKind::new("openai").unwrap(),
+                    groups: Vec::new(),
+                    name: "synthetic cooldown account".to_owned(),
+                    notes: None,
+                    email: None,
+                    upstream_user_id: None,
+                    upstream_account_id: None,
+                    plan_type: None,
+                    authentication_kind: "oauth".to_owned(),
+                    credential_revision: Revision::new(1).unwrap(),
+                    has_refresh_token: true,
+                    access_token_expires_at: None,
+                    next_refresh_at: None,
+                    enabled: true,
+                    concurrency_limit: None,
+                    weight: Default::default(),
+                    model_access: Default::default(),
+                    outbound_proxy: None,
+                    credential_state: facts.credential_state,
+                    credential_observed_at: now,
+                    quota: facts.quota,
+                    last_error_reason: None,
+                    last_error_message: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+                capacity: AccountCapacity {
+                    used_slots: None,
+                    total_slots: None,
+                },
+                projection: resolve_account_status(&facts, now.into()),
+            });
+            let response = admin::accounts::router::<AdminTestState>()
+                .with_state(fixture.state())
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/admin/accounts")
+                        .header("x-request-id", "req_cooldown_timezone")
+                        .header(header::COOKIE, "cpr_session=valid-session")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 32768).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let quota = &value["data"]["items"][0]["quota"];
+            match until {
+                Some(until) => {
+                    assert_eq!(
+                        DateTime::parse_from_rfc3339(quota["rateLimitedUntil"].as_str().unwrap())
+                            .unwrap()
+                            .to_utc(),
+                        until
+                    );
+                    let expected = expected.map(str::to_owned).unwrap_or_else(|| {
+                        zone.local(until).format("%Y-%m-%d %H:%M:%S").to_string()
+                    });
+                    assert_eq!(quota["rateLimitRecoveryDisplay"], expected);
+                }
+                None => {
+                    assert!(quota["rateLimitedUntil"].is_null());
+                    assert!(quota["rateLimitRecoveryDisplay"].is_null());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn standalone_credential_rotation_route_is_not_exposed() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
-    for (path, body, authenticated, expected) in [
-        (
-            "remove",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000}"#,
-            false,
-            StatusCode::UNAUTHORIZED,
-        ),
-        (
-            "remove",
-            r#"{"accountId":"invalid","model":"model-a","issuedAt":1800000000}"#,
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "remove",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"enabled":true}"#,
-            true,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-        (
-            "copy",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000}"#,
-            false,
-            StatusCode::UNAUTHORIZED,
-        ),
-        (
-            "preview",
-            r#"{"config":{}}"#,
-            false,
-            StatusCode::UNAUTHORIZED,
-        ),
-        (
-            "copy",
-            r#"{"accountId":"invalid","model":"model-a","issuedAt":1800000000}"#,
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "copy",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"value":"not-accepted"}"#,
-            true,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-        (
-            "copy",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"observationId":"9223372036854775808"}"#,
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "apply",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"observationId":"0"}"#,
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "remove",
-            r#"{"accountId":"acct_test","model":"model-a","issuedAt":1800000000,"observationId":"1"}"#,
-            true,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-        (
-            "preview",
-            r#"{"config":{"timezone":"not-a-timezone"}}"#,
-            true,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-        (
-            "preview",
-            r#"{"config":{"targetLength":1}}"#,
-            true,
-            StatusCode::BAD_REQUEST,
-        ),
+    let response = admin::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/accounts/rotate")
+                .header(header::COOKIE, "cpr_session=valid-session")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn connection_update_requires_admin_and_validates_before_calling_the_service() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let input = serde_json::json!({
+        "accountId":"acct_api",
+        "enabled":true,
+        "concurrencyLimit":null,
+        "weight":1,
+        "groupIds":[],
+        "connection":{"baseUrl":"https://api.example.invalid/v1", "transport":"http"}
+    });
+    for (authenticated, transport, oauth, expected) in [
+        (false, "http", false, StatusCode::UNAUTHORIZED),
+        (true, "invalid", false, StatusCode::BAD_REQUEST),
+        // 夹具没有凭据 Store，合法输入必须进入服务，不能按普通设置静默保存。
+        (true, "http", false, StatusCode::SERVICE_UNAVAILABLE),
+        (true, "http", true, StatusCode::SERVICE_UNAVAILABLE),
     ] {
+        let mut input = input.clone();
+        input["connection"]["transport"] = serde_json::json!(transport);
+        if oauth {
+            input["connection"]
+                .as_object_mut()
+                .unwrap()
+                .remove("baseUrl");
+        }
         let mut request = Request::builder()
             .method("POST")
-            .uri(format!("/api/admin/accounts/turn-state/{path}"))
-            .header("x-request-id", "req_turn_state_controls")
-            .header(header::CONTENT_TYPE, "application/json");
+            .uri("/api/admin/accounts/update")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-request-id", "req_connection_update");
         if authenticated {
             request = request.header(header::COOKIE, "cpr_session=valid-session");
         }
         let response = admin::router::<AdminTestState>()
             .with_state(fixture.state())
-            .oneshot(request.body(Body::from(body)).unwrap())
+            .oneshot(request.body(Body::from(input.to_string())).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), expected, "{path}: {body}");
+        assert_eq!(response.status(), expected);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     }
 }

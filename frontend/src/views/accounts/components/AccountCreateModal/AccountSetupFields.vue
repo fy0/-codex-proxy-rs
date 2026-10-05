@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import type { AccountCreateForm } from './model'
 import type { AccountGroup } from '@/api'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import { BaseFormItem, BaseTextarea } from '@codex-proxy/ui'
 import AccountSettingsFields from '../AccountSettingsFields.vue'
 import AccountProviderChooser from './AccountProviderChooser.vue'
 
@@ -21,7 +20,7 @@ const form = defineModel<AccountCreateForm>({ required: true })
       <legend class="mb-3 p-0 text-cp font-medium text-cp-text-secondary">
         账号平台
       </legend>
-      <AccountProviderChooser :selected="form.provider" :disabled="disabled" @select="form.provider = $event" />
+      <AccountProviderChooser v-model="form.source" :disabled="disabled" />
     </fieldset>
     <AccountSettingsFields
       v-model:enabled="form.enabled"
@@ -43,7 +42,7 @@ const form = defineModel<AccountCreateForm>({ required: true })
         v-model="form.notes"
         :rows="3"
         :maxlength="500"
-        placeholder="最多 500 字，可不填。"
+        placeholder="最多 500 字，可不填"
         :disabled="disabled"
       />
     </BaseFormItem>

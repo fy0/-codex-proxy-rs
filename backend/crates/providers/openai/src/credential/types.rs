@@ -279,12 +279,36 @@ impl fmt::Debug for CodexCookie {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesTransport {
+    #[default]
+    Http,
+    PreferWebsocket,
+}
+
+impl ResponsesTransport {
+    pub(crate) const fn oauth_default() -> Self {
+        Self::PreferWebsocket
+    }
+
+    fn is_oauth_default(&self) -> bool {
+        *self == Self::oauth_default()
+    }
+}
+
 pub const CODEX_AUTHENTICATION_KIND_OAUTH: &str = "oauth";
 
 /// Codex OAuth 对 `provider_credentials_json` 的完整明文 schema。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodexOAuthCredentialData {
+    // 默认值不扩展旧凭据 JSON，恢复 WS 优先后仍可由旧版本读取。
+    #[serde(
+        default = "ResponsesTransport::oauth_default",
+        skip_serializing_if = "ResponsesTransport::is_oauth_default"
+    )]
+    pub transport: ResponsesTransport,
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<CodexCredentialPrincipal>,

@@ -2,17 +2,15 @@
 import type { EChartsOption, LineSeriesOption } from 'echarts'
 import type { getUsageRecordInsightsOverview } from '@/api'
 
+import { BaseCard, BaseEmpty, BaseSegmented } from '@codex-proxy/ui'
 import { computed, shallowRef } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import {
   requestActivityByBucket,
   zeroInactiveValues,
 } from '@/components/charts/timeSeriesGap'
 import { useChartPalette } from '@/composables/useChartPalette'
-import { formatLocalizedCompactNumber as formatCompactNumber } from '@/utils/number'
+import { formatLocalizedCompactNumber as formatCompactNumber } from '@/utils/format'
 
 import {
   tooltipIndex,

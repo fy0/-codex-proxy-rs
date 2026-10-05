@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { RefreshCw, Search } from '@lucide/vue'
+import { BaseIconButton, BaseInput } from '@codex-proxy/ui'
 
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
+import { RefreshCw, Search } from '@lucide/vue'
 
 defineProps<{
   refreshing: boolean

@@ -13,6 +13,11 @@ const REMOVED_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 async fn browser_origin_controls_http_admin_sessions_without_configuration() {
     use axum::body::to_bytes;
     use serde_json::{Value, json};
+    let app = api_router_with_origins(ModelsExecution::new(), Vec::new())
+        .await
+        .layer(axum::Extension(axum::extract::ConnectInfo(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
+        )));
     for (origins, secure) in [
         (vec!["http://admin.example.test"], false),
         (vec!["http://192.0.2.1:8080"], false),
@@ -29,11 +34,6 @@ async fn browser_origin_controls_http_admin_sessions_without_configuration() {
             true,
         ),
     ] {
-        let app = api_router_with_origins(ModelsExecution::new(), Vec::new())
-            .await
-            .layer(axum::Extension(axum::extract::ConnectInfo(
-                std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
-            )));
         let request = |path: &str| {
             let mut builder = Request::post(path)
                 .header("content-type", "application/json")
@@ -99,6 +99,7 @@ async fn browser_origin_controls_http_admin_sessions_without_configuration() {
         }
 
         let response = app
+            .clone()
             .oneshot(
                 Request::get("/api/auth/status")
                     .header("cookie", &session)

@@ -1,25 +1,16 @@
 <script setup lang="ts">
-import type { OutboundProxyRecord } from '@/api'
+import type { OutboundProxyRecord, OutboundProxyTest } from '@/api'
+import { BaseButton, BaseCard, BaseConfirmModal, BaseIconButton, BaseInput, BasePageHeader, BaseTable, BaseTablePagination, defineTableColumns, toast } from '@codex-proxy/ui'
 import { LockKeyhole, MapPin, Pencil, Plus, Search, Trash2, Users, Wifi } from '@lucide/vue'
 import { watchDebounced } from '@vueuse/core'
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { createProxy, deleteProxy, getProxies, probeProxy, testProxy, updateProxy } from '@/api'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BasePageHeader from '@/components/base/BasePageHeader.vue'
-import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
-import { defineTableColumns } from '@/components/base/BaseTable/columns'
-import BaseTable from '@/components/base/BaseTable/index.vue'
-import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { usePagedQuery } from '@/composables/usePagedQuery'
-import { formatDateTime } from '@/utils/date'
-import { normalizeRequestLocation, requestLocationError } from '@/utils/request-location'
+import { normalizeRequestLocation, requestLocationError } from '@/utils/data'
 import ProxyAccountsModal from './components/ProxyAccountsModal.vue'
 import ProxyFormModal from './components/ProxyFormModal.vue'
+import { effectiveProxyLocation } from './utils/location'
 
 const search = shallowRef('')
 const query = usePagedQuery({
@@ -45,6 +36,7 @@ const form = reactive({
   customLocation: false,
   location: { country: '', region: '', city: '', timezone: '' },
 })
+const formTestResult = shallowRef<OutboundProxyTest | null>(null)
 const saveAction = useAsyncAction()
 const { loading: saving } = saveAction
 const deleteAction = useAsyncAction()
@@ -54,6 +46,8 @@ const pendingDelete = shallowRef<OutboundProxyRecord | null>(null)
 const testingIds = ref(new Set<string>())
 const formTestAction = useAsyncAction()
 const testingForm = computed(() => formTestAction.loading.value || (editing.value !== null && testingIds.value.has(editing.value.id)))
+const detectingLocation = shallowRef(false)
+const testingConnection = computed(() => testingForm.value && !detectingLocation.value)
 const showAccounts = shallowRef(false)
 const inspected = shallowRef<OutboundProxyRecord | null>(null)
 
@@ -61,8 +55,10 @@ function openForm(proxy: OutboundProxyRecord | null = null) {
   editing.value = proxy
   form.name = proxy?.name ?? ''
   form.proxyUrl = ''
-  form.customLocation = proxy?.location != null
-  form.location = proxy?.location ? { ...proxy.location } : { country: '', region: '', city: '', timezone: '' }
+  formTestResult.value = null
+  const currentLocation = proxy?.autoLocation ? proxy.detectedLocation?.location ?? proxy.location : proxy?.location
+  form.customLocation = currentLocation != null
+  form.location = currentLocation ? { ...currentLocation } : { country: '', region: '', city: '', timezone: '' }
   showForm.value = true
 }
 
@@ -72,7 +68,13 @@ async function checkProxy(proxy: OutboundProxyRecord) {
   testingIds.value.add(proxy.id)
   try {
     const result = await testProxy({ id: proxy.id, revision: proxy.revision })
-    if (result.lastTest?.success)
+    if (editing.value?.id === result.id) {
+      editing.value = result
+      formTestResult.value = result.lastTest
+    }
+    if (result.lastTest?.success === false)
+      toast.error(`${result.name}：${result.lastTest.message}`)
+    else if (result.lastTest?.success)
       toast.success(`${result.name}：连接成功`)
     else
       toast.error(result.lastTest?.message ?? '代理测试失败')
@@ -98,12 +100,62 @@ async function testConnection() {
   }
   await formTestAction.run(async () => {
     // 新地址只做探测，保存前不修改代理及关联账号的连接配置。
-    const result = await probeProxy({ proxyUrl })
-    if (result.success)
-      toast.success(`连接成功，耗时 ${result.latencyMs} ms`)
-    else
+    const result = await probeProxy({ proxyUrl, detectLocation: false })
+    formTestResult.value = result
+    if (!result.success)
       toast.error(result.message)
+    else
+      toast.success(`连接成功，耗时 ${result.latencyMs} ms`)
   })
+}
+
+async function detectLocation() {
+  if (saving.value || testingForm.value)
+    return
+  const proxyUrl = form.proxyUrl.trim()
+  if (!proxyUrl && !editing.value) {
+    toast.warning('请填写代理连接地址')
+    return
+  }
+  detectingLocation.value = true
+  try {
+    await formTestAction.run(async () => {
+      let result: OutboundProxyTest | null
+      if (proxyUrl) {
+        // 新地址只解析草稿，不修改已保存代理或账号绑定。
+        result = await probeProxy({ proxyUrl, detectLocation: true })
+      }
+      else {
+        const proxy = editing.value!
+        const updated = await testProxy({ id: proxy.id, revision: proxy.revision, detectLocation: true })
+        editing.value = updated
+        result = updated.lastTest
+        await query.execute({ silent: true })
+      }
+      formTestResult.value = result
+      if (!result?.success) {
+        toast.error(result?.message ?? '代理连接失败，未能解析位置')
+        return
+      }
+      if (result.location.status === 'detected') {
+        form.location = { ...result.location.location }
+        form.customLocation = true
+        toast.success('已填入出口位置')
+      }
+      else if (result.location.status === 'conflict') {
+        toast.warning('IPv4 与 IPv6 出口时区不一致，请手动填写')
+      }
+      else if (result.location.status === 'failed') {
+        toast.warning(result.location.message)
+      }
+      else {
+        toast.warning('未获取到出口位置')
+      }
+    })
+  }
+  finally {
+    detectingLocation.value = false
+  }
 }
 
 async function save() {
@@ -115,9 +167,7 @@ async function save() {
     toast.warning('请填写代理名称和连接地址')
     return
   }
-  const location = form.customLocation
-    ? normalizeRequestLocation(form.location)
-    : null
+  const location = form.customLocation ? normalizeRequestLocation(form.location) : null
   const locationError = location ? requestLocationError(location) : ''
   if (locationError) {
     toast.warning(locationError)
@@ -130,16 +180,17 @@ async function save() {
           id: editing.value.id,
           revision: editing.value.revision,
           name,
+          autoLocation: false,
           proxyUrl: proxyUrl || undefined,
           location,
         })
       : createProxy({
           name,
+          autoLocation: false,
           proxyUrl,
           location,
         }))
     showForm.value = false
-    form.proxyUrl = ''
     toast.success('代理已保存')
     search.value = ''
     query.page.value = 1
@@ -174,11 +225,14 @@ function setPageSize(size: number) {
   setPage(1)
 }
 
-watch(showForm, (open) => {
-  if (!open) {
-    form.proxyUrl = ''
-  }
+watch(() => form.proxyUrl, () => {
+  formTestResult.value = null
 })
+
+function clearCredentials() {
+  form.proxyUrl = ''
+}
+
 watchDebounced(search, () => setPage(1), { debounce: 300 })
 onMounted(() => void query.execute())
 </script>
@@ -212,7 +266,7 @@ onMounted(() => void query.execute())
         <div class="flex h-full min-h-0 flex-col">
           <BaseTable class="min-h-0 flex-1" :columns="columns" :rows="proxies" :loading="loading" :empty-text="search.trim() ? '没有找到匹配的代理，请尝试其他名称' : '暂无代理，请点击新增代理添加'">
             <template #name="{ row }">
-              <strong class="block truncate text-cp text-cp-text" :title="row.name">{{ row.name }}</strong>
+              <span class="block truncate text-cp text-cp-text" :title="row.name">{{ row.name }}</span>
             </template>
             <template #address="{ row }">
               <div class="grid min-w-0 gap-1">
@@ -220,9 +274,9 @@ onMounted(() => void query.execute())
                   <LockKeyhole v-if="row.hasAuthentication" class="size-3 shrink-0" aria-label="已保存代理认证" />
                   <span class="truncate font-mono" :title="row.endpoint">{{ row.endpoint }}</span>
                 </span>
-                <span v-if="row.location" class="flex min-w-0 items-center gap-1 text-cp-xs text-cp-text-secondary" :title="`${row.location.country} / ${row.location.region} / ${row.location.city} · ${row.location.timezone}`">
+                <span v-if="effectiveProxyLocation(row)" class="flex min-w-0 items-center gap-1 text-cp-xs text-cp-text-secondary">
                   <MapPin class="size-3 shrink-0" aria-hidden="true" />
-                  <span class="truncate">{{ row.location.city }} · {{ row.location.timezone }}</span>
+                  <span class="truncate" :title="`${effectiveProxyLocation(row)?.city} · ${effectiveProxyLocation(row)?.timezone}`">{{ effectiveProxyLocation(row)?.city }} · {{ effectiveProxyLocation(row)?.timezone }}</span>
                 </span>
               </div>
             </template>
@@ -259,7 +313,7 @@ onMounted(() => void query.execute())
               </button>
             </template>
             <template #testedAt="{ row }">
-              {{ row.lastTestAt ? formatDateTime(row.lastTestAt) : '-' }}
+              {{ row.lastTestAtDisplay ?? '-' }}
             </template>
             <template #actions="{ row }">
               <div class="flex items-center gap-1">
@@ -286,11 +340,15 @@ onMounted(() => void query.execute())
       v-model:proxy-url="form.proxyUrl"
       v-model:custom-location="form.customLocation"
       v-model:location="form.location"
+      :test-result="formTestResult"
       :proxy="editing"
       :saving="saving"
-      :testing="testingForm"
+      :testing-connection="testingConnection"
+      :detecting-location="detectingLocation"
       @save="save"
       @test="testConnection"
+      @detect-location="detectLocation"
+      @after-leave="clearCredentials"
     />
     <BaseConfirmModal v-model="showDelete" title="删除代理" destructive :loading="deleting" @confirm="confirmDelete">
       <p class="m-0">

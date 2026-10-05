@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { RotateCcw } from '@lucide/vue'
+import { BaseIconButton, BaseNumberInput, BaseRange } from '@codex-proxy/ui'
 
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseNumberInput from '@/components/base/BaseNumberInput.vue'
-import BaseRange from '@/components/base/BaseRange.vue'
+import { RotateCcw } from '@lucide/vue'
 
 defineProps<{
   label: string

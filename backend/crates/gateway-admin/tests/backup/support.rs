@@ -14,9 +14,9 @@ use gateway_admin::{
         auth::AdminAuditEvent,
         backup::{
             BackupError, BackupObjectMetadata, BackupRecord, BackupRecordListQuery,
-            BackupRecordPage, BackupRecordSeed, BackupSettings, BackupStatus, BackupStorageConfig,
-            BackupTriggerKind, ConnectionTestResult, UpdateBackupScheduleCommand,
-            UpdateBackupStorageCommand,
+            BackupRecordPage, BackupRecordSeed, BackupSettings, BackupStatus,
+            BackupStatusTransition, BackupStorageConfig, BackupTriggerKind, ConnectionTestResult,
+            UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
         },
     },
     ports::{
@@ -166,11 +166,12 @@ impl BackupRepository for FakeBackupRepository {
         command: UpdateBackupScheduleCommand,
         next_run_at: Option<DateTime<Utc>>,
         _context: &MutationContext,
+        timezone: gateway_core::time::DeploymentTimeZone,
     ) -> AdminStoreResult<BackupSettings> {
         let mut settings = self.settings.lock().expect("settings");
         settings.schedule_enabled = command.schedule_enabled;
         settings.cron_expression = Some(command.cron_expression);
-        settings.schedule_timezone = Some(command.schedule_timezone);
+        settings.schedule_timezone = Some(timezone.name().to_owned());
         settings.retention_days = command.retention_days;
         settings.retention_count = command.retention_count;
         settings.next_run_at = next_run_at;
@@ -205,7 +206,23 @@ impl BackupRepository for FakeBackupRepository {
         Ok(record)
     }
 
-    async fn insert_scheduled_record(&self, seed: BackupRecordSeed) -> AdminStoreResult<bool> {
+    async fn insert_scheduled_record(
+        &self,
+        seed: BackupRecordSeed,
+        next_run_at: Option<DateTime<Utc>>,
+        expected_cron: &str,
+        expected_timezone: &str,
+        expected_next_run_at: Option<DateTime<Utc>>,
+    ) -> AdminStoreResult<bool> {
+        let mut settings = self.settings.lock().expect("settings");
+        if !settings.schedule_enabled
+            || settings.cron_expression.as_deref() != Some(expected_cron)
+            || settings.schedule_timezone.as_deref() != Some(expected_timezone)
+            || settings.next_run_at != expected_next_run_at
+        {
+            return Ok(false);
+        }
+        settings.next_run_at = next_run_at;
         let mut records = self.records.lock().expect("records");
         if records.iter().any(|record| record.status.is_active())
             || records.iter().any(|record| {
@@ -330,19 +347,18 @@ impl BackupRepository for FakeBackupRepository {
     async fn transition_status(
         &self,
         id: &str,
-        from: BackupStatus,
-        to: BackupStatus,
+        transition: BackupStatusTransition,
         update: StatusTransitionUpdate,
         now: DateTime<Utc>,
     ) -> AdminStoreResult<Option<BackupRecord>> {
         let mut records = self.records.lock().expect("records");
         let Some(record) = records
             .iter_mut()
-            .find(|record| record.id == id && record.status == from)
+            .find(|record| record.id == id && record.status == transition.from())
         else {
             return Ok(None);
         };
-        record.status = to;
+        record.status = transition.to();
         if let Some(size) = update.size_bytes {
             record.size_bytes = Some(size);
         }
@@ -356,7 +372,11 @@ impl BackupRepository for FakeBackupRepository {
             record.error_message = Some(message);
         }
         record.completed_at = update.completed_at.or_else(|| {
-            matches!(to, BackupStatus::Completed | BackupStatus::Failed).then_some(now)
+            matches!(
+                transition.to(),
+                BackupStatus::Completed | BackupStatus::Failed
+            )
+            .then_some(now)
         });
         record.updated_at = now;
         Ok(Some(record.clone()))
@@ -388,11 +408,21 @@ impl BackupRepository for FakeBackupRepository {
     async fn advance_schedule_cursor(
         &self,
         next_run_at: DateTime<Utc>,
-        _expected_cron: &str,
-        _expected_timezone: &str,
+        expected_cron: &str,
+        expected_timezone: Option<&str>,
+        expected_next_run_at: Option<DateTime<Utc>>,
+        timezone: &str,
     ) -> AdminStoreResult<bool> {
         let mut settings = self.settings.lock().expect("settings");
+        if !settings.schedule_enabled
+            || settings.cron_expression.as_deref() != Some(expected_cron)
+            || settings.schedule_timezone.as_deref() != expected_timezone
+            || settings.next_run_at != expected_next_run_at
+        {
+            return Ok(false);
+        }
         settings.next_run_at = Some(next_run_at);
+        settings.schedule_timezone = Some(timezone.to_owned());
         Ok(true)
     }
 
@@ -618,6 +648,16 @@ impl AuthStore for FakeAuthStore {
     async fn load_password_hash(&self, _admin_user_id: &str) -> AdminStoreResult<Option<String>> {
         Ok(None)
     }
+    async fn change_password(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: gateway_admin::model::auth::AdminAuditEvent,
+    ) -> AdminStoreResult<bool> {
+        Ok(false)
+    }
+
     async fn create_password_hash_if_absent(
         &self,
         _admin_user_id: &str,

@@ -23,8 +23,9 @@ use gateway_admin::{
         provider_credentials::{
             AuthorizationCommit, AuthorizationCredentialCommit, CredentialDetails,
             CredentialImportCommit, CredentialImportResult, CredentialMutationResult,
-            CredentialRotationCommit, PreparedCredentialCreate, PreparedCredentialImport,
-            PreparedCredentialRotationFacts, ProviderDocument, ProviderExportCredentialInput,
+            CredentialRotationCommit, PluginAccountListQuery, PluginAccountPage,
+            PreparedCredentialCreate, PreparedCredentialImport, PreparedCredentialRotationFacts,
+            ProviderDocument, ProviderExportCredentialInput,
         },
     },
     ports::store::{AccountStore, AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
@@ -59,15 +60,13 @@ use super::{
 
 mod admin_adapter;
 mod admin_queries;
-mod cookie_lock;
+mod authorization;
 mod core_adapter;
 mod mapping;
 mod quota_forecast;
 mod repository;
 mod rows;
 mod runtime;
-mod turn_state;
-mod turn_state_notifications;
 
 pub use admin_adapter::*;
 pub(crate) use admin_queries::*;

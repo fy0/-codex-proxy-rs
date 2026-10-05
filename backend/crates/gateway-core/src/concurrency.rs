@@ -43,8 +43,21 @@ pub enum QueueRejection {
     Timeout,
 }
 
+/// 同一队列内的等待类别：高优先级排在已有高优先级等待者之后、全部普通等待者之前。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WaitPriority {
+    #[default]
+    Normal,
+    High,
+}
+
+struct Waiter {
+    waker: Arc<AtomicWaker>,
+    priority: WaitPriority,
+}
+
 struct QueueState<K> {
-    queues: HashMap<K, VecDeque<Arc<AtomicWaker>>>,
+    queues: HashMap<K, VecDeque<Waiter>>,
     total: usize,
 }
 
@@ -75,11 +88,49 @@ impl<K: Clone + Eq + Hash> ConcurrencyWaitQueue<K> {
             .is_some_and(|queue| !queue.is_empty())
     }
 
+    /// 是否存在排在该类别请求之前的等待者；普通请求让位于全部等待者，高优先级只让位于同类。
+    fn has_waiters_ahead_of(&self, key: &K, priority: WaitPriority) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queues
+            .get(key)
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|waiter| priority == WaitPriority::Normal || waiter.priority == priority)
+            })
+    }
+
     pub fn enqueue(
         &self,
         keys: &[K],
         max_waiting: u32,
         deadline: Instant,
+    ) -> Result<WaitTicket<K>, QueueRejection> {
+        self.enqueue_with_priority(keys, max_waiting, deadline, |_, waiting| -(waiting as f64))
+    }
+
+    /// 在同一锁内读取队长并入队，分数越大越优先，同分沿用候选顺序。
+    /// 回调只做内存评分，不得阻塞或再次访问本队列。
+    pub fn enqueue_with_priority(
+        &self,
+        keys: &[K],
+        max_waiting: u32,
+        deadline: Instant,
+        priority: impl FnMut(&K, usize) -> f64,
+    ) -> Result<WaitTicket<K>, QueueRejection> {
+        self.enqueue_ranked(keys, max_waiting, deadline, WaitPriority::Normal, priority)
+    }
+
+    /// 高优先级等待者不受单队列 `max_waiting` 限制，但仍要求排队已开启并受全局容量约束。
+    fn enqueue_ranked(
+        &self,
+        keys: &[K],
+        max_waiting: u32,
+        deadline: Instant,
+        waiter_priority: WaitPriority,
+        mut priority: impl FnMut(&K, usize) -> f64,
     ) -> Result<WaitTicket<K>, QueueRejection> {
         if Instant::now() >= deadline {
             return Err(QueueRejection::Timeout);
@@ -95,17 +146,30 @@ impl<K: Clone + Eq + Hash> ConcurrencyWaitQueue<K> {
             .iter()
             .filter_map(|key| {
                 let len = state.queues.get(key).map_or(0, VecDeque::len);
-                (len < max_waiting as usize).then_some((key, len))
+                let admitted = max_waiting > 0
+                    && (waiter_priority == WaitPriority::High || len < max_waiting as usize);
+                admitted.then(|| (key, priority(key, len)))
             })
-            .min_by_key(|(_, len)| *len)
+            .min_by(|(_, left), (_, right)| right.total_cmp(left))
             .map(|(key, _)| key.clone())
             .ok_or(QueueRejection::Full)?;
         let waker = Arc::new(AtomicWaker::new());
-        state
-            .queues
-            .entry(key.clone())
-            .or_default()
-            .push_back(Arc::clone(&waker));
+        let queue = state.queues.entry(key.clone()).or_default();
+        let position = match waiter_priority {
+            WaitPriority::Normal => queue.len(),
+            WaitPriority::High => queue
+                .iter()
+                .position(|waiter| waiter.priority == WaitPriority::Normal)
+                .unwrap_or(queue.len()),
+        };
+        // 插到队首时原队首失去位置，它的有界重查会自然让出；新队首随后自行轮询到位。
+        queue.insert(
+            position,
+            Waiter {
+                waker: Arc::clone(&waker),
+                priority: waiter_priority,
+            },
+        );
         state.total += 1;
         Ok(WaitTicket {
             state: Arc::clone(&self.state),
@@ -130,19 +194,20 @@ impl<K: Eq + Hash> WaitTicket<K> {
         &self.key
     }
 
+    fn is_head(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queues
+            .get(&self.key)
+            .and_then(VecDeque::front)
+            .is_some_and(|head| Arc::ptr_eq(&head.waker, &self.waker))
+    }
+
     pub async fn turn(&self) -> Result<(), QueueRejection> {
         let ready = poll_fn(|cx| {
             self.waker.register(cx.waker());
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state
-                .queues
-                .get(&self.key)
-                .and_then(VecDeque::front)
-                .is_some_and(|head| Arc::ptr_eq(head, &self.waker))
-            {
+            if self.is_head() {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -176,11 +241,14 @@ impl<K: Eq + Hash> Drop for WaitTicket<K> {
         let Some(queue) = state.queues.get_mut(&self.key) else {
             return;
         };
-        let Some(index) = queue.iter().position(|item| Arc::ptr_eq(item, &self.waker)) else {
+        let Some(index) = queue
+            .iter()
+            .position(|item| Arc::ptr_eq(&item.waker, &self.waker))
+        else {
             return;
         };
         queue.remove(index);
-        let next = queue.front().cloned();
+        let next = queue.front().map(|waiter| Arc::clone(&waiter.waker));
         if queue.is_empty() {
             state.queues.remove(&self.key);
         }
@@ -200,6 +268,7 @@ pub struct CapacityWait<'a, K: Eq + Hash> {
     policy: ConcurrencyQueuePolicy,
     request_deadline: SystemTime,
     budget: &'a ConcurrencyWaitBudget,
+    priority: WaitPriority,
     started_at: Option<Instant>,
     ticket: Option<WaitTicket<K>>,
 }
@@ -217,17 +286,26 @@ impl<'a, K: Clone + Eq + Hash> CapacityWait<'a, K> {
             policy,
             request_deadline,
             budget,
+            priority: WaitPriority::Normal,
             started_at: None,
             ticket: None,
         }
     }
 
     #[must_use]
+    pub const fn with_priority(mut self, priority: WaitPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    #[must_use]
     pub fn can_try(&self, key: &K) -> bool {
-        self.ticket
-            .as_ref()
-            .is_some_and(|ticket| ticket.key() == key)
-            || !self.queue.has_waiters(key)
+        if let Some(ticket) = self.ticket.as_ref().filter(|ticket| ticket.key() == key) {
+            // 重读容量期间可能被高优先级请求插队，持有 ticket 不代表仍有选号资格。
+            ticket.is_head()
+        } else {
+            !self.queue.has_waiters_ahead_of(key, self.priority)
+        }
     }
 
     #[must_use]
@@ -237,6 +315,16 @@ impl<'a, K: Clone + Eq + Hash> CapacityWait<'a, K> {
     }
 
     pub async fn wait(&mut self, keys: &[K]) -> Result<(), QueueRejection> {
+        self.wait_with_priority(keys, |_, waiting| -(waiting as f64))
+            .await
+    }
+
+    /// 只在首次入队或原账号不再合格时重新选队列，已取得的位置不因评分变化而移动。
+    pub async fn wait_with_priority(
+        &mut self,
+        keys: &[K],
+        priority: impl FnMut(&K, usize) -> f64,
+    ) -> Result<(), QueueRejection> {
         self.started_at.get_or_insert_with(Instant::now);
         let deadline = self
             .budget
@@ -249,10 +337,13 @@ impl<'a, K: Clone + Eq + Hash> CapacityWait<'a, K> {
             self.ticket = None;
         }
         if self.ticket.is_none() {
-            self.ticket = Some(
-                self.queue
-                    .enqueue(keys, self.policy.max_waiting, deadline)?,
-            );
+            self.ticket = Some(self.queue.enqueue_ranked(
+                keys,
+                self.policy.max_waiting,
+                deadline,
+                self.priority,
+                priority,
+            )?);
         }
         if let Some(ticket) = &self.ticket {
             ticket.retry().await?;

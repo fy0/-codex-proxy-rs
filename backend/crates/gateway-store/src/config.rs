@@ -20,6 +20,8 @@ pub(crate) const POSTGRES_HEALTH_RETRY_DELAY: Duration = Duration::from_millis(5
 /// Store 自己拥有并校验的启动配置。
 #[derive(Clone, Deserialize)]
 pub struct StoreConfig {
+    #[serde(skip)]
+    pub(crate) timezone: gateway_core::time::DeploymentTimeZone,
     pub(crate) database: StoreConnectionConfig,
     pub(crate) redis: StoreConnectionConfig,
     #[serde(default)]
@@ -70,6 +72,12 @@ impl StorePoolConfig {
 }
 
 impl StoreConfig {
+    #[must_use]
+    pub fn with_timezone(mut self, timezone: gateway_core::time::DeploymentTimeZone) -> Self {
+        self.timezone = timezone;
+        self
+    }
+
     pub fn resolve_and_validate(&mut self, runtime_data_dir: &Path) -> StoreResult<()> {
         if runtime_data_dir.as_os_str().is_empty() {
             return Err(StoreError::InvalidData {

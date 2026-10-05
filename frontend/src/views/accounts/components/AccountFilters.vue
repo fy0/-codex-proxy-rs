@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import type { AccountGroup } from '@/api'
+import { BaseButton, BaseInput, BaseSelect } from '@codex-proxy/ui'
+
 import { Download, ListTodo, Pencil, Search, Trash2, Upload } from '@lucide/vue'
 import { computed } from 'vue'
-
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
-import ProviderFilterSegmented from '@/components/ProviderFilterSegmented.vue'
+import ProviderFilter from '@/components/ProviderFilter.vue'
 import { accountStatusFilterOptions } from '../constants'
 
 const props = defineProps<{
@@ -15,6 +13,7 @@ const props = defineProps<{
   selectedCount: number
   batchDeleting: boolean
   exportingAccounts: boolean
+  exportDisabledReason: string
   groups: AccountGroup[]
   groupsLoading: boolean
 }>()
@@ -75,9 +74,9 @@ const groupOptions = computed(() => [
         class="w-full min-w-0 xl:w-40 xl:shrink-0"
       />
 
-      <ProviderFilterSegmented
+      <ProviderFilter
         v-model="provider"
-        class="col-span-2 w-full sm:col-span-1 xl:w-31 xl:shrink-0"
+        class="col-span-2 w-full sm:col-span-1 xl:w-auto xl:shrink-0"
       />
     </div>
 
@@ -108,6 +107,9 @@ const groupOptions = computed(() => [
         variant="secondary"
         class="w-full whitespace-nowrap xl:w-auto"
         :loading="exportingAccounts"
+        :disabled="Boolean(exportDisabledReason)"
+        :title="exportDisabledReason || undefined"
+        :aria-description="exportDisabledReason || undefined"
         @click="emit('exportSelected')"
       >
         <template #icon>

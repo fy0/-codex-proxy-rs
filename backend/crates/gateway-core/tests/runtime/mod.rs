@@ -1,29 +1,30 @@
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
+mod extensions;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::channel::{mpsc, oneshot};
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 
-use gateway_core::account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy};
+use gateway_core::account::ProviderAccountId;
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::policy::{ClientApiKeyId, PlaintextClientApiKey, RateLimits};
 use gateway_core::routing::snapshot::{
     RuntimeSnapshotCompiler, SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts,
-    SnapshotClientPolicyFacts, SnapshotFacts, SnapshotProviderAccountFacts, SnapshotSettingsFacts,
-    SnapshotStoreError, SnapshotStorePort,
+    SnapshotClientPolicyFacts, SnapshotFacts, SnapshotProviderAccountFacts, SnapshotStoreError,
+    SnapshotStorePort,
 };
 use gateway_core::routing::{
-    AccountGroupId, ConfigRevision, ProviderCatalogGeneration, ProviderCatalogPort,
-    ProviderCatalogUnavailable, ProviderKind, ProviderModelCapabilities, RuntimeSnapshot,
+    AccountGroupId, ConfigRevision, ModelCapabilities, ProviderCatalogGeneration,
+    ProviderCatalogPort, ProviderCatalogUnavailable, ProviderKind, ProviderModelCapabilities,
+    RuntimeSnapshot, UpstreamModelId,
 };
 use gateway_core::runtime::{
     RuntimeSnapshotHandle, RuntimeSnapshotPublisher, SnapshotControl, SnapshotRevisionStream,
     SnapshotSubscriptionError, SnapshotSubscriptionPort, runtime_revision_needs_refresh,
 };
+use gateway_core::settings::SettingsValues;
 use gateway_core::task::{
     ScheduledTask, WorkerContribution, WorkerCycleContext, WorkerKind, WorkerRunnable,
 };
@@ -159,6 +160,140 @@ fn publisher_should_refresh_locally_and_notify_committed_revision() {
             .as_slice(),
         &[revision(2)],
     );
+}
+
+#[test]
+fn committed_account_change_should_publish_without_waiting_for_provider_catalog() {
+    block_on(async {
+        let store = Arc::new(TestSnapshotStore::new(Ok(scoped_facts(9, true))));
+        let catalog = Arc::new(TestCatalog::default());
+        catalog.models.lock().expect("models lock").push(
+            ProviderModelCapabilities::new(
+                UpstreamModelId::new("listed-model").expect("model"),
+                ModelCapabilities::new(Default::default(), None),
+            )
+            .with_catalog_accounts(std::collections::BTreeSet::from([
+                ProviderAccountId::new("acct_audit_removed").expect("source account"),
+            ])),
+        );
+        let compiler = Arc::new(catalog_compiler(store.clone(), catalog.clone()));
+        let initial = compiler.compile().await.expect("initial snapshot");
+        let provider = ProviderKind::new("audit").expect("provider");
+        let initial_models = initial.public_models_for_provider(&provider);
+        let initial_scope = initial
+            .client_policies()
+            .next()
+            .unwrap()
+            .account_scope()
+            .clone();
+        assert_eq!(
+            initial.public_models_for_scope(&initial_scope),
+            initial_models
+        );
+        let handle = RuntimeSnapshotHandle::new(initial.clone());
+        let publisher = RuntimeSnapshotPublisher::new(
+            compiler,
+            handle.clone(),
+            Arc::new(TestSnapshotSubscriptions::default()),
+        );
+        *store.facts.lock().expect("facts lock") = Ok(scoped_facts(10, false));
+        *store.current_revision.lock().expect("revision lock") = Ok(revision(10));
+        let (release, gate) = oneshot::channel();
+        *catalog.next_query.lock().expect("catalog gate lock") = Some(gate);
+
+        publisher.publish_committed(revision(10)).await;
+        let committed = handle.acquire().expect("committed snapshot");
+        assert_eq!(committed.revision(), revision(10));
+        assert!(!removed_account_allowed(&committed));
+        assert_eq!(
+            committed.public_models_for_provider(&provider),
+            initial_models
+        );
+        assert_eq!(catalog.queries.load(Ordering::SeqCst), 1);
+        let committed_scope = committed.client_policies().next().unwrap().account_scope();
+        assert!(
+            committed
+                .public_models_for_scope(committed_scope)
+                .is_empty()
+        );
+        assert_eq!(
+            initial.public_models_for_scope(&initial_scope),
+            initial_models
+        );
+        assert_ne!(
+            committed.provider_catalog_generations(),
+            &catalog.catalog_generations(),
+        );
+
+        let mut reconcile = Box::pin(publisher.refresh());
+        assert!(futures::poll!(reconcile.as_mut()).is_pending());
+        release.send(()).expect("release catalog query");
+        reconcile.await.expect("catalog reconciliation");
+        assert_eq!(
+            handle
+                .acquire()
+                .expect("reconciled snapshot")
+                .provider_catalog_generations(),
+            &catalog.catalog_generations(),
+        );
+    });
+}
+
+#[test]
+fn committed_account_change_should_preempt_inflight_catalog_reconciliation() {
+    block_on(async {
+        let store = Arc::new(TestSnapshotStore::new(Ok(scoped_facts(9, true))));
+        let catalog = Arc::new(TestCatalog::default());
+        let compiler = Arc::new(catalog_compiler(store.clone(), catalog.clone()));
+        let initial = compiler.compile().await.expect("initial snapshot");
+        let handle = RuntimeSnapshotHandle::new(initial);
+        let publisher = RuntimeSnapshotPublisher::new(
+            compiler,
+            handle.clone(),
+            Arc::new(TestSnapshotSubscriptions::default()),
+        );
+
+        // 首次提交复用目录，随后对账停在慢 Provider 查询；下一次提交仍须及时撤权。
+        *store.facts.lock().expect("facts lock") = Ok(scoped_facts(10, true));
+        *store.current_revision.lock().expect("revision lock") = Ok(revision(10));
+        publisher.publish_committed(revision(10)).await;
+        let (release, gate) = oneshot::channel();
+        *catalog.next_query.lock().expect("catalog gate lock") = Some(gate);
+        let (task, context) = reconciliation_task(&publisher);
+        let mut reconcile = task.run_cycle(context.clone());
+        assert!(futures::poll!(reconcile.as_mut()).is_pending());
+        assert_eq!(catalog.queries.load(Ordering::SeqCst), 2);
+
+        *store.facts.lock().expect("facts lock") = Ok(scoped_facts(11, false));
+        *store.current_revision.lock().expect("revision lock") = Ok(revision(11));
+        let mut committed = publisher.publish_committed(revision(11));
+        assert!(futures::poll!(committed.as_mut()).is_pending());
+        assert!(matches!(
+            futures::poll!(reconcile.as_mut()),
+            std::task::Poll::Ready(Err(_)),
+        ));
+        assert_eq!(
+            futures::poll!(committed.as_mut()),
+            std::task::Poll::Ready(()),
+        );
+        assert!(release.send(()).is_err());
+        let current = handle.acquire().expect("committed snapshot");
+        assert_eq!(current.revision(), revision(11));
+        assert!(!removed_account_allowed(&current));
+        assert_ne!(
+            current.provider_catalog_generations(),
+            &catalog.catalog_generations(),
+        );
+
+        task.run_cycle(context).await.expect("next reconciliation");
+        assert_eq!(
+            handle
+                .acquire()
+                .expect("reconciled snapshot")
+                .provider_catalog_generations(),
+            &catalog.catalog_generations(),
+        );
+    });
 }
 
 #[test]
@@ -322,15 +457,22 @@ fn reconciliation_revision_failure_should_not_suspend_later_committed_refresh() 
         assert!(futures::poll!(reconcile.as_mut()).is_pending());
         let mut committed = publisher.publish_committed(revision(11));
         assert!(futures::poll!(committed.as_mut()).is_pending());
-        assert_eq!(store.loads.load(Ordering::SeqCst), 0);
-
-        release
-            .send(Err(SnapshotStoreError::unavailable()))
-            .expect("release failed revision read");
-        assert!(reconcile.await.is_err());
-        assert!(handle.acquire().is_err());
-        committed.await;
+        assert!(matches!(
+            futures::poll!(reconcile.as_mut()),
+            std::task::Poll::Ready(Err(_)),
+        ));
+        assert_eq!(
+            futures::poll!(committed.as_mut()),
+            std::task::Poll::Ready(()),
+        );
+        assert!(
+            release
+                .send(Err(SnapshotStoreError::unavailable()))
+                .is_err()
+        );
+        assert_eq!(store.loads.load(Ordering::SeqCst), 1);
         assert_eq!(handle.revision(), Some(revision(11)));
+        assert!(handle.acquire().is_ok());
     });
 }
 
@@ -546,6 +688,7 @@ struct TestCatalog {
     generation: AtomicU64,
     queries: AtomicUsize,
     next_query: Mutex<Option<oneshot::Receiver<()>>>,
+    models: Mutex<Vec<ProviderModelCapabilities>>,
 }
 
 impl ProviderCatalogPort for TestCatalog {
@@ -566,7 +709,7 @@ impl ProviderCatalogPort for TestCatalog {
             if let Some(gate) = gate {
                 gate.await.expect("release catalog query");
             }
-            Ok(Vec::new())
+            Ok(self.models.lock().expect("models lock").clone())
         })
     }
 }
@@ -595,7 +738,7 @@ fn scoped_facts(value: u64, allow_removed: bool) -> SnapshotFacts {
     SnapshotFacts::new(
         revision(value),
         revision(value),
-        SnapshotSettingsFacts::new(3, 0, "smart", BTreeMap::new(), None, None),
+        SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None),
         vec![SnapshotClientPolicyFacts::new(
             ClientApiKeyId::new("key_audit_synthetic").expect("key ID"),
             PlaintextClientApiKey::new("sk_audit_synthetic_not_a_real_key").expect("synthetic key"),
@@ -628,7 +771,7 @@ fn facts(config_revision: u64, observed_current_revision: u64) -> SnapshotFacts 
     SnapshotFacts::new(
         revision(config_revision),
         revision(observed_current_revision),
-        SnapshotSettingsFacts::new(
+        SettingsValues::new(
             3,
             50,
             "smart",
@@ -655,11 +798,7 @@ fn compiler(store: Arc<dyn SnapshotStorePort>) -> RuntimeSnapshotCompiler {
 fn empty_snapshot(value: u64) -> RuntimeSnapshot {
     RuntimeSnapshot::new(
         revision(value),
-        AccountSelectionPolicy::new(
-            RotationStrategy::Smart,
-            NonZeroU32::new(1).expect("positive concurrency"),
-            Duration::ZERO,
-        ),
+        gateway_core::settings::SettingsValues::new(1, 0, "smart", Default::default(), None, None),
         Vec::new(),
         Vec::new(),
         Vec::new(),

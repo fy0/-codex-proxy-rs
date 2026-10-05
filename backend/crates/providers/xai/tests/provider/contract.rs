@@ -4,13 +4,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use futures::{StreamExt, stream};
+use bytes::Bytes;
+use futures::{StreamExt, future::BoxFuture, stream};
 use gateway_core::account::{
     AccountFeedbackStats, AccountRuntimeSignals, AccountSelectionPolicy, CredentialRevision,
     CredentialState, ProviderAccountStore, RotationStrategy,
 };
 use gateway_core::engine::continuation::{
     ContinuationBinding, NativeContinuationPin, PreviousResponseId,
+};
+use gateway_core::engine::execution::ClientTransport;
+use gateway_core::engine::middleware::{
+    FrozenMiddlewarePlan, MiddlewareContext, MiddlewareError, MiddlewareHeader, MiddlewareMount,
+    MiddlewareNext, MiddlewarePlan, MiddlewareRequest, MiddlewareResponse,
 };
 use gateway_core::engine::provider::{Provider, ProviderRequest};
 use gateway_core::engine::{
@@ -35,6 +41,7 @@ use gateway_core::routing::{
     ProviderModel, PublicModelId, RoutingContext, RuntimeAccount, RuntimeAccountDirectory,
     RuntimeSnapshot, SupportLevel, UpstreamModelId,
 };
+use gateway_core::runtime::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
 use gateway_core::upstream::UpstreamSendState;
 use provider_xai::{
     GrokAccountSessionSelector, GrokBillingRequest, GrokBillingTransport,
@@ -60,6 +67,507 @@ use crate::support::{
 const MODEL: &str = "grok-4.5";
 const CATALOG_FIXTURE: &[u8] =
     include_bytes!("../transport/catalog/fixtures/official_grok_models_snapshot.json");
+
+#[tokio::test]
+async fn native_xai_translates_a_non_native_source_before_encoding() {
+    let transport = StubInferenceTransport::success();
+    let selector = StubSelector::success();
+    let provider = provider(Arc::clone(&selector), transport.clone()).await;
+    let translations = Arc::new(Mutex::new(0_usize));
+    let source = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "example-source",
+            Map::from_iter([
+                ("opaque".to_owned(), json!("source-only")),
+                ("input".to_owned(), json!([{"type":"compaction_trigger"}])),
+                ("prompt_cache_key".to_owned(), json!("must-not-be-read")),
+            ]),
+        )
+        .unwrap(),
+    ));
+    let mut stream = provider
+        .execute(
+            provider_request_with_operation("xai", source),
+            context_with_middleware(Arc::new(TranslationMiddleware {
+                translations: Arc::clone(&translations),
+                target: Map::from_iter([
+                    ("model".to_owned(), json!("ignored-by-forced-model")),
+                    ("input".to_owned(), json!("translated")),
+                    ("stream".to_owned(), json!(true)),
+                ]),
+            })),
+        )
+        .await
+        .expect("registered translation should run before native encoding");
+    assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    while let Some(event) = stream.next().await {
+        event.expect("translated request response");
+    }
+    assert_eq!(*translations.lock().unwrap(), 1);
+    let requests = transport.requests.lock().unwrap();
+    let sent: Value = serde_json::from_slice(requests[0].body()).unwrap();
+    assert_eq!(sent["input"], "translated");
+    assert_eq!(sent["model"], MODEL);
+}
+
+#[tokio::test]
+async fn native_xai_translated_compaction_uses_one_selection_and_one_translation() {
+    let selector = StubSelector::success();
+    let transport = StubInferenceTransport::sequence([InferenceMode::SuccessBody(compaction_sse(
+        &valid_compaction_summary("translated compaction"),
+        None,
+    ))]);
+    let provider = provider(Arc::clone(&selector), transport.clone()).await;
+    let translations = Arc::new(Mutex::new(0_usize));
+    let source = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "example-source",
+            Map::from_iter([("opaque".to_owned(), json!("source-only"))]),
+        )
+        .unwrap(),
+    ));
+    let target = match compaction_operation() {
+        Operation::Generate(request) => request.protocol_payload().body().clone(),
+        _ => unreachable!("compaction fixture is a generation request"),
+    };
+    let mut stream = provider
+        .execute(
+            provider_request_with_operation("xai", source),
+            context_with_middleware(Arc::new(TranslationMiddleware {
+                translations: Arc::clone(&translations),
+                target,
+            })),
+        )
+        .await
+        .expect("translated compaction should prepare one cold stream");
+    assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    while let Some(event) = stream.next().await {
+        event.expect("translated compaction response");
+    }
+    assert_eq!(*translations.lock().unwrap(), 1);
+    assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    let requests = transport.requests.lock().unwrap();
+    let sent: Value = serde_json::from_slice(requests[0].body()).unwrap();
+    assert_eq!(sent["store"], false);
+    assert!(
+        sent["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("compaction_trigger") })
+    );
+}
+
+#[tokio::test]
+async fn native_xai_rejects_missing_or_capability_expanding_translation_before_send() {
+    let source = || {
+        Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "example-source",
+                Map::from_iter([("opaque".to_owned(), json!("source-only"))]),
+            )
+            .unwrap(),
+        ))
+    };
+
+    let selector = StubSelector::success();
+    let transport = StubInferenceTransport::success();
+    let missing_provider = provider(Arc::clone(&selector), transport.clone()).await;
+    let missing = match missing_provider
+        .execute(
+            provider_request_with_operation("xai", source()),
+            context_with_middleware(Arc::new(PassThroughMiddleware)),
+        )
+        .await
+    {
+        Ok(_) => panic!("missing translation pair must be explicit"),
+        Err(error) => error,
+    };
+    assert_eq!(missing.kind(), ProviderErrorKind::InvalidRequest);
+    assert_eq!(missing.send_state(), UpstreamSendState::NotSent);
+    assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+
+    let selector = StubSelector::success();
+    let transport = StubInferenceTransport::success();
+    let expanded_provider = provider(Arc::clone(&selector), transport.clone()).await;
+    let expanded = match expanded_provider
+        .execute(
+            provider_request_with_operation("xai", source()),
+            context_with_middleware(Arc::new(TranslationMiddleware {
+                translations: Arc::new(Mutex::new(0)),
+                target: object(json!({
+                    "model": "ignored-by-forced-model",
+                    "input": "translated",
+                    "tools": [{"type":"function", "name":"new_capability"}]
+                })),
+            })),
+        )
+        .await
+    {
+        Ok(_) => panic!("translation cannot expand routed capabilities"),
+        Err(error) => error,
+    };
+    assert_eq!(expanded.kind(), ProviderErrorKind::InvalidRequest);
+    assert_eq!(expanded.send_state(), UpstreamSendState::NotSent);
+    assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn native_response_translation_keeps_raw_xai_and_delivery_state_independent() {
+    let arguments =
+        serde_json::to_string(&json!({"operation":{"type":"delete_file","path":"note.txt"}}))
+            .unwrap();
+    let arguments_json = serde_json::to_string(&arguments).unwrap();
+    let body = format!(
+        concat!(
+            "event: response.created\n",
+            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_native_boundary\",\"model\":\"grok-4.5\"}}}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"id\":\"item_patch\",\"type\":\"function_call\",\"call_id\":\"call_patch\",\"name\":\"xai_proxy_apply_patch\"}}}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"id\":\"item_patch\",\"type\":\"function_call\",\"call_id\":\"call_patch\",\"name\":\"xai_proxy_apply_patch\",\"arguments\":{arguments_json}}}}}\n\n",
+            "event: response.completed\n",
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_native_boundary\",\"model\":\"grok-4.5\",\"status\":\"completed\"}}}}\n\n",
+        ),
+        arguments_json = arguments_json,
+    );
+    let transport =
+        StubInferenceTransport::sequence([InferenceMode::SuccessBody(body.into_bytes())]);
+    let provider = provider(StubSelector::success(), transport).await;
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("client-model")),
+                ("input".to_owned(), json!("edit")),
+                ("tools".to_owned(), json!([{"type":"apply_patch"}])),
+            ]),
+        )
+        .unwrap(),
+    ));
+    let mut stream = provider
+        .execute(
+            provider_request_with_operation("xai", operation),
+            context(CancellationToken::new(), None),
+        )
+        .await
+        .expect("native response stream");
+
+    let mut added_was_deferred = false;
+    let mut done_expanded = false;
+    let mut terminal_state_preserved = false;
+    while let Some(event) = stream.next().await {
+        let event = event.expect("source event");
+        if !event.has_client_event() {
+            continue;
+        }
+        let source_type = event
+            .wire_event()
+            .and_then(|wire| {
+                assert_eq!(wire.protocol(), "xai");
+                wire.data()
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .expect("xAI source event type");
+        let terminal = event
+            .canonical_facts()
+            .iter()
+            .any(|fact| matches!(fact, GatewayEvent::Completed(_)));
+        let had_session_update = event.session_update().is_some();
+        let translated = stream
+            .translate_native_response(event, terminal)
+            .expect("native response translation");
+        if source_type == "response.output_item.added" {
+            assert!(translated.is_empty());
+            added_was_deferred = true;
+            continue;
+        }
+        assert!(translated.iter().all(|event| {
+            event
+                .wire_event()
+                .is_some_and(|wire| wire.protocol() == "openai")
+        }));
+        if source_type == "response.output_item.done" {
+            assert_eq!(translated.len(), 2);
+            assert_eq!(
+                translated[0]
+                    .wire_event()
+                    .and_then(|wire| wire.event_type()),
+                Some("response.output_item.added")
+            );
+            assert!(translated.iter().all(|event| {
+                event.wire_event().is_some_and(|wire| {
+                    wire.data().pointer("/item/type") == Some(&json!("apply_patch_call"))
+                })
+            }));
+            done_expanded = true;
+        }
+        if terminal {
+            assert!(had_session_update);
+            terminal_state_preserved = translated
+                .first()
+                .is_some_and(|event| event.session_update().is_some());
+        }
+    }
+    assert!(added_was_deferred);
+    assert!(done_expanded);
+    assert!(terminal_state_preserved);
+}
+
+#[tokio::test]
+async fn pass_through_middleware_projects_native_response_once() {
+    let provider = provider(StubSelector::success(), StubInferenceTransport::success()).await;
+    let mut stream = provider
+        .execute(
+            provider_request("xai"),
+            context_with_middleware(Arc::new(PassThroughMiddleware)),
+        )
+        .await
+        .expect("native response stream");
+
+    let mut client_events = 0;
+    while let Some(event) = stream.next().await {
+        let event = event.expect("projected response event");
+        if let Some(wire) = event.wire_event() {
+            client_events += 1;
+            assert_eq!(wire.protocol(), "openai");
+        }
+    }
+    assert!(client_events > 0);
+}
+
+#[tokio::test]
+async fn attempt_middleware_runs_once_before_native_encoding() {
+    let transport = StubInferenceTransport::success();
+    let native_provider = provider(StubSelector::success(), transport.clone()).await;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let body = json!({
+        "model": "client-model",
+        "input": "hello",
+        "service_tier": "priority",
+    });
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object("openai", body.as_object().unwrap().clone()).unwrap(),
+    ));
+    let mut stream = native_provider
+        .execute(
+            provider_request_with_operation("xai", operation),
+            context_with_middleware(Arc::new(RecordingMiddleware {
+                observed: Arc::clone(&observed),
+                replacement: None,
+                request_headers: vec![
+                    MiddlewareHeader::new(
+                        "x-business-context",
+                        Bytes::from_static(b"tenant-public"),
+                    ),
+                    MiddlewareHeader::new(
+                        "x-business-context",
+                        Bytes::from_static(b"trace-public"),
+                    ),
+                ],
+            })),
+        )
+        .await
+        .expect("native conversion should prepare the request");
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    while let Some(event) = stream.next().await {
+        event.expect("successful native response");
+    }
+    {
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, "openai");
+        assert_eq!(observed[0].1["service_tier"], "priority");
+        let requests = transport.requests.lock().unwrap();
+        let sent: Map<String, Value> = serde_json::from_slice(requests[0].body()).unwrap();
+        assert!(!sent.contains_key("service_tier"));
+        assert_eq!(
+            requests[0]
+                .headers()
+                .iter()
+                .filter(|header| header.name() == "x-business-context")
+                .map(|header| header.value().expose())
+                .collect::<Vec<_>>(),
+            vec!["tenant-public", "trace-public"],
+        );
+    }
+
+    let overridden_transport = StubInferenceTransport::success();
+    let overridden_provider = provider(StubSelector::success(), overridden_transport.clone()).await;
+    let mut overridden = overridden_provider
+        .execute(
+            provider_request("xai"),
+            context_with_middleware(Arc::new(RecordingMiddleware {
+                observed: Arc::default(),
+                replacement: None,
+                request_headers: vec![MiddlewareHeader::new(
+                    "Authorization",
+                    Bytes::from_static(b"Bearer plugin-value"),
+                )],
+            })),
+        )
+        .await
+        .expect("header validation remains on the cold Provider stream");
+    while let Some(event) = overridden.next().await {
+        event.unwrap();
+    }
+    assert_eq!(overridden_transport.calls.load(Ordering::SeqCst), 1);
+    let requests = overridden_transport.requests.lock().unwrap();
+    let values = requests[0]
+        .headers()
+        .iter()
+        .filter(|header| header.name().eq_ignore_ascii_case("authorization"))
+        .map(|header| header.value().expose())
+        .collect::<Vec<_>>();
+    assert_eq!(values, ["Bearer plugin-value"]);
+    assert!(!format!("{:?}", requests[0].headers()).contains("Bearer plugin-value"));
+}
+
+#[tokio::test]
+async fn attempt_middleware_preserves_native_cache_tools() {
+    let transport = StubInferenceTransport::success();
+    let provider = provider(StubSelector::success(), transport.clone()).await;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut stream = provider
+        .execute(
+            provider_request_with_operation(
+                "xai",
+                reasoning_replay_operation(
+                    "cache-policy-session",
+                    json!([{"type":"message","role":"user","content":"hello"}]),
+                ),
+            ),
+            context_with_middleware(Arc::new(RecordingMiddleware {
+                observed: Arc::clone(&observed),
+                replacement: None,
+                request_headers: Vec::new(),
+            })),
+        )
+        .await
+        .expect("native cache tools must not look like policy capability expansion");
+    while let Some(event) = stream.next().await {
+        event.expect("successful native response");
+    }
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert!(observed[0].1.get("tools").is_none());
+    drop(observed);
+
+    let requests = transport.requests.lock().unwrap();
+    let sent: Value = serde_json::from_slice(requests[0].body()).unwrap();
+    assert_eq!(
+        sent.get("tools"),
+        Some(&json!([{"type":"web_search"}, {"type":"x_search"}]))
+    );
+    assert_eq!(sent.get("tool_choice"), Some(&json!("none")));
+}
+
+#[tokio::test]
+async fn attempt_middleware_updates_generation_and_compaction_input() {
+    for compact in [false, true] {
+        let (operation, transport) = if compact {
+            (
+                compaction_operation(),
+                StubInferenceTransport::sequence([InferenceMode::SuccessBody(compaction_sse(
+                    &valid_compaction_summary("normalized compaction"),
+                    None,
+                ))]),
+            )
+        } else {
+            (operation(), StubInferenceTransport::success())
+        };
+        let provider = provider(StubSelector::success(), transport.clone()).await;
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut stream = provider
+            .execute(
+                provider_request_with_operation("xai", operation),
+                context_with_middleware(Arc::new(RecordingMiddleware {
+                    observed: Arc::clone(&observed),
+                    replacement: Some(("instructions".to_owned(), json!("normalized instruction"))),
+                    request_headers: Vec::new(),
+                })),
+            )
+            .await
+            .expect("processed native request");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        while let Some(event) = stream.next().await {
+            event.expect("normalization preserves a successful native response");
+        }
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, "openai");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let sent: Value = serde_json::from_slice(requests[0].body()).unwrap();
+        assert_eq!(sent["instructions"], "normalized instruction");
+        assert_eq!(sent["model"], MODEL);
+    }
+}
+
+#[tokio::test]
+async fn attempt_middleware_can_change_reasoning_before_native_validation() {
+    let transport = StubInferenceTransport::success();
+    let provider = provider(StubSelector::success(), transport.clone()).await;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut stream = provider
+        .execute(
+            provider_request_with_reasoning_operation(
+                "xai",
+                operation_with_reasoning_effort("minimal"),
+            ),
+            context_with_middleware(Arc::new(RecordingMiddleware {
+                observed: Arc::clone(&observed),
+                replacement: Some(("reasoning".to_owned(), json!({"effort":"xhigh"}))),
+                request_headers: Vec::new(),
+            })),
+        )
+        .await
+        .expect("thinking policy should prepare the xAI stream");
+    while let Some(event) = stream.next().await {
+        event.expect("successful xAI response");
+    }
+
+    let requests = transport.requests.lock().unwrap();
+    let body: Value = serde_json::from_slice(requests[0].body()).unwrap();
+    assert_eq!(body["reasoning"]["effort"], "high");
+    assert_eq!(body["model"], MODEL);
+    assert_eq!(
+        observed.lock().unwrap()[0].1["reasoning"]["effort"],
+        "minimal"
+    );
+}
+
+#[tokio::test]
+async fn middleware_output_still_passes_native_validation_before_send() {
+    let transport = StubInferenceTransport::success();
+    let provider = provider(StubSelector::success(), transport.clone()).await;
+    let error = provider
+        .execute(
+            provider_request_with_reasoning_operation(
+                "xai",
+                operation_with_reasoning_effort("medium"),
+            ),
+            context_with_middleware(Arc::new(RecordingMiddleware {
+                observed: Arc::default(),
+                replacement: Some(("input".to_owned(), json!(42))),
+                request_headers: Vec::new(),
+            })),
+        )
+        .await
+        .err()
+        .expect("unsupported reasoning remains invalid after middleware");
+    assert_eq!(error.kind(), ProviderErrorKind::InvalidRequest);
+    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+}
 
 fn observed_transport_metrics() -> GrokInferenceTransportMetrics {
     GrokInferenceTransportMetrics::default()
@@ -620,7 +1128,7 @@ impl GrokCredentialRecovery for StubRecovery {
 async fn provider(
     selector: Arc<StubSelector>,
     transport: Arc<StubInferenceTransport>,
-) -> GrokBuildProvider {
+) -> Arc<GrokBuildProvider> {
     provider_with_recovery(
         selector,
         transport,
@@ -633,7 +1141,7 @@ async fn provider_with_recovery(
     selector: Arc<StubSelector>,
     transport: Arc<StubInferenceTransport>,
     recovery: Arc<StubRecovery>,
-) -> GrokBuildProvider {
+) -> Arc<GrokBuildProvider> {
     provider_with_catalog_transport(
         selector,
         transport,
@@ -648,7 +1156,7 @@ async fn provider_with_catalog_transport(
     transport: Arc<StubInferenceTransport>,
     recovery: Arc<StubRecovery>,
     catalog_transport: Arc<dyn GrokModelCatalogTransport>,
-) -> GrokBuildProvider {
+) -> Arc<GrokBuildProvider> {
     let store = MemoryProviderAccountStore::shared();
     let account_store: Arc<dyn ProviderAccountStore> = store.clone();
     let repository = GrokCredentialRepository::new(account_store);
@@ -664,15 +1172,17 @@ async fn provider_with_catalog_transport(
         catalog_transport,
         cache,
     ));
-    GrokBuildProvider::new(
-        selector,
-        transport,
-        catalog,
-        recovery,
-        Arc::new(AccountFeedbackStats::default()),
-        crate::support::xai_wire_profile(),
+    Arc::new(
+        GrokBuildProvider::new(
+            selector,
+            transport,
+            catalog,
+            recovery,
+            Arc::new(AccountFeedbackStats::default()),
+            crate::support::xai_wire_profile(),
+        )
+        .expect("official xAI provider configuration"),
     )
-    .expect("official xAI provider configuration")
 }
 
 async fn mapped_transport_error(
@@ -933,7 +1443,14 @@ fn provider_request(provider_kind: &str) -> ProviderRequest {
 }
 
 fn provider_request_with_operation(provider_kind: &str, operation: Operation) -> ProviderRequest {
-    provider_request_with_upstream_model(provider_kind, MODEL, operation)
+    provider_request_with_model_capabilities(provider_kind, MODEL, operation, false)
+}
+
+fn provider_request_with_reasoning_operation(
+    provider_kind: &str,
+    operation: Operation,
+) -> ProviderRequest {
+    provider_request_with_model_capabilities(provider_kind, MODEL, operation, true)
 }
 
 fn provider_request_with_upstream_model(
@@ -941,13 +1458,27 @@ fn provider_request_with_upstream_model(
     upstream_model: &str,
     operation: Operation,
 ) -> ProviderRequest {
+    provider_request_with_model_capabilities(provider_kind, upstream_model, operation, false)
+}
+
+fn provider_request_with_model_capabilities(
+    provider_kind: &str,
+    upstream_model: &str,
+    operation: Operation,
+    supports_reasoning: bool,
+) -> ProviderRequest {
     let provider = ProviderKind::new(provider_kind).expect("provider");
+    let mut capabilities =
+        ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(131_072))
+            .with_feature(Feature::Tools, SupportLevel::Native)
+            .with_feature(Feature::NativeContinuation, SupportLevel::Native);
+    if supports_reasoning {
+        capabilities = capabilities.with_feature(Feature::Reasoning, SupportLevel::Native);
+    }
     let provider_model = ProviderModel::new(
         provider.clone(),
         UpstreamModelId::new(upstream_model).expect("model"),
-        ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(131_072))
-            .with_feature(Feature::Tools, SupportLevel::Native)
-            .with_feature(Feature::NativeContinuation, SupportLevel::Native),
+        capabilities,
     );
     let account_scope = Arc::new(FrozenAccountScope::new(
         Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
@@ -958,7 +1489,7 @@ fn provider_request_with_upstream_model(
     ));
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
-        selection_policy(),
+        gateway_core::settings::SettingsValues::new(2, 0, "smart", Default::default(), None, None),
         vec![provider],
         vec![provider_model],
         vec![],
@@ -980,6 +1511,124 @@ fn selection_policy() -> AccountSelectionPolicy {
         RotationStrategy::Smart,
         NonZeroU32::new(2).expect("limit"),
         Duration::ZERO,
+    )
+}
+
+#[derive(Debug)]
+struct TranslationMiddleware {
+    translations: Arc<Mutex<usize>>,
+    target: Map<String, Value>,
+}
+
+impl MiddlewarePlan for TranslationMiddleware {
+    fn handle(
+        &self,
+        context: MiddlewareContext,
+        request: MiddlewareRequest,
+        next: MiddlewareNext,
+    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
+        assert_eq!(context.mount(), MiddlewareMount::Attempt);
+        assert!(context.account_id().is_some());
+        *self.translations.lock().unwrap() += 1;
+        let (_, headers, _) = request.into_parts();
+        next.run(MiddlewareRequest::new(
+            "openai",
+            headers,
+            Bytes::from(serde_json::to_vec(&self.target).unwrap()),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct PassThroughMiddleware;
+
+impl MiddlewarePlan for PassThroughMiddleware {
+    fn handle(
+        &self,
+        _: MiddlewareContext,
+        request: MiddlewareRequest,
+        next: MiddlewareNext,
+    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
+        next.run(request)
+    }
+}
+
+type ObservedRequest = (String, Map<String, Value>);
+
+#[derive(Debug)]
+struct RecordingMiddleware {
+    observed: Arc<Mutex<Vec<ObservedRequest>>>,
+    replacement: Option<(String, Value)>,
+    request_headers: Vec<MiddlewareHeader>,
+}
+
+impl MiddlewarePlan for RecordingMiddleware {
+    fn handle(
+        &self,
+        context: MiddlewareContext,
+        request: MiddlewareRequest,
+        next: MiddlewareNext,
+    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
+        assert_eq!(context.mount(), MiddlewareMount::Attempt);
+        let (protocol, mut headers, bytes) = request.into_parts();
+        let mut body: Map<String, Value> = serde_json::from_slice(&bytes).unwrap();
+        self.observed
+            .lock()
+            .unwrap()
+            .push((protocol.clone(), body.clone()));
+        if let Some((field, value)) = &self.replacement {
+            body.insert(field.clone(), value.clone());
+        }
+        headers.extend(self.request_headers.clone());
+        next.run(MiddlewareRequest::new(
+            protocol,
+            headers,
+            Bytes::from(serde_json::to_vec(&body).unwrap()),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct TestExtensionLease;
+
+impl ExtensionSetLease for TestExtensionLease {
+    fn is_ready(&self) -> bool {
+        true
+    }
+}
+
+fn context_with_middleware(plan: Arc<dyn MiddlewarePlan>) -> AttemptContext {
+    context_with_middleware_and_cancellation(plan, CancellationToken::new())
+}
+
+fn context_with_middleware_and_cancellation(
+    plan: Arc<dyn MiddlewarePlan>,
+    cancellation: CancellationToken,
+) -> AttemptContext {
+    let plan = FrozenMiddlewarePlan::new(
+        plan,
+        ExtensionSetReference::new(
+            ExtensionSetId::new("native-xai-middleware".to_owned()).unwrap(),
+            Arc::new(TestExtensionLease),
+        ),
+    );
+    AttemptContext::new(
+        gateway_core::engine::RequestAttemptContext::new(
+            ModelRequestId::new("req_xai_middleware").unwrap(),
+            ClientApiKeyId::new("key_xai_contract").unwrap(),
+        )
+        .with_middleware(
+            Some(plan),
+            Arc::from([]),
+            "/v1/responses".to_owned(),
+            ClientTransport::HttpSse,
+        ),
+        NonZeroU32::MIN,
+        SystemTime::now() + Duration::from_secs(30),
+        selection_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None),
+        None,
+        cancellation,
     )
 }
 
@@ -1030,8 +1679,8 @@ fn context_with_continuation_attempt(
     context(CancellationToken::new(), Some(continuation)).with_continuation_attempt(attempt)
 }
 
-async fn execute_successfully(provider: &GrokBuildProvider, operation: Operation) {
-    let mut stream = provider
+async fn execute_successfully(provider: &Arc<GrokBuildProvider>, operation: Operation) {
+    let mut stream = Arc::clone(provider)
         .execute(
             provider_request_with_operation("xai", operation),
             context(CancellationToken::new(), None),
@@ -1051,7 +1700,6 @@ impl ProviderLeasePort for DiagnosticLeasePort {
         _: &'a ClientApiKeyId,
         _: &'a ProviderKind,
         account_ids: &'a [gateway_core::account::ProviderAccountId],
-        _: &'a [gateway_core::routing::UpstreamChannel],
     ) -> futures::future::BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
             Ok(ProviderSchedulingState::new(
@@ -1062,9 +1710,7 @@ impl ProviderLeasePort for DiagnosticLeasePort {
                         (
                             account_id,
                             AccountRuntimeSignals {
-                                turn_state: Default::default(),
                                 in_flight: 0,
-                                bps_in_flight: 0,
                                 last_started_at: None,
                                 quota_reset_at: None,
                                 quota_remaining_rank: None,
@@ -1142,19 +1788,21 @@ async fn disabled_account_diagnostic_selects_the_pinned_account_without_state_wr
         Arc::new(MemoryCooldownPort::default()),
         Arc::new(AccountFeedbackStats::default()),
     );
-    let provider = GrokBuildProvider::new(
-        Arc::new(selector),
-        StubInferenceTransport::success(),
-        Arc::new(crate::support::grok_catalog_service(
-            repository,
-            Arc::new(StaticCatalogTransport),
-            MemoryGrokCatalogCache::shared(),
-        )),
-        StubRecovery::new(GrokCredentialRecoveryOutcome::Unavailable),
-        Arc::new(AccountFeedbackStats::default()),
-        crate::support::xai_wire_profile(),
-    )
-    .expect("official xAI provider configuration");
+    let provider = Arc::new(
+        GrokBuildProvider::new(
+            Arc::new(selector),
+            StubInferenceTransport::success(),
+            Arc::new(crate::support::grok_catalog_service(
+                repository,
+                Arc::new(StaticCatalogTransport),
+                MemoryGrokCatalogCache::shared(),
+            )),
+            StubRecovery::new(GrokCredentialRecoveryOutcome::Unavailable),
+            Arc::new(AccountFeedbackStats::default()),
+            crate::support::xai_wire_profile(),
+        )
+        .expect("official xAI provider configuration"),
+    );
 
     let mut stream = provider
         .execute(
@@ -1887,7 +2535,7 @@ async fn compaction_protocol_stream_failure_should_allow_pre_delivery_recovery()
 async fn inference_request_uses_oauth_headers_and_no_api_key() {
     let transport = StubInferenceTransport::success();
     let provider = provider(StubSelector::success(), transport.clone()).await;
-    let mut stream = provider
+    let mut stream = Arc::clone(&provider)
         .execute(
             provider_request("xai"),
             context(CancellationToken::new(), None),
@@ -2609,7 +3257,7 @@ async fn continuation_should_inherit_unchanged_instructions_and_replay_changed_i
             ProtocolPayload::json_object("openai", first_body.as_object().expect("body").clone())
                 .expect("payload"),
         ));
-        let mut first = provider
+        let mut first = Arc::clone(&provider)
             .execute(
                 provider_request_with_operation("xai", operation),
                 context(CancellationToken::new(), None),
@@ -3002,7 +3650,7 @@ async fn connection_state_inherits_session_and_recovers_reasoning_on_pinned_acco
         )
         .expect("OpenAI payload"),
     ));
-    let mut first = provider
+    let mut first = Arc::clone(&provider)
         .execute(
             provider_request_with_operation("xai", first_operation),
             context(CancellationToken::new(), None),
@@ -3028,7 +3676,7 @@ async fn connection_state_inherits_session_and_recovers_reasoning_on_pinned_acco
         }),
         state.clone(),
     );
-    let mut continued = provider
+    let mut continued = Arc::clone(&provider)
         .execute(
             provider_request_with_operation("xai", continued_operation),
             context(
@@ -3128,7 +3776,7 @@ async fn replay_owner_should_reencode_custom_apply_patch_call_for_grok() {
         )
         .expect("OpenAI payload"),
     ));
-    let mut first = provider
+    let mut first = Arc::clone(&provider)
         .execute(
             provider_request_with_operation("xai", first_operation),
             context(CancellationToken::new(), None),
@@ -3256,7 +3904,13 @@ async fn cancellation_before_poll_never_calls_transport() {
     let provider = provider(StubSelector::success(), transport.clone()).await;
     let cancellation = CancellationToken::new();
     let mut stream = provider
-        .execute(provider_request("xai"), context(cancellation.clone(), None))
+        .execute(
+            provider_request("xai"),
+            context_with_middleware_and_cancellation(
+                Arc::new(PassThroughMiddleware),
+                cancellation.clone(),
+            ),
+        )
         .await
         .expect("prepared stream");
     cancellation.cancel();
@@ -3448,4 +4102,194 @@ async fn missing_catalog_feature_metadata_keeps_build_responses_routable() {
             )
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn configured_request_profile_reaches_inference_headers() {
+    use provider_xai::transport::client_profile::{GrokClientProfileSelection, VersionMode};
+    let transport = StubInferenceTransport::success();
+    let provider = provider(StubSelector::success(), transport.clone()).await;
+    let selection = GrokClientProfileSelection {
+        version_mode: VersionMode::Fixed,
+        client_version: Some("9.8.7".to_owned()),
+        client_identifier: "profile-contract".to_owned(),
+        target_os: "windows".to_owned(),
+        target_arch: "arm64".to_owned(),
+        ..Default::default()
+    };
+    let resolved = provider
+        .resolve_request_profile(&selection.document().unwrap())
+        .unwrap();
+    let context = AttemptContext::new(
+        gateway_core::engine::RequestAttemptContext::new(
+            ModelRequestId::new("req_profile").unwrap(),
+            ClientApiKeyId::new("key_profile").unwrap(),
+        )
+        .with_request_profile(Some(resolved)),
+        NonZeroU32::new(1).unwrap(),
+        SystemTime::now() + Duration::from_secs(30),
+        selection_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None),
+        None,
+        CancellationToken::new(),
+    );
+    let events = provider
+        .execute(provider_request("xai"), context)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(Result::is_ok));
+    let requests = transport.requests.lock().unwrap();
+    let headers = requests[0].headers();
+    let header = |name| {
+        headers
+            .iter()
+            .find(|header| header.name() == name)
+            .unwrap()
+            .value()
+            .expose()
+    };
+    assert_eq!(header("x-grok-client-version"), "9.8.7");
+    assert_eq!(header("x-grok-client-identifier"), "profile-contract");
+    assert_eq!(header("x-grok-client-mode"), "headless");
+    assert_eq!(header("user-agent"), "grok-shell/9.8.7 (windows; aarch64)");
+}
+
+#[derive(Debug)]
+struct AdapterProbe {
+    polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl gateway_core::engine::upstream_adapter::UpstreamAdapterPlan for AdapterProbe {
+    fn select(
+        &self,
+        _: &AttemptContext,
+        provider: &ProviderKind,
+        _: &UpstreamModelId,
+    ) -> Result<
+        Option<Arc<dyn gateway_core::engine::upstream_adapter::UpstreamAdapter>>,
+        gateway_core::error::ProviderError,
+    > {
+        assert_eq!(provider.as_str(), "xai");
+        Ok(Some(Arc::new(Self {
+            polls: self.polls.clone(),
+        })))
+    }
+}
+
+impl gateway_core::engine::upstream_adapter::UpstreamAdapter for AdapterProbe {
+    fn transport(&self) -> &str {
+        "http_sse"
+    }
+
+    fn execute(
+        self: Arc<Self>,
+        invocation: gateway_core::engine::upstream_adapter::UpstreamAdapterInvocation,
+    ) -> gateway_core::engine::provider::EventStream {
+        Box::pin(futures::stream::once(async move {
+            self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(invocation.account.account_id().as_str(), "acct_provider");
+            assert_eq!(
+                invocation.metadata.provider_account_id(),
+                invocation.account.account_id()
+            );
+            assert_eq!(invocation.account.authentication_kind(), "oauth");
+            let headers = invocation.account.authorization().unwrap();
+            let header = |name: &str| {
+                headers
+                    .iter()
+                    .find(|h| h.name() == name)
+                    .map(|h| h.value().to_vec())
+            };
+            assert_eq!(
+                header("authorization"),
+                Some("Bearer oauth-access".as_bytes().to_vec())
+            );
+            assert_eq!(
+                header("x-grok-user-id"),
+                Some("verified-user".as_bytes().to_vec())
+            );
+            assert!(header("cookie").is_none());
+            assert!(
+                invocation
+                    .headers
+                    .iter()
+                    .any(|h| h.name() == "x-adapter-onion")
+            );
+            assert!(
+                invocation
+                    .account
+                    .calculate_cost(
+                        None,
+                        &gateway_core::metering::Usage {
+                            input_tokens: Some(7),
+                            output_tokens: Some(2),
+                            ..Default::default()
+                        }
+                    )
+                    .is_some()
+            );
+            Err(gateway_core::error::ProviderError::new(
+                ProviderErrorKind::Cancelled,
+                UpstreamSendState::NotSent,
+            ))
+        }))
+    }
+}
+
+#[tokio::test]
+async fn upstream_adapter_reuses_selected_native_account_inside_attempt_onion_and_stays_cold() {
+    let selector = StubSelector::success();
+    let transport = StubInferenceTransport::success();
+    let provider = provider(selector.clone(), transport.clone()).await;
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lease = ExtensionSetReference::new(
+        ExtensionSetId::new("adapter-native-test".to_owned()).unwrap(),
+        Arc::new(TestExtensionLease),
+    );
+    let middleware = Arc::new(RecordingMiddleware {
+        observed: Default::default(),
+        replacement: Some(("input".into(), json!("rewritten"))),
+        request_headers: vec![MiddlewareHeader::new(
+            "x-adapter-onion",
+            Bytes::from_static(b"present"),
+        )],
+    });
+    let context = AttemptContext::new(
+        gateway_core::engine::RequestAttemptContext::new(
+            ModelRequestId::new("req_adapter_native").unwrap(),
+            ClientApiKeyId::new("key_xai_contract").unwrap(),
+        )
+        .with_upstream_adapters(Some(
+            gateway_core::engine::upstream_adapter::FrozenUpstreamAdapterPlan::new(
+                Arc::new(AdapterProbe {
+                    polls: polls.clone(),
+                }),
+                lease.clone(),
+            ),
+        ))
+        .with_middleware(
+            Some(FrozenMiddlewarePlan::new(middleware, lease)),
+            Arc::from([]),
+            "/v1/responses".to_owned(),
+            ClientTransport::HttpSse,
+        ),
+        NonZeroU32::MIN,
+        SystemTime::now() + Duration::from_secs(5),
+        selection_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None),
+        None,
+        CancellationToken::new(),
+    );
+    let mut stream = provider
+        .execute(provider_request("xai"), context)
+        .await
+        .unwrap();
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
 }

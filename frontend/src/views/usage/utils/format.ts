@@ -1,4 +1,4 @@
-import { formatLocalizedCompactNumber } from '@/utils/number'
+import { formatLocalizedCompactNumber } from '@/utils/format'
 import { formatProviderLabel } from '@/utils/providers'
 
 const percentFormatter = new Intl.NumberFormat('zh-CN', {

@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import type { CodexDesktopWindowsDownloads } from '@/api'
+import { BaseButton, BaseModal, BaseSegmented } from '@codex-proxy/ui'
+
 import { MonitorUp, PackageOpen, TerminalSquare } from '@lucide/vue'
 import { shallowRef } from 'vue'
-
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
 
 import ClientCliInstallPanel from './ClientCliInstallPanel.vue'
 import ClientDesktopInstallPanel from './ClientDesktopInstallPanel.vue'

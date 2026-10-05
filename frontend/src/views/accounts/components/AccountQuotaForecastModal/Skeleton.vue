@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import BaseSkeleton from '@/components/base/BaseSkeleton.vue'
+import { BaseSkeleton } from '@codex-proxy/ui'
 </script>
 
 <template>
   <div role="status" aria-busy="true">
     <span class="sr-only">正在加载额度预测</span>
     <div aria-hidden="true">
-      <div class="flex min-h-96 flex-col justify-between gap-5 rounded-cp-card bg-cp-fill-tertiary/70 p-4 [html[data-theme=light]_&]:bg-cp-fill-quaternary/70">
+      <div class="flex flex-col gap-5 rounded-cp-card bg-cp-fill-tertiary/70 p-4 [html[data-theme=light]_&]:bg-cp-fill-quaternary/70">
         <div>
           <div class="flex items-center justify-between gap-3">
             <BaseSkeleton shape="text" class="w-16" />
@@ -32,11 +32,6 @@ import BaseSkeleton from '@/components/base/BaseSkeleton.vue'
               <BaseSkeleton class="h-6 w-24 justify-self-end" />
             </div>
           </div>
-        </div>
-
-        <div class="flex justify-between gap-3">
-          <BaseSkeleton shape="text" class="w-28" />
-          <BaseSkeleton shape="text" class="w-32" />
         </div>
       </div>
     </div>

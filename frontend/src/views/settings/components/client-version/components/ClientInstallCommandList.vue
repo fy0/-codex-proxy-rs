@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Copy } from '@lucide/vue'
+import { BaseIconButton } from '@codex-proxy/ui'
 
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
+import { Copy } from '@lucide/vue'
 import { useCopyText } from '@/composables/useCopyText'
 
 defineOptions({ name: 'ClientInstallCommandList' })

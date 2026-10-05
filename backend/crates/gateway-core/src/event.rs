@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -202,6 +203,7 @@ pub struct ProtocolWireEvent {
     has_json_data: bool,
     raw_sse_frame: Option<Bytes>,
     raw_json_body: Option<Bytes>,
+    raw_http_body: Option<Bytes>,
     sse_id: Option<String>,
     sse_retry: Option<u64>,
 }
@@ -241,6 +243,7 @@ impl ProtocolWireEvent {
             has_json_data: true,
             raw_sse_frame: None,
             raw_json_body: None,
+            raw_http_body: None,
             sse_id,
             sse_retry,
         })
@@ -288,6 +291,7 @@ impl ProtocolWireEvent {
             has_json_data: false,
             raw_sse_frame: Some(raw_sse_frame),
             raw_json_body: None,
+            raw_http_body: None,
             sse_id: None,
             sse_retry: None,
         })
@@ -313,6 +317,31 @@ impl ProtocolWireEvent {
             has_json_data: false,
             raw_sse_frame: None,
             raw_json_body: Some(raw_json_body),
+            raw_http_body: None,
+            sse_id: None,
+            sse_retry: None,
+        })
+    }
+
+    /// 创建未经改写的 HTTP 响应正文片段；正文不要求为 JSON。
+    ///
+    /// # Errors
+    ///
+    /// 协议名不满足内部路由标识约束时返回错误。
+    pub fn raw_http_body(
+        protocol: impl Into<String>,
+        raw_http_body: Bytes,
+    ) -> Result<Self, IdentifierError> {
+        let protocol = protocol.into();
+        validate_text(&protocol, 64, true, None)?;
+        Ok(Self {
+            protocol,
+            event_type: None,
+            data: Value::Null,
+            has_json_data: false,
+            raw_sse_frame: None,
+            raw_json_body: None,
+            raw_http_body: Some(raw_http_body),
             sse_id: None,
             sse_retry: None,
         })
@@ -372,6 +401,18 @@ impl ProtocolWireEvent {
         self.raw_json_body
     }
 
+    /// 返回可直接交付给 HTTP 客户端的任意响应正文片段。
+    #[must_use]
+    pub const fn raw_http_body_bytes(&self) -> Option<&Bytes> {
+        self.raw_http_body.as_ref()
+    }
+
+    /// 拆出未经改写的 HTTP 响应正文片段。
+    #[must_use]
+    pub fn into_raw_http_body(self) -> Option<Bytes> {
+        self.raw_http_body
+    }
+
     /// 拆出协议原生 JSON 数据。
     #[must_use]
     pub fn into_data(self) -> Value {
@@ -388,6 +429,7 @@ impl fmt::Debug for ProtocolWireEvent {
             .field("has_json_data", &self.has_json_data)
             .field("has_raw_sse_frame", &self.raw_sse_frame.is_some())
             .field("has_raw_json_body", &self.raw_json_body.is_some())
+            .field("has_raw_http_body", &self.raw_http_body.is_some())
             .field("has_sse_id", &self.sse_id.is_some())
             .field("sse_retry", &self.sse_retry)
             .field("data", &"<not included in Debug>")
@@ -734,6 +776,8 @@ pub struct ProviderEvent {
     wire: Option<Box<ProtocolWireEvent>>,
     observation: Option<Box<ProviderResponseObservation>>,
     session_update: Option<Box<ProviderSessionState>>,
+    middleware_transformed: bool,
+    middleware_origin_wire: Option<Arc<ProtocolWireEvent>>,
 }
 
 impl ProviderEvent {
@@ -745,7 +789,16 @@ impl ProviderEvent {
             wire: None,
             observation: None,
             session_update: None,
+            middleware_transformed: false,
+            middleware_origin_wire: None,
         }
+    }
+
+    /// 附加同一上游事件产生的业务事实，不重复生成协议输出。
+    #[must_use]
+    pub fn with_fact(mut self, fact: GatewayEvent) -> Self {
+        self.canonical.push(fact);
+        self
     }
 
     /// 创建只有协议原生表达的事件。
@@ -756,6 +809,8 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
+            middleware_transformed: false,
+            middleware_origin_wire: None,
         }
     }
 
@@ -767,6 +822,8 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
+            middleware_transformed: false,
+            middleware_origin_wire: None,
         }
     }
 
@@ -778,7 +835,49 @@ impl ProviderEvent {
             wire: None,
             observation: Some(Box::new(observation)),
             session_update: None,
+            middleware_transformed: false,
+            middleware_origin_wire: None,
         }
+    }
+
+    /// 返回协议表达是否由中间件替换、展开或丢弃映射产生。
+    ///
+    /// 宿主最终协议边界据此启用严格复核，插件可读取其快照。
+    #[must_use]
+    pub const fn middleware_transformed(&self) -> bool {
+        self.middleware_transformed
+    }
+
+    /// 返回中间件第一次改写前的协议表达，供协议复核和插件读取。
+    #[must_use]
+    pub fn middleware_origin_wire(&self) -> Option<&ProtocolWireEvent> {
+        self.middleware_origin_wire.as_deref()
+    }
+
+    /// 记录宿主已经确认的中间件改写；后续原生编码和投递必须继续传播。
+    pub(crate) fn mark_middleware_transformed(&mut self) {
+        self.middleware_transformed = true;
+    }
+
+    /// 用中间件输出替换正文，同时冻结第一次改写前的原始 wire。
+    pub(crate) fn replace_middleware_wire(&mut self, wire: Option<ProtocolWireEvent>) {
+        let previous = self.wire.take();
+        if self.middleware_origin_wire.is_none() {
+            self.middleware_origin_wire = previous.map(Arc::from);
+        }
+        self.wire = wire.map(Box::new);
+        self.middleware_transformed = true;
+    }
+
+    /// 一对多或内建协议转换生成的新封套继承同一份宿主 provenance。
+    pub(crate) fn inherit_middleware_provenance(&mut self, source: &Self) {
+        self.middleware_transformed = source.middleware_transformed;
+        self.middleware_origin_wire = source.middleware_origin_wire.clone();
+    }
+
+    /// 把响应观察附在同一上游封套，不拆分或重复交付原生表达。
+    pub fn attach_observation(&mut self, observation: ProviderResponseObservation) {
+        self.observation = Some(Box::new(observation));
     }
 
     /// 附加 Provider 私有状态检查点；Core 可将其用于同请求恢复，协议连接可在
@@ -809,6 +908,11 @@ impl ProviderEvent {
     #[must_use]
     pub fn wire_event(&self) -> Option<&ProtocolWireEvent> {
         self.wire.as_deref()
+    }
+
+    /// 仅替换客户端协议表达；canonical facts、响应观察和会话状态保持原始事实。
+    pub fn replace_wire(&mut self, wire: Option<ProtocolWireEvent>) {
+        self.wire = wire.map(Box::new);
     }
 
     /// 取出仅供 Core 持久化的响应观察。

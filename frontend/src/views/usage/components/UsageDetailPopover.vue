@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { Info } from '@lucide/vue'
+import { BasePopover } from '@codex-proxy/ui'
 
-import BasePopover from '@/components/base/BasePopover.vue'
+import { Info } from '@lucide/vue'
 
 // 表格单元格的“信息点”悬浮明细：统一触发按钮与面板壳。
 defineProps<{
   title: string
   triggerLabel: string
+  tone?: 'primary' | 'warning'
 }>()
 </script>
 
@@ -18,7 +19,10 @@ defineProps<{
     <template #trigger>
       <button
         type="button"
-        class="inline-flex size-4 items-center justify-center rounded-full bg-cp-primary-container text-cp-primary-on-container outline-none hover:bg-cp-primary-container-hover focus-visible:ring-2 focus-visible:ring-cp-control-outline"
+        class="inline-flex size-4 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline"
+        :class="tone === 'warning'
+          ? 'bg-cp-warning-container text-cp-warning-on-container hover:bg-cp-warning-container-hover'
+          : 'bg-cp-primary-container text-cp-primary-on-container hover:bg-cp-primary-container-hover'"
         :aria-label="triggerLabel"
       >
         <Info class="size-3" />

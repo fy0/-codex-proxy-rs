@@ -45,6 +45,7 @@ impl CodexBackendClient {
             "x-codex-turn-metadata",
             context.turn_metadata,
         );
+        self.append_middleware_headers(&mut headers)?;
 
         let trace = context
             .trace

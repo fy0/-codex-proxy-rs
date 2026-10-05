@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import BaseSkeleton from '@/components/base/BaseSkeleton.vue'
+import { BaseSkeleton } from '@codex-proxy/ui'
 </script>
 
 <template>

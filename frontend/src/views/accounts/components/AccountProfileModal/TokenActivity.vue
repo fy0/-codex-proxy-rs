@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import type { ProfileActivityLevel, ProfileActivityMode } from '../../utils/accountProfileStatistics'
-import type { AccountProfileDailyUsage } from '@/api'
-import { computed, shallowRef } from 'vue'
+import type { ProfileActivityCalendar } from '@/api'
+import { BaseEmpty, BaseSegmented } from '@codex-proxy/ui'
 
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import { computed, shallowRef } from 'vue'
 import { buildProfileActivityGrid, profileActivityCellLabel } from '../../utils/accountProfileStatistics'
 
 const props = defineProps<{
-  dailyUsage: AccountProfileDailyUsage[] | null
+  calendar: ProfileActivityCalendar | null
 }>()
 
 const mode = shallowRef<ProfileActivityMode>('daily')
@@ -24,8 +23,8 @@ const levelClasses: Record<ProfileActivityLevel, string> = {
   3: 'bg-cp-activity-level-3',
   4: 'bg-cp-activity-level-4',
 }
-const grid = computed(() => buildProfileActivityGrid(props.dailyUsage ?? [], mode.value))
-const rangeLabel = computed(() => `${grid.value.rangeStart} 至 ${grid.value.rangeEnd}`)
+const grid = computed(() => buildProfileActivityGrid(props.calendar, mode.value))
+const rangeLabel = computed(() => grid.value.rangeLabel)
 const monthLabels = computed(() =>
   grid.value.weeks.flatMap((week, weekIndex) =>
     week.monthLabel ? [{ label: week.monthLabel, weekIndex }] : [],
@@ -45,9 +44,9 @@ const monthLabels = computed(() =>
     </div>
 
     <BaseEmpty
-      v-if="dailyUsage === null"
+      v-if="calendar === null"
       title="暂无 Token 活动"
-      description="本次未获取到每日 Token 活动。"
+      description="本次未获取到每日 Token 活动"
       size="sm"
       surface="none"
     />

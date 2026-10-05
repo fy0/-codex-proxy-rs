@@ -22,17 +22,19 @@ use crate::model::{
     },
     auth::{AdminAuditEvent, AuthSession},
     client_keys::{
-        ClientKeyListQuery, ClientKeyPage, ClientKeyRecord, ClientKeySecret, DeleteClientKey,
-        NewClientKey, SetClientKeyEnabled, UpdateClientKey,
+        ClientKeyBudgetMutationOrigin, ClientKeyListQuery, ClientKeyPage, ClientKeyRecord,
+        ClientKeySecret, DeleteClientKey, NewClientKey, ResetClientKeyBudget, SetClientKeyEnabled,
+        UpdateClientKey, UpdateClientKeyBudgetLimits,
     },
     observability::{
-        DashboardObservation, DashboardRuntimeSlots, DiagnosticDimension, DiagnosticObservation,
+        DashboardObservation, DashboardRuntimeSlots, DiagnosticDimension, DiagnosticsObservation,
         OpsErrorPage, OpsErrorQuery, RequestMetricPoint, TimeRange, UsageCalculatedBillingFact,
         UsageDetail, UsageFilter, UsageOverview, UsagePage, UsageQuery,
     },
     provider_credentials::{
         AuthorizationCommit, CredentialDetails, CredentialImportCommit, CredentialImportResult,
-        CredentialMutationResult, CredentialRotationCommit, ProviderExportCredentialInput,
+        CredentialMutationResult, CredentialRotationCommit, PluginAccountListQuery,
+        PluginAccountPage, ProviderExportCredentialInput,
     },
     quota_forecast_sampling::QuotaForecastHistory,
     settings::{AdminApiKey, AdminApiKeyMutation, ReplaceRuntimeSettings, RuntimeSettings},
@@ -88,141 +90,11 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
-    /// 仅管理员主动复制时读取当前票或候选，状态轮询不携带正文。
-    async fn turn_state_token(
+    /// 插件回调按授权 Provider/账号在数据库过滤后做稳定 cursor 分页。
+    async fn list_plugin_accounts(
         &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _issued_at: i64,
-        _observation_id: Option<i64>,
-    ) -> AdminStoreResult<Option<gateway_core::account::TurnStateToken>> {
-        Ok(None)
-    }
-
-    async fn remove_turn_state(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _issued_at: i64,
-        _context: &MutationContext,
-    ) -> AdminStoreResult<AccountUpdateResult> {
-        Err(AdminStoreError::new(
-            AdminStoreErrorKind::Unavailable,
-            "turn_state",
-            "turn state removal unavailable",
-        ))
-    }
-
-    async fn apply_turn_state(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _issued_at: i64,
-        _observation_id: Option<i64>,
-        _context: &MutationContext,
-    ) -> AdminStoreResult<AccountUpdateResult> {
-        Err(AdminStoreError::new(
-            AdminStoreErrorKind::Unavailable,
-            "turn_state",
-            "turn state store unavailable",
-        ))
-    }
-
-    /// 仅管理员主动复制时读取路由 Cookie 正文，状态轮询不携带值。
-    async fn turn_state_cookie(
-        &self,
-        _pod: &str,
-    ) -> AdminStoreResult<Option<gateway_core::account::RoutingCookie>> {
-        Ok(None)
-    }
-
-    /// 某一条探测记录上保存的路由 Cookie。没有正文时返回空。
-    async fn recorded_routing_cookie(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _observation_id: i64,
-    ) -> AdminStoreResult<Option<gateway_core::account::RoutingCookie>> {
-        Ok(None)
-    }
-
-    /// 把探测记录上的 Cookie 写回共享池，供人工固定后的请求回放。
-    async fn restore_routing_cookie(
-        &self,
-        _cookie: &gateway_core::account::RoutingCookie,
-    ) -> AdminStoreResult<()> {
-        Ok(())
-    }
-
-    /// 账号凭据里仍可回放的 Cookie，不含路由票。复制时和路由票拼成完整请求头。
-    async fn account_replay_cookies(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-    ) -> AdminStoreResult<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
-
-    async fn apply_turn_state_cookie(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _cookie: &gateway_core::account::RoutingCookie,
-        _observation_id: i64,
-        _context: &MutationContext,
-    ) -> AdminStoreResult<AccountUpdateResult> {
-        Err(AdminStoreError::new(
-            AdminStoreErrorKind::Unavailable,
-            "turn_state",
-            "routing cookie store unavailable",
-        ))
-    }
-
-    async fn remove_turn_state_cookie(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _context: &MutationContext,
-    ) -> AdminStoreResult<AccountUpdateResult> {
-        Err(AdminStoreError::new(
-            AdminStoreErrorKind::Unavailable,
-            "turn_state",
-            "routing cookie store unavailable",
-        ))
-    }
-
-    async fn request_turn_state_probe(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _context: &MutationContext,
-    ) -> AdminStoreResult<AccountUpdateResult> {
-        Err(AdminStoreError::new(
-            AdminStoreErrorKind::Unavailable,
-            "turn_state",
-            "turn state store unavailable",
-        ))
-    }
-
-    async fn turn_state_status(
-        &self,
-        _account_id: Option<&str>,
-    ) -> AdminStoreResult<Vec<gateway_core::account::TurnStateStatus>> {
-        Ok(Vec::new())
-    }
-
-    async fn configure_turn_state(
-        &self,
-        _account_id: &gateway_core::account::ProviderAccountId,
-        _model: &str,
-        _config: gateway_core::account::TurnStateConfig,
-        _context: &MutationContext,
-    ) -> AdminStoreResult<AccountUpdateResult> {
-        Err(AdminStoreError::new(
-            AdminStoreErrorKind::Unavailable,
-            "turn_state",
-            "turn state store unavailable",
-        ))
-    }
+        query: PluginAccountListQuery,
+    ) -> AdminStoreResult<PluginAccountPage>;
 
     async fn list_accounts(
         &self,
@@ -259,11 +131,23 @@ pub trait AccountStore: Send + Sync {
         account_id: &gateway_core::account::ProviderAccountId,
     ) -> AdminStoreResult<Option<CredentialDetails>>;
 
+    /// 插件按全局账号 ID 读取时，由数据库记录提供权威 Provider 归属。
+    async fn credential_details_by_id(
+        &self,
+        account_id: &gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<Option<CredentialDetails>>;
+
     async fn load_credentials_for_export(
         &self,
         provider_kind: &gateway_core::routing::ProviderKind,
         account_ids: &[gateway_core::account::ProviderAccountId],
     ) -> AdminStoreResult<Vec<ProviderExportCredentialInput>>;
+
+    /// 插件凭据读取只接收账号 ID，不接受调用方另行声明 Provider。
+    async fn load_credential_for_plugin(
+        &self,
+        account_id: &gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<Option<ProviderExportCredentialInput>>;
 
     async fn commit_credential_import(
         &self,
@@ -275,7 +159,13 @@ pub trait AccountStore: Send + Sync {
         &self,
         command: AuthorizationCommit,
         context: &MutationContext,
-    ) -> AdminStoreResult<CredentialMutationResult>;
+    ) -> AdminStoreResult<crate::model::provider_credentials::AuthorizationCommitResult>;
+
+    /// 已提交的授权结果独立于 Redis 临时状态；只有原管理员身份可读。
+    async fn authorization_receipt(
+        &self,
+        key: &crate::model::provider_credentials::AuthorizationReceiptKey,
+    ) -> AdminStoreResult<Option<crate::model::provider_credentials::CredentialMutationResult>>;
 
     async fn commit_credential_rotation(
         &self,
@@ -363,6 +253,15 @@ pub trait AccountRuntimeStore: Send + Sync {
 pub trait AuthStore: Send + Sync {
     async fn load_password_hash(&self, admin_user_id: &str) -> AdminStoreResult<Option<String>>;
 
+    /// 密码更新与审计必须在同一事务提交；旧哈希不匹配时不写入。
+    async fn change_password(
+        &self,
+        admin_user_id: &str,
+        expected_hash: &str,
+        password_hash: &str,
+        audit: AdminAuditEvent,
+    ) -> AdminStoreResult<bool>;
+
     async fn create_password_hash_if_absent(
         &self,
         admin_user_id: &str,
@@ -433,6 +332,22 @@ pub trait ClientKeyStore: Send + Sync {
         command: DeleteClientKey,
         context: &MutationContext,
     ) -> AdminStoreResult<Revision>;
+
+    /// 局部更新预算上限，保留其他策略和账本；无变化时不产生配置版本或审计。
+    async fn update_client_key_budget_limits(
+        &self,
+        command: UpdateClientKeyBudgetLimits,
+        origin: ClientKeyBudgetMutationOrigin,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Option<Revision>>;
+
+    /// 仅修改运行时账本并原子记录审计，不推进配置版本。
+    async fn reset_client_key_budget(
+        &self,
+        command: ResetClientKeyBudget,
+        origin: ClientKeyBudgetMutationOrigin,
+        context: &MutationContext,
+    ) -> AdminStoreResult<()>;
 }
 
 /// Provider-neutral account group management transactions.
@@ -529,7 +444,7 @@ pub trait ObservabilityStore: Send + Sync {
         range: TimeRange,
         filter: UsageFilter,
         dimension: DiagnosticDimension,
-    ) -> AdminStoreResult<Vec<DiagnosticObservation>>;
+    ) -> AdminStoreResult<DiagnosticsObservation>;
 
     async fn list_ops_errors(&self, query: OpsErrorQuery) -> AdminStoreResult<OpsErrorPage>;
 }
@@ -537,6 +452,18 @@ pub trait ObservabilityStore: Send + Sync {
 /// Runtime settings 与管理员 API Key 写入。
 #[async_trait]
 pub trait SettingsStore: Send + Sync {
+    async fn load_pricing(&self) -> AdminStoreResult<crate::model::pricing::StoredPricing>;
+    async fn sync_pricing(
+        &self,
+        changes: crate::model::pricing::PricingSyncChanges,
+        context: &MutationContext,
+    ) -> AdminStoreResult<crate::model::Revision>;
+    async fn update_pricing(
+        &self,
+        command: crate::model::pricing::UpdatePricing,
+        context: &MutationContext,
+    ) -> AdminStoreResult<crate::model::Revision>;
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings>;
 
     async fn admin_api_key_exists(&self) -> AdminStoreResult<bool>;
@@ -596,9 +523,31 @@ pub struct AdminStorePorts {
     observability: Arc<dyn ObservabilityStore>,
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
+    plugins: Arc<dyn super::plugins::PluginStore>,
+    plugin_state: Arc<dyn super::plugins::PluginStateStore>,
+    plugin_resources: Arc<dyn super::plugin_resources::PluginResourceStore>,
 }
 
 impl AdminStorePorts {
+    #[must_use]
+    pub fn plugin_resources(&self) -> Arc<dyn super::plugin_resources::PluginResourceStore> {
+        self.plugin_resources.clone()
+    }
+
+    #[must_use]
+    pub fn plugins(&self) -> Arc<dyn super::plugins::PluginStore> {
+        Arc::clone(&self.plugins)
+    }
+
+    #[must_use]
+    pub fn plugin_state(&self) -> Arc<dyn super::plugins::PluginStateStore> {
+        Arc::clone(&self.plugin_state)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "组合根需显式注入各领域窄端口，不能用服务定位器隐藏依赖"
+    )]
     #[must_use]
     pub fn new(
         accounts: AdminAccountStorePorts,
@@ -607,6 +556,9 @@ impl AdminStorePorts {
         observability: Arc<dyn ObservabilityStore>,
         settings: Arc<dyn SettingsStore>,
         backup: BackupStorePorts,
+        plugins: Arc<dyn super::plugins::PluginStore>,
+        plugin_state: Arc<dyn super::plugins::PluginStateStore>,
+        plugin_resources: Arc<dyn super::plugin_resources::PluginResourceStore>,
     ) -> Self {
         Self {
             accounts,
@@ -615,6 +567,9 @@ impl AdminStorePorts {
             observability,
             settings,
             backup,
+            plugins,
+            plugin_state,
+            plugin_resources,
         }
     }
 

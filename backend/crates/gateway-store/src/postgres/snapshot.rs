@@ -8,10 +8,10 @@ use gateway_core::routing::{
     AccountGroupId, ConfigRevision,
     snapshot::{
         SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts,
-        SnapshotFacts, SnapshotProviderAccountFacts, SnapshotSettingsFacts, SnapshotStoreError,
-        SnapshotStorePort,
+        SnapshotFacts, SnapshotProviderAccountFacts, SnapshotStoreError, SnapshotStorePort,
     },
 };
+use gateway_core::settings::SettingsValues;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
@@ -20,7 +20,9 @@ use super::ClientApiKeySnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRuntimeSettings {
-    pub disable_fast: bool,
+    pub pricing: gateway_core::metering::PricingOverrides,
+    pub request_profiles:
+        BTreeMap<gateway_core::routing::ProviderKind, gateway_core::account::OpaqueProviderData>,
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
     pub refresh_margin_seconds: u64,
@@ -30,10 +32,11 @@ pub struct SnapshotRuntimeSettings {
     pub max_waiting_per_key: u32,
     pub max_waiting_per_account: u32,
     pub concurrency_wait_timeout_seconds: u32,
+    pub openai_guardian_reserved_concurrency: u32,
     pub responses_max_decompressed_body_bytes: u64,
+    pub smart_scheduling: gateway_core::account::SmartSchedulingConfig,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
-    pub bps_model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
 }
@@ -150,7 +153,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 .map_err(|_| SnapshotStoreError::unavailable())?;
             let config_revision = core_revision(data.config_revision)?;
             let observed_current_revision = core_revision(data.observed_current_revision)?;
-            let settings = SnapshotSettingsFacts::new(
+            let settings = SettingsValues::new(
                 data.settings.max_concurrent_per_account,
                 data.settings.request_interval_ms,
                 data.settings.rotation_strategy,
@@ -161,7 +164,12 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
             .with_responses_max_decompressed_body_bytes(
                 data.settings.responses_max_decompressed_body_bytes,
             )
-            .with_disable_fast(data.settings.disable_fast)
+            .with_openai_guardian_reserved_concurrency(
+                data.settings.openai_guardian_reserved_concurrency,
+            )
+            .with_smart_scheduling(data.settings.smart_scheduling)
+            .with_request_profiles(data.settings.request_profiles)
+            .with_pricing(data.settings.pricing)
             .with_request_location(
                 data.settings.request_location,
                 data.settings.request_location_enabled,
@@ -170,8 +178,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.max_waiting_per_key,
                 data.settings.max_waiting_per_account,
                 data.settings.concurrency_wait_timeout_seconds,
-            )
-            .with_bps_model_mappings(data.settings.bps_model_mappings);
+            );
             let client_policies = data
                 .client_api_keys
                 .into_iter()
@@ -182,6 +189,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         key.group_ids,
                         key.limits,
                     )
+                    .with_request_profiles(key.request_profiles)
                 })
                 .collect();
             let account_groups = data
@@ -243,16 +251,36 @@ fn core_revision(revision: Revision) -> Result<ConfigRevision, SnapshotStoreErro
     ConfigRevision::new(revision.get()).map_err(|_| SnapshotStoreError::unavailable())
 }
 
+#[derive(sqlx::FromRow)]
+struct SnapshotSettingsRow {
+    pricing_synced_json: sqlx::types::Json<gateway_core::metering::PricingOverrides>,
+    pricing_overrides_json: sqlx::types::Json<gateway_core::metering::PricingOverrides>,
+    config_revision: i64,
+    refresh_margin_seconds: i64,
+    refresh_concurrency: i64,
+    max_concurrent_per_account: i64,
+    request_interval_ms: i64,
+    smart_scheduling_json: sqlx::types::Json<gateway_core::account::SmartSchedulingConfig>,
+    rotation_strategy: String,
+    model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
+    min_codex_desktop_version: Option<String>,
+    min_codex_cli_version: Option<String>,
+    max_waiting_per_key: i64,
+    max_waiting_per_account: i64,
+    concurrency_wait_timeout_seconds: i64,
+    openai_guardian_reserved_concurrency: i64,
+    request_location_json: sqlx::types::Json<gateway_core::account::RequestLocation>,
+    request_location_enabled: bool,
+    responses_max_decompressed_body_bytes: i64,
+    provider_request_profiles_json:
+        sqlx::types::Json<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>,
+}
+
 async fn load_settings(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<(Revision, SnapshotRuntimeSettings)> {
-    // sqlx 元组 FromRow 最多 16 个字段，17 列改走具名行结构。
-    let row = sqlx::query_as::<_, SnapshotRuntimeSettingsRow>(
-        "select config_revision, refresh_margin_seconds, refresh_concurrency,
-                max_concurrent_per_account, request_interval_ms, rotation_strategy,
-                model_mappings_json, min_codex_desktop_version,
-                min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, request_location_json, request_location_enabled, responses_max_decompressed_body_bytes, disable_fast, bps_model_mappings_json
-         from runtime_settings where id = 1",
+    let row = sqlx::query_as::<_, SnapshotSettingsRow>(
+        "select config_revision, refresh_margin_seconds, refresh_concurrency, max_concurrent_per_account, request_interval_ms, rotation_strategy, smart_scheduling_json, model_mappings_json, min_codex_desktop_version, min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, openai_guardian_reserved_concurrency, request_location_json, request_location_enabled, responses_max_decompressed_body_bytes, provider_request_profiles_json, pricing_overrides_json, pricing_synced_json from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
     .await
@@ -264,7 +292,15 @@ async fn load_settings(
     Ok((
         revision_from_i64(row.config_revision)?,
         SnapshotRuntimeSettings {
-            disable_fast: row.disable_fast,
+            pricing: {
+                super::pricing::validate_pricing(&row.pricing_synced_json.0)?;
+                super::pricing::validate_pricing(&row.pricing_overrides_json.0)?;
+                gateway_core::metering::merge_pricing(
+                    row.pricing_synced_json.0,
+                    &row.pricing_overrides_json.0,
+                )
+            },
+            request_profiles: decode_request_profiles(row.provider_request_profiles_json.0)?,
             responses_max_decompressed_body_bytes: to_u64(
                 row.responses_max_decompressed_body_bytes,
             )?,
@@ -274,47 +310,37 @@ async fn load_settings(
             refresh_concurrency: to_u32(row.refresh_concurrency)?,
             max_concurrent_per_account: to_u32(row.max_concurrent_per_account)?,
             request_interval_ms: to_u64(row.request_interval_ms)?,
+            smart_scheduling: row.smart_scheduling_json.0,
             rotation_strategy: row.rotation_strategy,
             model_mappings: row.model_mappings_json.0,
-            bps_model_mappings: row.bps_model_mappings_json.0,
             min_codex_desktop_version: row.min_codex_desktop_version,
             min_codex_cli_version: row.min_codex_cli_version,
             max_waiting_per_key: to_u32(row.max_waiting_per_key)?,
             max_waiting_per_account: to_u32(row.max_waiting_per_account)?,
             concurrency_wait_timeout_seconds: to_u32(row.concurrency_wait_timeout_seconds)?,
+            openai_guardian_reserved_concurrency: to_u32(row.openai_guardian_reserved_concurrency)?,
         },
     ))
-}
-
-#[derive(sqlx::FromRow)]
-struct SnapshotRuntimeSettingsRow {
-    config_revision: i64,
-    refresh_margin_seconds: i64,
-    refresh_concurrency: i64,
-    max_concurrent_per_account: i64,
-    request_interval_ms: i64,
-    rotation_strategy: String,
-    model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
-    min_codex_desktop_version: Option<String>,
-    min_codex_cli_version: Option<String>,
-    max_waiting_per_key: i64,
-    max_waiting_per_account: i64,
-    concurrency_wait_timeout_seconds: i64,
-    request_location_json: sqlx::types::Json<gateway_core::account::RequestLocation>,
-    request_location_enabled: bool,
-    responses_max_decompressed_body_bytes: i64,
-    disable_fast: bool,
-    bps_model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
 }
 
 async fn load_client_keys(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<Vec<ClientApiKeySnapshot>> {
-    let rows = sqlx::query_as::<_, (String, String, Vec<String>, i64, i64)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Vec<String>,
+            i64,
+            i64,
+            sqlx::types::Json<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>,
+        ),
+    >(
         "select k.id, k.key,
                 coalesce(array_agg(kg.account_group_id order by kg.account_group_id)
                   filter (where kg.account_group_id is not null), '{}') as group_ids,
-                k.max_concurrency, k.requests_per_minute
+                k.max_concurrency, k.requests_per_minute, k.provider_request_profiles_json
          from client_api_keys k
          left join client_api_key_groups kg on kg.client_api_key_id = k.id
          where k.enabled
@@ -325,7 +351,11 @@ async fn load_client_keys(
     .await
     .map_err(|_| postgres_unavailable("load snapshot client policies"))?;
     rows.into_iter()
-        .map(|row| ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4))
+        .map(|row| {
+            let mut key = ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4)?;
+            key.request_profiles = decode_request_profiles(row.5.0)?;
+            Ok(key)
+        })
         .collect()
 }
 
@@ -415,4 +445,21 @@ fn invalid(message: &str) -> StoreError {
         entity: "runtime snapshot",
         message: message.to_owned(),
     }
+}
+
+fn decode_request_profiles(
+    profiles: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+) -> StoreResult<
+    BTreeMap<gateway_core::routing::ProviderKind, gateway_core::account::OpaqueProviderData>,
+> {
+    profiles
+        .into_iter()
+        .map(|(kind, document)| {
+            Ok((
+                gateway_core::routing::ProviderKind::new(kind)
+                    .map_err(|_| invalid("invalid request profile provider"))?,
+                gateway_core::account::OpaqueProviderData::new(document),
+            ))
+        })
+        .collect()
 }

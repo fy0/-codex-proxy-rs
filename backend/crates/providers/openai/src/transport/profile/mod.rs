@@ -1,11 +1,12 @@
 //! Codex Desktop 上游请求画像。
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::{StreamExt as _, future::BoxFuture};
-use gateway_core::account::{OpaqueProviderData, TurnStateConfig};
+use gateway_core::account::OpaqueProviderData;
 use gateway_core::provider_ports::{
     ProviderArtifactProfile, ProviderArtifactProfileCachePort, ProviderStoreError,
 };
@@ -13,13 +14,19 @@ use gateway_core::routing::ProviderKind;
 use reqwest::Client;
 use reqwest::redirect::Policy;
 use roxmltree::{Document, Node};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
 use self::desktop_artifact::{CodexDesktopArtifactError, fetch_codex_core_version};
 
+pub mod cli_release;
 pub mod desktop_artifact;
+pub mod identity;
+pub mod platform_release;
+pub mod selection;
+
+use selection::{ClientKind, ClientPlatform, ClientRelease};
 
 /// Codex Desktop 官方 appcast 地址。
 pub const CODEX_DESKTOP_APPCAST_URL: &str =
@@ -33,7 +40,7 @@ const ARTIFACT_PROFILE_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 
 const ARTIFACT_PROFILE_SCHEMA_VERSION: u64 = 1;
 
 /// 与官方 managed residency requirement 相同的可选请求约束。
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CodexResidency {
     Us,
@@ -42,15 +49,16 @@ pub enum CodexResidency {
 /// 保留已有配置类型入口；位置规则由出口领域统一维护。
 pub use gateway_core::account::RequestLocation as CodexRequestLocation;
 
-/// Codex Desktop 上游请求身份。
+/// Codex 上游请求身份快照。
 ///
-/// 启动配置提供经源码审计的 Core、运行环境和 Desktop 启动版本。运行时只会使用
-/// 同一个官方 Desktop ZIP 中核验出的 Core、Desktop 版本及构建号原子替换版本字段。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 预设按官方配套版本生成 UA；自定义身份保留完整 UA 及其配套请求头。
+/// 官方制品核验只更新独立的基线与预设资料，不改写已冻结的请求身份。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexWireProfile {
+    pub client_kind: ClientKind,
     /// `originator` 请求头及 User-Agent 产品名。
     pub originator: String,
-    /// Desktop ZIP 内嵌 Core 版本；用于模型请求的 version、client_version 与 UA。
+    /// Core 版本，用于模型请求的 version 和 client_version。
     pub codex_version: String,
     /// Desktop 应用版本，用于 app-server `clientInfo.version` 对应的 UA 后缀。
     pub desktop_version: String,
@@ -64,32 +72,52 @@ pub struct CodexWireProfile {
     pub arch: String,
     /// Codex Core UA 中的终端标记。
     pub terminal: String,
+    /// 入口专属或自定义的完整值；存在时不得用默认预设重新拼接。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_user_agent: Option<String>,
     /// 未配置时不发送 residency 头；不随制品版本更新而改变。
     pub residency: Option<CodexResidency>,
     /// 版本元组最后一次经制品核验的时间；不表示 TLS 传输已重新核验。
     pub verified_at: DateTime<Utc>,
 }
 
-impl CodexWireProfile {
-    /// 探测的正式 CLI 版本与 Desktop 制品独立，只继承部署环境画像。
-    pub fn turn_state_user_agent(&self, config: &TurnStateConfig) -> String {
-        if !config.user_agent.is_empty() {
-            return config.user_agent.clone();
+impl Default for CodexWireProfile {
+    fn default() -> Self {
+        Self {
+            client_kind: ClientKind::Desktop,
+            originator: "Codex Desktop".to_owned(),
+            codex_version: "0.153.4".to_owned(),
+            desktop_version: "26.901.51231".to_owned(),
+            desktop_build: "8109".to_owned(),
+            os_type: "Mac OS".to_owned(),
+            os_version: "15.7.1".to_owned(),
+            arch: "arm64".to_owned(),
+            terminal: "unknown".to_owned(),
+            exact_user_agent: None,
+            residency: None,
+            // 制品核验于 2026-09-06T03:26:12.084Z；进程启动不构成重新核验。
+            verified_at: DateTime::UNIX_EPOCH + chrono::Duration::milliseconds(1_788_665_172_084),
         }
-        let originator = &config.originator;
-        format!(
-            "{originator}/{} ({} {}; {}) {} ({originator}; {})",
-            config.client_version,
-            self.os_type,
-            self.os_version,
-            self.arch,
-            self.terminal,
-            config.client_version
-        )
     }
+}
 
-    /// 按 bundled Core app-server 的官方格式生成最终 User-Agent。
+impl CodexWireProfile {
+    /// 原样返回已解析的完整 UA；默认预设按 bundled Core app-server 格式生成。
     pub fn user_agent(&self) -> String {
+        if let Some(user_agent) = &self.exact_user_agent {
+            return user_agent.clone();
+        }
+        if self.client_kind == ClientKind::Cli {
+            return format!(
+                "{}/{} ({} {}; {}) {}",
+                self.originator,
+                self.codex_version,
+                self.os_type,
+                self.os_version,
+                self.arch,
+                self.terminal
+            );
+        }
         format!(
             "{}/{} ({} {}; {}) {} ({}; {})",
             self.originator,
@@ -121,14 +149,28 @@ impl CodexWireProfile {
 #[derive(Debug, Clone)]
 pub struct CodexWireProfileState {
     profile: Arc<RwLock<CodexWireProfile>>,
+    releases: Arc<RwLock<ClientReleases>>,
+}
+
+type ClientReleases = BTreeMap<(ClientKind, ClientPlatform, String), ClientReleaseObservation>;
+
+#[derive(Debug, Clone, Default)]
+struct ClientReleaseObservation {
+    release: Option<ClientRelease>,
+    checked_at: Option<DateTime<Utc>>,
+    error: Option<String>,
 }
 
 impl CodexWireProfileState {
     /// 从启动画像创建运行时状态。
     pub fn new(profile: CodexWireProfile) -> Self {
-        Self {
+        let state = Self {
             profile: Arc::new(RwLock::new(profile)),
-        }
+            releases: Arc::default(),
+        };
+        cli_release::seed_releases(&state);
+        platform_release::seed_releases(&state);
+        state
     }
 
     /// 返回当前画像的独立快照，避免持锁执行网络请求。
@@ -149,6 +191,82 @@ impl CodexWireProfileState {
         profile.desktop_version.clone_from(&release.desktop_version);
         profile.desktop_build.clone_from(&release.desktop_build);
         profile.verified_at = release.verified_at;
+    }
+
+    pub fn client_release(
+        &self,
+        client: ClientKind,
+        platform: ClientPlatform,
+        arch: &str,
+    ) -> Option<ClientRelease> {
+        if client == ClientKind::Desktop && platform == ClientPlatform::Macos && arch == "arm64" {
+            let profile = self.snapshot();
+            return Some(ClientRelease {
+                codex_version: profile.codex_version,
+                desktop_version: Some(profile.desktop_version),
+                desktop_build: Some(profile.desktop_build),
+                verified_at: Some(profile.verified_at),
+            });
+        }
+        self.releases
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(client, platform, arch.to_owned()))
+            .and_then(|state| state.release.clone())
+    }
+
+    pub fn client_release_status(
+        &self,
+        client: ClientKind,
+        platform: ClientPlatform,
+        arch: &str,
+    ) -> (Option<DateTime<Utc>>, Option<String>) {
+        self.releases
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(client, platform, arch.to_owned()))
+            .map_or((None, None), |state| {
+                (state.checked_at, state.error.clone())
+            })
+    }
+
+    fn seed_client_release(
+        &self,
+        client: ClientKind,
+        platform: ClientPlatform,
+        arch: &str,
+        release: ClientRelease,
+    ) {
+        self.releases
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry((client, platform, arch.to_owned()))
+            .or_default()
+            .release = Some(release);
+    }
+
+    pub(crate) fn record_client_release(
+        &self,
+        client: ClientKind,
+        platform: ClientPlatform,
+        arch: &str,
+        result: Result<ClientRelease, String>,
+    ) {
+        let mut states = self
+            .releases
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = states
+            .entry((client, platform, arch.to_owned()))
+            .or_default();
+        state.checked_at = Some(Utc::now());
+        match result {
+            Ok(release) => {
+                state.release = Some(release);
+                state.error = None;
+            }
+            Err(error) => state.error = Some(error),
+        }
     }
 }
 
@@ -199,7 +317,7 @@ impl CodexArtifactProfileCache {
         &self,
     ) -> Result<Option<CodexBundledReleaseProfile>, CodexDesktopReleaseError> {
         self.store
-            .read(&self.provider_kind)
+            .read(&self.provider_kind, "desktop-macos-arm64")
             .await
             .map_err(CodexDesktopReleaseError::ArtifactCache)?
             .map(decode_artifact_profile)
@@ -254,6 +372,7 @@ fn encode_artifact_profile(
     );
     Ok(ProviderArtifactProfile::new(
         provider_kind,
+        "desktop-macos-arm64".to_owned(),
         artifact_sequence,
         profile.verified_at.into(),
         OpaqueProviderData::new(fields),
@@ -470,10 +589,27 @@ impl CodexDesktopReleaseService {
         match result {
             Ok(release) => {
                 self.status.record_success(checked_at, release.clone());
+                if let Some(current) =
+                    self.profile
+                        .client_release(ClientKind::Desktop, ClientPlatform::Macos, "arm64")
+                {
+                    self.profile.record_client_release(
+                        ClientKind::Desktop,
+                        ClientPlatform::Macos,
+                        "arm64",
+                        Ok(current),
+                    );
+                }
                 Ok(release)
             }
             Err(error) => {
                 self.status.record_failure(checked_at, &error);
+                self.profile.record_client_release(
+                    ClientKind::Desktop,
+                    ClientPlatform::Macos,
+                    "arm64",
+                    Err(error.to_string()),
+                );
                 Err(error)
             }
         }

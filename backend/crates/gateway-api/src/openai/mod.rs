@@ -4,14 +4,16 @@ pub mod auth;
 mod endpoint;
 pub mod error;
 pub mod images;
+pub(crate) mod middleware;
 pub mod models;
 pub mod responses;
 pub mod router;
 pub mod search;
 pub(crate) mod service;
+mod usage;
 
 /// 客户端可读的 ID 必须能按现有请求记录检索；不以无关入口 ID 补位。
-fn with_model_request_id(
+pub(crate) fn with_model_request_id(
     mut response: axum::response::Response,
     request_id: &gateway_core::engine::ModelRequestId,
 ) -> axum::response::Response {

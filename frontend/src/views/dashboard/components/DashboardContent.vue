@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import type { dashboardSnapshotView, dashboardTrendView } from '../composables/useDashboard'
 import type { DashboardTrendKind } from '@/api/modules/dashboard'
-import { RefreshCw } from '@lucide/vue'
+import { BaseIconButton, BasePageHeader } from '@codex-proxy/ui'
 
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import { RefreshCw } from '@lucide/vue'
 
 import AccountOverviewCard from './AccountOverviewCard.vue'
 import DashboardHeartbeat from './DashboardHeartbeat.vue'

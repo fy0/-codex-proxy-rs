@@ -61,7 +61,7 @@ pub struct NativeContinuationPin {
     provider: ProviderKind,
     account: ProviderAccountId,
     scope: NativeContinuationScope,
-    session_state: Option<ProviderSessionState>,
+    session_state: Option<Box<ProviderSessionState>>,
 }
 
 impl NativeContinuationPin {
@@ -94,7 +94,7 @@ impl NativeContinuationPin {
     /// 附着仅由对应 Provider 解释的不透明会话状态。
     #[must_use]
     pub fn with_session_state(mut self, state: ProviderSessionState) -> Self {
-        self.session_state = Some(state);
+        self.session_state = Some(Box::new(state));
         self
     }
 
@@ -136,8 +136,8 @@ impl NativeContinuationPin {
 
     /// 返回与本 pin 同账号绑定的 Provider 私有会话状态。
     #[must_use]
-    pub const fn session_state(&self) -> Option<&ProviderSessionState> {
-        self.session_state.as_ref()
+    pub fn session_state(&self) -> Option<&ProviderSessionState> {
+        self.session_state.as_deref()
     }
 
     /// 校验本次 route/account 选择没有破坏 native pin。

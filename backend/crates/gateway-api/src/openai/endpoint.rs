@@ -1,66 +1,134 @@
 //! OpenAI Provider 原生非流式 JSON 端点的公共交付边界。
 
+use std::net::IpAddr;
+
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use gateway_core::engine::execution::{ExecutionSession, StartedExecution};
+use gateway_core::{
+    engine::{
+        execution::{AuthenticatedClient, StartedExecution},
+        middleware::{MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareResponse},
+    },
+    error::GatewayError,
+    operation::Operation,
+};
+
+use crate::middleware::headers::encode_headers;
+use crate::openai::middleware::{
+    ExpectedBody, PendingExecution, RequestInput, buffered_response, error_response,
+    into_http_response, invoke_request, pending_execution_response, request_parts,
+};
 use gateway_core::event::{ProviderEvent, ProviderResponseHeader};
 
 use super::{
-    error::{engine_error_response, protocol_error_response},
-    responses::{PendingExecution, ProtocolError, ProtocolErrorBody},
+    error::{engine_error_response, gateway_error_response, protocol_error_response},
+    responses::{ProtocolError, ProtocolErrorBody},
+    service::OpenAiService,
 };
 
-/// 收集一个 Provider 原生 JSON 响应，并在 Core commit 后按原始 bytes 交付。
-pub(super) async fn collect_raw_json_response(started: StartedExecution) -> Response {
-    let response = collect_raw_json_session(started.session).await;
-    super::with_model_request_id(response, &started.request_id)
+/// Provider 自有端点也先冻结身份，再通过统一请求链进入原有执行与结算路径。
+pub(super) async fn provider_endpoint_response<F>(
+    service: OpenAiService,
+    client: AuthenticatedClient,
+    input: RequestInput,
+    client_ip: Option<IpAddr>,
+    user_agent: Option<String>,
+    decode: F,
+) -> Response
+where
+    F: FnOnce(Bytes, &HeaderMap) -> Result<Operation, GatewayError> + Send + 'static,
+{
+    let execution = service.execution();
+    let prepared = match execution.prepare_execution(client).await {
+        Ok(prepared) => prepared,
+        Err(error) => return gateway_error_response(&error),
+    };
+    let request_id = prepared.request_id().clone();
+    let endpoint = input.endpoint.clone();
+    let result = invoke_request(
+        execution,
+        prepared,
+        input,
+        Box::new(move |prepared, request| {
+            Box::pin(async move {
+                let (protocol, headers, body) = request_parts(request.clone())?;
+                if protocol != "openai" {
+                    return Err(MiddlewareError::Rejected);
+                }
+                let operation = request.apply_capabilities(decode(body, &headers)?)?;
+                let started = match service
+                    .start_prepared_provider_endpoint(
+                        prepared, operation, client_ip, user_agent, endpoint,
+                    )
+                    .await
+                {
+                    Ok(started) => started,
+                    Err(error) => {
+                        return buffered_response("openai", gateway_error_response(&error)).await;
+                    }
+                };
+                collect_raw_json_response(started).await
+            })
+        }),
+    )
+    .await;
+    let response = match result {
+        Ok(response) => into_http_response(response, ExpectedBody::SingleJson).await,
+        Err(error) => error_response(error),
+    };
+    if response.headers().contains_key("x-gateway-request-id") {
+        response
+    } else {
+        super::with_model_request_id(response, &request_id)
+    }
 }
 
-async fn collect_raw_json_session(session: Box<dyn ExecutionSession>) -> Response {
-    let mut execution = PendingExecution::new(session);
-    let Some(session) = execution.session_mut() else {
-        return invalid_upstream_response();
+/// 只收集正文，不提前 commit；外层完成响应变换与校验后才提交 Core。
+async fn collect_raw_json_response(
+    started: StartedExecution,
+) -> Result<MiddlewareResponse, MiddlewareError> {
+    let mut execution = PendingExecution::new(started.session);
+    let session = execution
+        .session_mut()
+        .ok_or(MiddlewareError::InvalidState)?;
+    let events = session.collect_uncommitted().await;
+    let transformed = events
+        .as_ref()
+        .is_ok_and(|events| events.iter().any(ProviderEvent::middleware_transformed));
+    let response = match events {
+        Ok(events) => match raw_json_body(events) {
+            Some(body) => {
+                let status = session
+                    .response_status_code()
+                    .and_then(|status| StatusCode::from_u16(status).ok())
+                    .filter(StatusCode::is_success)
+                    .unwrap_or(StatusCode::OK);
+                json_body_response(body, status, session.response_headers())
+            }
+            None => invalid_upstream_response(),
+        },
+        Err(error) => engine_error_response(&error),
     };
-    let events = match session.collect_uncommitted().await {
-        Ok(events) => events,
-        Err(error) => {
-            let response = engine_error_response(&error);
-            return execution.record_response_status(response).await;
-        }
+    let response = super::with_model_request_id(response, &started.request_id);
+    let (parts, body) = response.into_parts();
+    let framing = if parts.status.is_success() {
+        MiddlewareFraming::JsonDocument
+    } else {
+        MiddlewareFraming::RawBytes
     };
-    let body = match raw_json_body(events) {
-        Some(body) => body,
-        None => {
-            let response = invalid_upstream_response();
-            let response = execution.record_response_status(response).await;
-            execution.cancel_and_finalize().await;
-            return response;
-        }
-    };
-    let status = session
-        .response_status_code()
-        .and_then(|status| StatusCode::from_u16(status).ok())
-        .filter(StatusCode::is_success)
-        .unwrap_or(StatusCode::OK);
-    let response_headers = session.response_headers().to_vec();
-    let response = json_body_response(body, status, &response_headers);
-    let Some(session) = execution.session_mut() else {
-        return invalid_upstream_response();
-    };
-    if let Err(error) = session.commit_downstream(Some(status.as_u16())).await {
-        execution.cancel_and_finalize().await;
-        let response = engine_error_response(&error);
-        return execution.record_response_status(response).await;
-    }
-    if !session.is_finalized() {
-        execution.cancel_and_finalize().await;
-        return invalid_upstream_response();
-    }
-    execution.disarm();
-    response
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|_| MiddlewareError::Fault)?;
+    Ok(pending_execution_response(
+        "openai".to_owned(),
+        parts.status.as_u16(),
+        encode_headers(&parts.headers),
+        MiddlewareFrame::new(bytes, framing, true).with_transformed(transformed),
+        execution,
+    ))
 }
 
 fn raw_json_body(events: Vec<ProviderEvent>) -> Option<Bytes> {

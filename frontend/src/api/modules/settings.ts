@@ -1,18 +1,35 @@
 import type { RequestOptions } from '../request'
 import type { RequestLocation } from '../types/request-location'
+import type { ClientProfileSelection, ProviderRequestProfiles, ProviderRequestProfileUpdates, XaiClientProfileSelection } from './client-profiles'
 import request from '../request'
 
 export type RotationStrategy = 'smart' | 'quota_reset_priority' | 'round_robin' | 'sticky'
 
+export interface SmartSchedulingConfig {
+  loadWeight: number
+  quotaWeight: number
+  healthWeight: number
+  latencyWeight: number
+  resetWeight: number
+  queueWeight: number
+  preferHigherWeight: boolean
+}
+
 export interface RuntimeSettings {
-  disableFast: boolean
+  configRevision: number
+  smartScheduling: SmartSchedulingConfig
+  smartSchedulingDefaults: SmartSchedulingConfig
+  providerRequestProfiles: ProviderRequestProfiles
+  openaiClientProfile: ClientProfileSelection | null
+  xaiClientProfile: XaiClientProfileSelection | null
+
   requestLocationEnabled: boolean
   requestLocation: RequestLocation
   modelMappings: Record<string, string>
-  bpsModelMappings: Record<string, string>
   refreshMarginSeconds: number
   refreshConcurrency: number
   maxConcurrentPerAccount: number
+  openaiGuardianReservedConcurrency: number
   requestIntervalMs: number
   maxWaitingPerKey: number
   maxWaitingPerAccount: number
@@ -31,7 +48,11 @@ export interface RuntimeSettings {
   accountAutoFreezeProbeEnabled: boolean
   accountAutoFreezeProbeModel: string | null
   accountAutoFreezeAdaptiveConcurrency: boolean
+  accountWarmupEnabled: boolean
+  accountWarmupScheduleTime: string
+  accountWarmupModel: string | null
   updatedAt: string
+  updatedAtDisplay: string
 }
 
 export type ClientArchitecture = 'x64' | 'arm64'
@@ -45,10 +66,12 @@ export interface ClientDownloadPackage {
   sizeBytes: number | null
   downloadUrl: string
   expiresAt: string | null
+  expiresAtDisplay: string | null
 }
 
 export interface CodexDesktopWindowsDownloads {
   resolvedAt: string
+  resolvedAtDisplay: string
   cached: boolean
   warning: string | null
   packages: ClientDownloadPackage[]
@@ -74,7 +97,9 @@ export function getSettings(options: RequestOptions = {}) {
   })
 }
 
-type UpdateSettingsParam = Omit<RuntimeSettings, 'updatedAt'>
+type UpdateSettingsParam = Omit<RuntimeSettings, 'updatedAt' | 'updatedAtDisplay' | 'smartSchedulingDefaults' | 'openaiClientProfile' | 'xaiClientProfile' | 'providerRequestProfiles'> & {
+  providerRequestProfiles: ProviderRequestProfileUpdates
+}
 
 export function updateSettings(data: UpdateSettingsParam) {
   return request<RuntimeSettings>({

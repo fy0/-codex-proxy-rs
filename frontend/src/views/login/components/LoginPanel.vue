@@ -1,14 +1,9 @@
 <script setup lang="ts">
+import { BaseButton, BaseCard, BaseIconButton, BaseInput, BaseMotionIcon, BaseSegmented } from '@codex-proxy/ui'
+
 import { Eye, EyeOff, KeyRound, Mail, ShieldCheck } from '@lucide/vue'
 import { computed, shallowRef, watch } from 'vue'
-
 import AppBrandMark from '@/components/AppBrandMark.vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
 
 type LoginRealm = 'admin' | 'key'
 type SecretInputType = 'password' | 'text'

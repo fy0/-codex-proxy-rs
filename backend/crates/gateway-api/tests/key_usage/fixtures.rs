@@ -17,6 +17,7 @@ pub(super) async fn fixture() -> AdminTestFixture {
     let fixture = key_fixture().await;
     let now = Utc::now();
     *fixture.client_key.lock().unwrap() = Some(ClientKeyRecord {
+        request_profile_overrides: Default::default(),
         id: ClientApiKeyId::new("key-42").unwrap(),
         name: "Development".to_owned(),
         label: Some("private-sentinel".to_owned()),
@@ -89,6 +90,7 @@ pub(super) async fn fixture() -> AdminTestFixture {
 
 fn usage_record() -> UsageListRecord {
     UsageListRecord {
+        client_api_key_name: Some("Production".to_owned()),
         id: "req-visible".to_owned(),
         endpoint: "/v1/responses".to_owned(),
         client_transport: "http_sse".to_owned(),
@@ -97,6 +99,9 @@ fn usage_record() -> UsageListRecord {
         provider_account_ref: Some("private-sentinel".to_owned()),
         provider_account_name: Some("private-sentinel".to_owned()),
         provider_account_email: Some("private-sentinel".to_owned()),
+        provider_account_notes: Some("private-sentinel".to_owned()),
+        provider_account_plan_type: Some("private-sentinel".to_owned()),
+        provider_account_plan_type_display: Some("private-sentinel".to_owned()),
         provider_account_authentication_kind: Some("private-sentinel".to_owned()),
         upstream_model_id: Some("private-sentinel".to_owned()),
         upstream_transport: Some("websocket".to_owned()),
@@ -145,6 +150,7 @@ fn usage_record() -> UsageListRecord {
 
 fn error_record() -> OpsError {
     OpsError {
+        client_api_key_name: Some("Production".to_owned()),
         source: "private-sentinel".to_owned(),
         event_id: "error-visible".to_owned(),
         request_id: Some("private-sentinel".to_owned()),
@@ -162,6 +168,8 @@ fn error_record() -> OpsError {
         provider_account_name: Some("private-sentinel".to_owned()),
         provider_account_email: Some("private-sentinel".to_owned()),
         provider_account_authentication_kind: Some("private-sentinel".to_owned()),
+        provider_account_plan_type: Some("private-sentinel".to_owned()),
+        provider_account_plan_type_display: Some("private-sentinel".to_owned()),
         upstream_model_id: Some("private-sentinel".to_owned()),
         upstream_transport: Some("websocket".to_owned()),
         failure_kind: "private-sentinel".to_owned(),

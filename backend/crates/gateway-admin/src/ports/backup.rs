@@ -17,8 +17,8 @@ use crate::model::{
     MutationContext,
     backup::{
         BackupError, BackupObjectMetadata, BackupRecord, BackupRecordListQuery, BackupRecordPage,
-        BackupRecordSeed, BackupSettings, BackupStatus, BackupStorageConfig, ConnectionTestResult,
-        UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
+        BackupRecordSeed, BackupSettings, BackupStatusTransition, BackupStorageConfig,
+        ConnectionTestResult, UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
     },
 };
 use crate::ports::store::AdminStoreResult;
@@ -55,6 +55,7 @@ pub trait BackupRepository: Send + Sync {
         command: UpdateBackupScheduleCommand,
         next_run_at: Option<DateTime<Utc>>,
         context: &MutationContext,
+        timezone: gateway_core::time::DeploymentTimeZone,
     ) -> AdminStoreResult<BackupSettings>;
 
     /// CAS 记录探针成功；`storage_revision` 与当前配置不一致时丢弃结果（返回 `false`）。
@@ -67,8 +68,16 @@ pub trait BackupRepository: Send + Sync {
     /// 插入 queued 任务；存在活跃任务时返回 `backup.active_task_conflict`。
     async fn insert_backup_record(&self, seed: BackupRecordSeed) -> AdminStoreResult<BackupRecord>;
 
-    /// 幂等插入 scheduled 任务；同一时间点或活跃冲突时返回 `false`（调用方推进游标即可）。
-    async fn insert_scheduled_record(&self, seed: BackupRecordSeed) -> AdminStoreResult<bool>;
+    /// 核对启停、Cron、时区及旧游标后，同事务推进游标并插入 scheduled 任务。
+    /// 配置已变化时不写入；同一时间点或活跃冲突时只推进游标，返回 `false`。
+    async fn insert_scheduled_record(
+        &self,
+        seed: BackupRecordSeed,
+        next_run_at: Option<DateTime<Utc>>,
+        expected_cron: &str,
+        expected_timezone: &str,
+        expected_next_run_at: Option<DateTime<Utc>>,
+    ) -> AdminStoreResult<bool>;
 
     /// 分页查询记录。
     async fn list_backup_records(
@@ -96,8 +105,7 @@ pub trait BackupRepository: Send + Sync {
     async fn transition_status(
         &self,
         id: &str,
-        from: BackupStatus,
-        to: BackupStatus,
+        transition: BackupStatusTransition,
         update: StatusTransitionUpdate,
         now: DateTime<Utc>,
     ) -> AdminStoreResult<Option<BackupRecord>>;
@@ -112,12 +120,14 @@ pub trait BackupRepository: Send + Sync {
     /// 远端删除成功后硬删除记录行。
     async fn delete_record(&self, id: &str) -> AdminStoreResult<()>;
 
-    /// 条件推进计划游标；仅当计划表达式和时区仍是 `expected_*` 时才写入，返回是否推进。
+    /// 条件推进计划游标；仅当启用状态、计划表达式、时区及旧游标仍匹配时才写入，返回是否推进。
     async fn advance_schedule_cursor(
         &self,
         next_run_at: DateTime<Utc>,
         expected_cron: &str,
-        expected_timezone: &str,
+        expected_timezone: Option<&str>,
+        expected_next_run_at: Option<DateTime<Utc>>,
+        timezone: &str,
     ) -> AdminStoreResult<bool>;
 
     /// 按完成时间倒序读取 completed 计划备份，供保留策略扫描（最多 `limit` 条）。
@@ -287,6 +297,7 @@ impl BackupRepository for UnavailableBackupRepository {
         _command: UpdateBackupScheduleCommand,
         _next_run_at: Option<DateTime<Utc>>,
         _context: &MutationContext,
+        _timezone: gateway_core::time::DeploymentTimeZone,
     ) -> AdminStoreResult<BackupSettings> {
         Err(disabled_store())
     }
@@ -303,7 +314,14 @@ impl BackupRepository for UnavailableBackupRepository {
     ) -> AdminStoreResult<BackupRecord> {
         Err(disabled_store())
     }
-    async fn insert_scheduled_record(&self, _seed: BackupRecordSeed) -> AdminStoreResult<bool> {
+    async fn insert_scheduled_record(
+        &self,
+        _seed: BackupRecordSeed,
+        _next_run_at: Option<DateTime<Utc>>,
+        _expected_cron: &str,
+        _expected_timezone: &str,
+        _expected_next_run_at: Option<DateTime<Utc>>,
+    ) -> AdminStoreResult<bool> {
         Err(disabled_store())
     }
     async fn list_backup_records(
@@ -333,8 +351,7 @@ impl BackupRepository for UnavailableBackupRepository {
     async fn transition_status(
         &self,
         _id: &str,
-        _from: BackupStatus,
-        _to: BackupStatus,
+        _transition: BackupStatusTransition,
         _update: StatusTransitionUpdate,
         _now: DateTime<Utc>,
     ) -> AdminStoreResult<Option<BackupRecord>> {
@@ -354,7 +371,9 @@ impl BackupRepository for UnavailableBackupRepository {
         &self,
         _next_run_at: DateTime<Utc>,
         _expected_cron: &str,
-        _expected_timezone: &str,
+        _expected_timezone: Option<&str>,
+        _expected_next_run_at: Option<DateTime<Utc>>,
+        _timezone: &str,
     ) -> AdminStoreResult<bool> {
         Err(disabled_store())
     }

@@ -9,11 +9,11 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex min-w-0 flex-col gap-0.5">
-    <span class="truncate text-cp font-bold text-cp-text" :title="apiKey.name">
+  <div class="grid min-w-0 gap-1">
+    <span class="truncate text-cp text-cp-text" :title="apiKey.name">
       {{ apiKey.name }}
     </span>
-    <span v-if="apiKey.label" class="truncate text-cp-sm font-emphasis text-cp-text-tertiary" :title="apiKey.label">
+    <span v-if="apiKey.label" class="truncate text-cp-xs font-emphasis text-cp-text-quaternary" :title="apiKey.label">
       {{ apiKey.label }}
     </span>
   </div>

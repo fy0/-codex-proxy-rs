@@ -1,15 +1,11 @@
 <script setup lang="ts">
 import type { Account, AccountResetCredit } from '@/api'
-import { AlertTriangle, RefreshCw, TicketCheck } from '@lucide/vue'
-import dayjs from 'dayjs'
-import utc from 'dayjs/plugin/utc'
-import { computed, shallowRef, watch } from 'vue'
+import { BaseButton, BaseEmpty, BaseIconButton, BaseModal } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
+import { AlertTriangle, RefreshCw, TicketCheck } from '@lucide/vue'
+import { computed, shallowRef, watch } from 'vue'
 import { useAccountResetCredits } from '../../composables/useAccountResetCredits'
+import AccountQuotaCredits from './Credits.vue'
 import UsageLimits from './UsageLimits.vue'
 
 const props = defineProps<{
@@ -17,11 +13,11 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  accountUpdated: [account: Account]
+  consumed: [accountId: string]
 }>()
 
-dayjs.extend(utc)
-
+const panelOpen = shallowRef(false)
+const confirmation = shallowRef<{ credit?: AccountResetCredit, ambiguous: boolean } | null>(null)
 const {
   availableCredits,
   availableCount,
@@ -40,14 +36,18 @@ const {
   confirmConsume,
 } = useAccountResetCredits({
   accountId: () => props.account.id,
-  onAccountUpdated: account => emit('accountUpdated', account),
+  capabilities: () => props.account.capabilities,
+  onConsumed: (accountId) => {
+    if (props.account.id === accountId)
+      panelOpen.value = false
+    emit('consumed', accountId)
+  },
 })
 
-const panelOpen = shallowRef(false)
 const modalTitle = computed(() => {
-  if (!showConfirm.value)
+  if (!confirmation.value)
     return '额度重置'
-  return ambiguous.value ? '确认上次重置' : '确认重置额度'
+  return confirmation.value.ambiguous ? '确认上次重置' : '确认重置额度'
 })
 const triggerLabel = computed(() => {
   if (ambiguous.value)
@@ -60,13 +60,13 @@ const triggerLabel = computed(() => {
   return hasSnapshot.value ? `查看主动重置卡，最近查询 ${availableCount.value} 张可用` : '查看主动重置卡'
 })
 const showTriggerCount = computed(() => hasSnapshot.value && availableCount.value > 0)
-const confirmCreditTitle = computed(() => consumptionCredit.value
-  ? creditTitle(consumptionCredit.value)
+const confirmCreditTitle = computed(() => confirmation.value?.credit
+  ? creditTitle(confirmation.value.credit)
   : '使用一次重置（由上游选择）')
 const creditItems = computed(() => availableCredits.value.map(credit => ({
   id: credit.id,
   title: creditTitle(credit),
-  expiry: expiryLabel(credit.expiresAt),
+  expiry: credit.expiresAtDisplay ? `将于 ${credit.expiresAtDisplay} 到期` : '有效期由上游决定',
 })))
 const showCountOnlyAction = computed(() => !loadError.value
   && hasSnapshot.value
@@ -80,6 +80,7 @@ const countLabel = computed(() => {
 
 watch(panelOpen, (isOpen) => {
   if (isOpen) {
+    confirmation.value = null
     void loadCredits()
     return
   }
@@ -87,19 +88,17 @@ watch(panelOpen, (isOpen) => {
     cancelConsume()
 })
 
-function expiryLabel(value: string | null) {
-  if (!value)
-    return '有效期由上游决定'
-  const expiry = dayjs(value)
-  return expiry.isValid() ? `将于 ${expiry.utcOffset(8).format('YYYY-MM-DD HH:mm')} 到期` : '到期时间未知'
-}
+watch(showConfirm, (confirming) => {
+  if (panelOpen.value)
+    confirmation.value = confirming ? { credit: consumptionCredit.value, ambiguous: ambiguous.value } : null
+})
 
 function creditTitle(credit: AccountResetCredit | undefined) {
   return credit?.title?.trim() || '用量重置'
 }
 
 function handleRequestConsume(creditId: string) {
-  if (loading.value || consuming.value || ambiguous.value)
+  if (!props.account.capabilities.consumeResetCredit || loading.value || consuming.value || ambiguous.value)
     return
   selectCredit(creditId)
   requestConsume()
@@ -116,7 +115,7 @@ function handleRequestConsume(creditId: string) {
     :title="triggerLabel"
     @click="panelOpen = true"
   >
-    <TicketCheck class="size-4 shrink-0" />
+    <TicketCheck class="size-3.5 shrink-0" />
     <span v-if="showTriggerCount" class="translate-y-px font-mono text-[10px] leading-none font-heavy tabular-nums">
       x{{ availableCount }}
     </span>
@@ -125,11 +124,11 @@ function handleRequestConsume(creditId: string) {
   <BaseModal
     v-model="panelOpen"
     :title="modalTitle"
-    :tone="showConfirm ? 'warning' : 'neutral'"
-    :size="showConfirm ? 'sm' : 'md'"
+    :tone="confirmation ? 'warning' : 'neutral'"
+    :size="confirmation ? 'sm' : 'md'"
     :dismissible="!consuming"
   >
-    <div v-if="showConfirm" class="grid gap-3">
+    <div v-if="confirmation" class="grid gap-3">
       <section class="rounded-cp bg-cp-fill-quaternary px-4 py-3.5">
         <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
           本次使用
@@ -138,10 +137,10 @@ function handleRequestConsume(creditId: string) {
           {{ confirmCreditTitle }}
         </p>
         <p
-          v-if="consumptionCredit"
+          v-if="confirmation.credit"
           class="mt-1 mb-0 font-mono text-[10px] leading-normal font-emphasis text-cp-text-quaternary"
         >
-          {{ expiryLabel(consumptionCredit.expiresAt) }}
+          {{ confirmation.credit.expiresAtDisplay ? `将于 ${confirmation.credit.expiresAtDisplay} 到期` : '有效期由上游决定' }}
         </p>
       </section>
     </div>
@@ -156,7 +155,7 @@ function handleRequestConsume(creditId: string) {
             上次操作结果待确认
           </p>
           <p class="mt-1 mb-0 text-cp-xs leading-normal font-emphasis text-cp-text-secondary">
-            请继续确认上次重置结果。
+            请继续确认上次重置结果
           </p>
         </div>
         <BaseButton size="sm" variant="soft" :disabled="loading || consuming || !canRequestConsume" @click="requestConsume">
@@ -200,7 +199,7 @@ function handleRequestConsume(creditId: string) {
             class="mx-4 mt-0 mb-4 rounded-cp bg-cp-error-container px-4 py-3 text-cp-xs leading-normal font-emphasis text-cp-error-on-container"
             role="status"
           >
-            {{ loadError }}，请刷新重试。
+            {{ loadError }}，请刷新重试
           </p>
           <p
             v-else-if="loading && !hasSnapshot"
@@ -226,7 +225,7 @@ function handleRequestConsume(creditId: string) {
               <BaseButton
                 size="sm"
                 variant="primary"
-                :disabled="loading || consuming || ambiguous || availableCount <= 0"
+                :disabled="!account.capabilities.consumeResetCredit || loading || consuming || ambiguous || availableCount <= 0"
                 :aria-label="`使用重置：${credit.title}，${credit.expiry}`"
                 @click="handleRequestConsume(credit.id)"
               >
@@ -245,15 +244,17 @@ function handleRequestConsume(creditId: string) {
           />
         </div>
       </section>
+
+      <AccountQuotaCredits :credits="account.quota.credits" />
     </div>
 
-    <template v-if="showConfirm || showCountOnlyAction" #footer>
-      <template v-if="showConfirm">
+    <template v-if="confirmation || showCountOnlyAction" #footer>
+      <template v-if="confirmation">
         <BaseButton variant="secondary" :disabled="consuming" @click="cancelConsume">
           返回
         </BaseButton>
         <BaseButton variant="primary" :loading="consuming" :disabled="loading || !canRequestConsume" @click="confirmConsume">
-          {{ ambiguous ? '再次确认' : '确认重置' }}
+          {{ confirmation.ambiguous ? '再次确认' : '确认重置' }}
         </BaseButton>
       </template>
       <BaseButton

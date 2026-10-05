@@ -11,81 +11,88 @@ use super::{candidate, candidate_with_concurrency, context};
 const FAILURE_RATE_HALF_LIFE: Duration = Duration::from_secs(15 * 60);
 
 #[test]
-fn missing_ticket_blocks_sticky_selection_capacity_and_waiting_until_installed() {
-    use gateway_core::account::{
-        AccountSchedulingBlocker, PreferredAccountSelection, TurnStateAvailability,
-    };
+fn unlimited_account_concurrency_preserves_overrides_intervals_and_finite_scores() {
+    use gateway_core::account::{AccountConcurrency, AccountSelectionPolicy};
+
     for strategy in [
         RotationStrategy::Smart,
-        RotationStrategy::Sticky,
         RotationStrategy::RoundRobin,
+        RotationStrategy::Sticky,
         RotationStrategy::QuotaResetPriority,
     ] {
         let mut context = context(strategy);
-        let mut candidates = vec![
-            candidate("acct_waiting", 0, None),
-            candidate("acct_ready", 0, None),
+        context.policy =
+            AccountSelectionPolicy::new(strategy, AccountConcurrency::Unlimited, Duration::ZERO);
+        let candidates = [
+            candidate("acct_unlimited", u32::MAX, None),
+            candidate_with_concurrency("acct_limited", 2, 2),
         ];
-        context.preferred_account = Some(candidates[0].account.id().clone());
-        candidates[0].signals.turn_state = TurnStateAvailability::Required { expires_at: None };
-        let selected = AccountSelector.select(&candidates, &context).unwrap();
-        assert_eq!(selected.candidate().account.id().as_str(), "acct_ready");
         assert_eq!(
-            selected.preferred(),
-            PreferredAccountSelection::Blocked(AccountSchedulingBlocker::MissingTurnState)
+            AccountSelector
+                .select(&candidates, &context)
+                .expect("unlimited remains eligible")
+                .candidate()
+                .account
+                .id()
+                .as_str(),
+            "acct_unlimited"
         );
-        assert!(AccountSelector.select(&candidates[..1], &context).is_none());
+        assert!(AccountSelector.select(&candidates[1..], &context).is_none());
         assert!(
             AccountSelector
-                .wait_candidates(&candidates[..1], &context)
-                .is_empty()
-        );
-        assert!(
-            AccountSelector
-                .capacity_snapshot(&candidates[..1], &context)
+                .capacity_snapshot(&candidates, &context)
                 .is_none()
         );
-        let expires_at = context.now + Duration::from_secs(1);
-        candidates[0].signals.turn_state = TurnStateAvailability::Required {
-            expires_at: Some(expires_at),
-        };
-        assert_eq!(
-            AccountSelector
-                .select(&candidates, &context)
-                .unwrap()
-                .candidate()
-                .account
-                .id()
-                .as_str(),
-            "acct_waiting"
+        let trace = gateway_core::diagnostics::TraceContext::new("req_unlimited_concurrency");
+        trace.account_selection(
+            &candidates,
+            &context,
+            AccountSelector.select(&candidates, &context).as_ref(),
         );
-        context.now = expires_at;
-        assert_eq!(
-            AccountSelector
-                .select(&candidates, &context)
-                .unwrap()
-                .candidate()
-                .account
-                .id()
-                .as_str(),
-            "acct_ready"
+        if strategy == RotationStrategy::Smart {
+            let snapshot = trace.snapshot().expect("trace");
+            assert!(
+                snapshot["events"][0]["data"]["candidates"][0]["smartScore"]
+                    .as_f64()
+                    .expect("finite score")
+                    .is_finite()
+            );
+        }
+        context.policy = AccountSelectionPolicy::new(
+            strategy,
+            AccountConcurrency::Unlimited,
+            Duration::from_secs(1),
         );
-        assert!(
-            AccountSelector
-                .wait_candidates(&candidates[..1], &context)
-                .is_empty()
-        );
-        // 拿票不能覆盖账号的手动停用事实。
-        context.now -= Duration::from_secs(1);
-        candidates[0].account = candidates[0].account.clone().with_account_facts(
-            false,
-            gateway_core::account::CredentialState::Ready,
-            gateway_core::account::QuotaState::unknown(),
-            None,
-            None,
-        );
-        assert!(AccountSelector.select(&candidates[..1], &context).is_none());
+        let mut recent = candidate("acct_unlimited", u32::MAX, None);
+        recent.signals.last_started_at = Some(context.now);
+        assert!(AccountSelector.select(&[recent], &context).is_none());
     }
+}
+
+#[test]
+fn unavailable_unlimited_account_does_not_hide_the_finite_pool_capacity() {
+    use gateway_core::account::{
+        AccountConcurrency, AccountSelectionPolicy, CredentialState, QuotaState,
+    };
+    let mut context = context(RotationStrategy::Smart);
+    context.policy = AccountSelectionPolicy::new(
+        RotationStrategy::Smart,
+        AccountConcurrency::Unlimited,
+        Duration::ZERO,
+    );
+    let mut unavailable = candidate("acct_disabled", 0, None);
+    unavailable.account = unavailable.account.with_account_facts(
+        false,
+        CredentialState::Ready,
+        QuotaState::unknown(),
+        None,
+        None,
+    );
+    let finite = candidate_with_concurrency("acct_limited", 1, 2);
+    let capacity = AccountSelector
+        .capacity_snapshot(&[unavailable, finite], &context)
+        .expect("finite available pool");
+    assert_eq!((capacity.used_slots(), capacity.total_slots()), (1, 2));
 }
 
 fn feedback_subject() -> (AccountFeedbackStats, ProviderKind, ProviderAccountId) {
@@ -109,6 +116,58 @@ fn report_failure(
             first_output_ms: None,
         },
         observed_at,
+    );
+}
+
+#[test]
+fn capacity_rejections_should_raise_failure_rate_faster_than_regular_failures() {
+    let (feedback, provider, account) = feedback_subject();
+    let observed_at = Instant::now();
+    let mut failure_rates = Vec::new();
+    for _ in 0..2 {
+        feedback.report_at(
+            &provider,
+            &account,
+            AccountAttemptFeedback::CapacityRejected {
+                first_output_ms: None,
+            },
+            observed_at,
+        );
+        failure_rates.push(
+            feedback
+                .scheduling_signals_at(&provider, &account, observed_at)
+                .0,
+        );
+    }
+
+    assert_eq!(failure_rates, [Some(4_000), Some(6_400)]);
+}
+
+#[test]
+fn capacity_failure_rate_should_keep_time_decay_and_success_recovery() {
+    let (feedback, provider, account) = feedback_subject();
+    let observed_at = Instant::now();
+    feedback.report_at(
+        &provider,
+        &account,
+        AccountAttemptFeedback::CapacityRejected {
+            first_output_ms: Some(100),
+        },
+        observed_at,
+    );
+    let recovered_at = observed_at + FAILURE_RATE_HALF_LIFE;
+    feedback.report_at(
+        &provider,
+        &account,
+        AccountAttemptFeedback::Succeeded {
+            first_output_ms: Some(200),
+        },
+        recovered_at,
+    );
+
+    assert_eq!(
+        feedback.scheduling_signals_at(&provider, &account, recovered_at),
+        (Some(1_600), Some(120)),
     );
 }
 

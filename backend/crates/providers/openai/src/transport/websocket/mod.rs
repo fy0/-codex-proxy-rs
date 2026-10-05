@@ -41,5 +41,6 @@ pub(crate) use self::{
         execute_prepared_response_create_request_stream, post_send_ambiguous,
         prepare_response_create_request_with_pool,
     },
+    error::WEBSOCKET_CLOSE_MESSAGE_TOO_BIG,
     pool::DEFAULT_STREAM_IDLE_TIMEOUT,
 };

@@ -41,6 +41,9 @@ const DOWNSTREAM_CLIENT_HEADERS: &[(&str, &str)] = &[
     ("sec-fetch-future", "future"),
     ("sec-ch-ua-future", "future"),
     ("x-grok-turn-idx", "7"),
+    ("X-Grok-Model-Override", "synthetic-model"),
+    ("x-grok-session-id", "synthetic-grok-session"),
+    ("X-XAI-Token-Auth", "synthetic-token-auth"),
     ("x-xai-future-field", "future"),
 ];
 
@@ -98,6 +101,10 @@ fn request_with_opaque_headers(use_websocket: bool) -> CodexResponsesRequest {
                 [
                     "x-codex-installation-id",
                     STANDARD.encode(b"client-installation")
+                ],
+                [
+                    "X-Codex-Installation-Id",
+                    STANDARD.encode(b"second-client-installation")
                 ],
                 ["x-oai-attestation", STANDARD.encode(b"client-attestation")],
                 ["x-oai-is", STANDARD.encode(b"client-is")],
@@ -254,7 +261,6 @@ async fn backend_http_should_preserve_business_headers_without_downstream_transp
         ("chatgpt-org-id", b"unclassified-org".as_slice()),
         ("x-openai-organization", b"unclassified-org".as_slice()),
         ("x-openai-project", b"unclassified-project".as_slice()),
-        ("x-codex-installation-id", b"client-installation".as_slice()),
     ] {
         assert_eq!(raw_header_values(&raw, name), vec![value.to_vec()]);
     }
@@ -273,6 +279,7 @@ async fn backend_http_should_preserve_business_headers_without_downstream_transp
     );
     for dropped in [
         "openai-beta",
+        "x-codex-installation-id",
         "x-openai-actor-authorization",
         "x-oai-attestation",
         "x-oai-is",
@@ -404,6 +411,7 @@ async fn backend_websocket_should_preserve_business_headers_without_downstream_t
     assert_eq!(values("version"), vec![b"1.2.3".to_vec()]);
     assert!(values("x-openai-internal-codex-residency").is_empty());
     for dropped in [
+        "x-codex-installation-id",
         "x-openai-actor-authorization",
         "x-oai-attestation",
         "x-oai-is",
@@ -433,7 +441,6 @@ async fn backend_websocket_should_preserve_business_headers_without_downstream_t
         ("chatgpt-org-id", b"unclassified-org".as_slice()),
         ("x-openai-organization", b"unclassified-org".as_slice()),
         ("x-openai-project", b"unclassified-project".as_slice()),
-        ("x-codex-installation-id", b"client-installation".as_slice()),
     ] {
         assert_eq!(values(name), vec![value.to_vec()], "missing {name}");
     }

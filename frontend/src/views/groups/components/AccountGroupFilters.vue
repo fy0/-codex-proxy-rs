@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { Plus, Search, Trash2 } from '@lucide/vue'
+import { BaseButton, BaseInput, BaseSelect } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
+import { Plus, Search, Trash2 } from '@lucide/vue'
 import { accountGroupStatusOptions } from '../constants'
 
 defineProps<{

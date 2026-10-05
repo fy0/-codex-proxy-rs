@@ -48,6 +48,8 @@ struct RemoveAccountRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateRequest {
+    #[serde(default)]
+    auto_location: bool,
     location: Option<gateway_core::account::RequestLocation>,
     name: String,
     proxy_url: AccountProxyUpdate,
@@ -56,6 +58,7 @@ struct CreateRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateRequest {
+    auto_location: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_location_update")]
     location: Option<Option<gateway_core::account::RequestLocation>>,
     id: String,
@@ -82,13 +85,25 @@ struct IdRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TestRequest {
+    id: String,
+    revision: u64,
+    #[serde(default)]
+    detect_location: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProbeRequest {
+    #[serde(default)]
+    detect_location: bool,
     proxy_url: AccountProxyUpdate,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyTestView {
+    location: gateway_admin::model::proxies::ProxyLocationDetection,
     success: bool,
     latency_ms: u64,
     exit_ip: Option<String>,
@@ -100,6 +115,7 @@ struct ProxyTestView {
 impl From<ProxyTestResult> for ProxyTestView {
     fn from(result: ProxyTestResult) -> Self {
         Self {
+            location: result.location,
             success: result.success,
             latency_ms: result.latency_ms,
             exit_ip: result.exit_ip.map(|ip| ip.to_string()),
@@ -127,6 +143,8 @@ struct ProxyAccountView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyView {
+    auto_location: bool,
+    detected_location: Option<gateway_admin::model::proxies::DetectedProxyLocation>,
     location: Option<gateway_core::account::RequestLocation>,
     id: String,
     name: String,
@@ -135,15 +153,20 @@ struct ProxyView {
     revision: u64,
     account_count: u64,
     last_test_at: Option<String>,
+    last_test_at_display: Option<String>,
     last_test: Option<ProxyTestView>,
     created_at: String,
+    created_at_display: String,
     updated_at: String,
+    updated_at_display: String,
 }
 
-impl From<ProxyRecord> for ProxyView {
-    fn from(record: ProxyRecord) -> Self {
+impl From<(ProxyRecord, crate::time::TimePresenter)> for ProxyView {
+    fn from((record, time): (ProxyRecord, crate::time::TimePresenter)) -> Self {
         let endpoint = record.proxy.endpoint();
         Self {
+            auto_location: record.auto_location,
+            detected_location: record.detected_location,
             location: record.location,
             id: record.id,
             name: record.name,
@@ -151,9 +174,15 @@ impl From<ProxyRecord> for ProxyView {
             endpoint,
             revision: record.revision.get(),
             account_count: record.account_count,
+            last_test_at_display: record
+                .last_test_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             last_test_at: record.last_test_at.map(|at| at.to_rfc3339()),
             last_test: record.last_test.map(Into::into),
+            created_at_display: time.datetime(&record.created_at),
             created_at: record.created_at.to_rfc3339(),
+            updated_at_display: time.datetime(&record.updated_at),
             updated_at: record.updated_at.to_rfc3339(),
         }
     }
@@ -178,10 +207,10 @@ struct MutationView {
     config_revision: u64,
 }
 
-impl From<ProxyMutation> for MutationView {
-    fn from(value: ProxyMutation) -> Self {
+impl From<(ProxyMutation, crate::time::TimePresenter)> for MutationView {
+    fn from((value, time): (ProxyMutation, crate::time::TimePresenter)) -> Self {
         Self {
-            record: value.record.into(),
+            record: ProxyView::from((value.record, time)),
             config_revision: value.config_revision.get(),
         }
     }
@@ -224,6 +253,7 @@ async fn list<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let result = state
         .admin_services()
         .proxies()
@@ -239,7 +269,11 @@ where
     Ok(AdminResponse::new(
         StatusCode::OK,
         AdminEnvelope::ok(ProxyPageView {
-            items: result.items.into_iter().map(Into::into).collect(),
+            items: result
+                .items
+                .into_iter()
+                .map(|value| ProxyView::from((value, time)))
+                .collect(),
             page: PageMeta::new(
                 result.page,
                 u32::from(result.page_size),
@@ -316,6 +350,7 @@ async fn create<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let proxy = request
         .proxy_url
         .0
@@ -325,6 +360,8 @@ where
         .proxies()
         .create(
             NewProxy {
+                auto_location: request.auto_location,
+                test: None,
                 location: request.location,
                 name: request.name,
                 proxy,
@@ -335,7 +372,7 @@ where
         .map_err(map_error)?;
     Ok(AdminResponse::new(
         StatusCode::CREATED,
-        AdminEnvelope::ok(MutationView::from(result)),
+        AdminEnvelope::ok(MutationView::from((result, time))),
     ))
 }
 
@@ -371,6 +408,7 @@ async fn update<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let proxy = request
         .proxy_url
         .map(|value| {
@@ -384,6 +422,8 @@ where
         .proxies()
         .update(
             UpdateProxy {
+                auto_location: request.auto_location,
+                test: None,
                 location: request.location,
                 id: request.id,
                 revision: revision(request.revision)?,
@@ -396,7 +436,7 @@ where
         .map_err(map_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(MutationView::from(result)),
+        AdminEnvelope::ok(MutationView::from((result, time))),
     ))
 }
 
@@ -439,7 +479,7 @@ where
     let result = state
         .admin_services()
         .proxies()
-        .probe(&proxy)
+        .probe(&proxy, request.detect_location)
         .await
         .map_err(map_error)?;
     Ok(AdminResponse::new(
@@ -451,23 +491,25 @@ where
 async fn test<S>(
     auth: AdminAuth,
     State(state): State<S>,
-    AdminJson(request): AdminJson<IdRequest>,
+    AdminJson(request): AdminJson<TestRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let result = state
         .admin_services()
         .proxies()
         .test(
             &request.id,
             revision(request.revision)?,
+            request.detect_location,
             &auth.context().mutation_context(),
         )
         .await
         .map_err(map_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(ProxyView::from(result)),
+        AdminEnvelope::ok(ProxyView::from((result, time))),
     ))
 }

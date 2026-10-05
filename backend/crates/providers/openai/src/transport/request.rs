@@ -489,6 +489,17 @@ pub(crate) fn scope_request_to_account(
         {
             request.body_mut().remove(*key);
         }
+    } else {
+        // 同账号的透传 turn metadata 也会覆盖重建的请求头，安装身份须同步改写。
+        for (name, value) in &mut request.passthrough_headers {
+            if name == "x-codex-turn-metadata"
+                && let Ok(raw) = value.to_str()
+                && let Some(scoped) = scope_turn_metadata(raw, installation_id, false)
+                && let Ok(scoped) = HeaderValue::from_str(&scoped)
+            {
+                *value = scoped;
+            }
+        }
     }
 
     for key in INSTALLATION_ID_KEYS {
@@ -525,6 +536,9 @@ pub(crate) fn scope_request_to_account(
                 {
                     metadata.remove(*key);
                 }
+                // Guardian 顶层父引用指向原账号的响应；turn metadata 内的同名
+                // 扩展只是客户端关联信息，不能加入各层共用的清理名单。
+                metadata.remove("parent_response_id");
             }
             // 官方 Core 在 client_metadata 使用带 x-codex 前缀的键，
             // turn metadata 内仍使用 installation_id；两处均取当前账号的安装身份。
@@ -559,43 +573,6 @@ pub(crate) fn scope_request_to_account(
 
     request.turn_state = turn_state;
     request.turn_metadata = turn_metadata;
-}
-
-/// 管理员配置的账号级 turn state 强制覆盖：无视客户端值与账号归属判定，
-/// 无条件重写 header 事实、passthrough 头、正文顶层别名与 client_metadata，
-/// 保证 HTTP 与 WebSocket 上游看到同一值。
-pub(crate) fn force_turn_state_override(request: &mut CodexResponsesRequest, value: &str) {
-    request.turn_state = Some(value.to_owned());
-    // passthrough 头在发送期最后追加，必须移除客户端原值才不会盖回覆盖值。
-    request.passthrough_headers.remove("x-codex-turn-state");
-    for key in ["turnState", "turn_state", "x-codex-turn-state"] {
-        if request.body().contains_key(key) {
-            request
-                .body_mut()
-                .insert(key.to_owned(), Value::String(value.to_owned()));
-        }
-    }
-    let mut metadata = match request.client_metadata() {
-        Some(Value::Object(metadata)) => metadata.clone(),
-        _ => Map::new(),
-    };
-    metadata.insert(
-        "x-codex-turn-state".to_owned(),
-        Value::String(value.to_owned()),
-    );
-    request.set_client_metadata(Some(Value::Object(metadata)));
-}
-
-pub(crate) fn clear_turn_state_override(request: &mut CodexResponsesRequest) {
-    request.turn_state = None;
-    request.passthrough_headers.remove("x-codex-turn-state");
-    for key in ["turnState", "turn_state", "x-codex-turn-state"] {
-        request.body_mut().remove(key);
-    }
-    if let Some(Value::Object(mut metadata)) = request.client_metadata().cloned() {
-        metadata.remove("x-codex-turn-state");
-        request.set_client_metadata(Some(Value::Object(metadata)));
-    }
 }
 
 fn metadata_string(request: &CodexResponsesRequest, key: &str) -> Option<String> {

@@ -1,7 +1,5 @@
 //! Provider 账号领域、持久化端口与同一 target 内的账号选择。
 
-mod cookie_lock;
-pub use cookie_lock::{RoutingCookie, RoutingCookieObservation, RoutingCookieStatus};
 mod error;
 mod location;
 pub use location::{InvalidRequestLocation, RequestLocation};
@@ -15,17 +13,12 @@ mod proxy;
 pub use proxy::{InvalidOutboundProxy, OutboundProxy};
 pub mod scope;
 mod selection;
+mod smart_scheduling;
 mod store;
-mod turn_state;
-pub use turn_state::{
-    CloudMintConfig, CloudMintStrategy, CloudMintTransport, MissingTurnStatePolicy,
-    TurnStateAvailability, TurnStateBucket, TurnStateBusinessStatus, TurnStateConfig,
-    TurnStateInstallation, TurnStateNotification, TurnStateObservation, TurnStateStatus,
-    TurnStateStopStrategy, TurnStateToken,
-};
 
 pub use error::CredentialError;
 pub use model::*;
+pub(crate) use selection::smart_score;
 pub use selection::*;
-pub(crate) use selection::{SMART_SCORE_TOLERANCE, smart_score};
+pub use smart_scheduling::{SmartSchedulingConfig, SmartSchedulingConfigError};
 pub use store::ProviderAccountStore;

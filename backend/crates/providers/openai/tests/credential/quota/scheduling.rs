@@ -80,9 +80,7 @@ async fn old_weekly_quota_should_outweigh_one_in_flight_title_request() {
         .into_iter()
         .map(|account| AccountCandidate {
             signals: AccountRuntimeSignals {
-                turn_state: Default::default(),
                 in_flight: u32::from(account.id().as_str() == "acct_74"),
-                bps_in_flight: 0,
                 last_started_at: None,
                 quota_reset_at: None,
                 quota_remaining_rank: None,
@@ -108,7 +106,7 @@ async fn old_weekly_quota_should_outweigh_one_in_flight_title_request() {
             round_robin_cursor: cursor,
             eligibility: AccountEligibilityPolicy::Enforce,
             account_scope: None,
-            channel: gateway_core::routing::UpstreamChannel::Default,
+            reserved_concurrency: 0,
         };
         let selected = AccountSelector
             .select(&candidates, &context)

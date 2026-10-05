@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { RouterView } from 'vue-router'
+import { BaseToast } from '@codex-proxy/ui'
 
-import { BaseToast } from '@/components/base/BaseToast'
+import { RouterView } from 'vue-router'
 </script>
 
 <template>

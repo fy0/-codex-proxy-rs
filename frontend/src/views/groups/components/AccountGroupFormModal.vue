@@ -1,16 +1,9 @@
 <script setup lang="ts">
 import type { AccountGroupFormValue } from '../composables/useAccountGroups'
 import type { AccountGroup } from '@/api'
-import { computed } from 'vue'
+import { BaseButton, BaseColorPicker, BaseForm, BaseFormItem, BaseInput, BaseModal, BaseSegmented, BaseTextarea } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseColorPicker from '@/components/base/BaseColorPicker/index.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseForm from '@/components/base/BaseForm/index.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
-import BaseSwitch from '@/components/base/BaseSwitch.vue'
-import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import { computed } from 'vue'
 import { ACCOUNT_GROUP_COLOR_PRESETS } from '../constants'
 
 const props = defineProps<{
@@ -24,8 +17,8 @@ const open = defineModel<boolean>({ required: true })
 const form = defineModel<AccountGroupFormValue>('form', { required: true })
 const title = computed(() => props.group ? '编辑分组' : '创建分组')
 const description = computed(() => props.group
-  ? '修改分组名称、用途说明和 Fast 限制。'
-  : '创建后，可在账号管理中将账号加入这个分组。')
+  ? '修改分组名称、用途说明和 Fast 模式'
+  : '创建后，可在账号管理中将账号加入这个分组')
 </script>
 
 <template>
@@ -53,20 +46,25 @@ const description = computed(() => props.group
           :disabled="saving"
         />
       </BaseFormItem>
+      <BaseFormItem label="Fast 模式" description="关闭后按标准模式处理">
+        <BaseSegmented
+          :model-value="form.disableFast ? 'disabled' : 'default'"
+          class="w-48 max-w-full"
+          label="Fast 模式"
+          :options="[
+            { label: '默认', value: 'default' },
+            { label: '关闭', value: 'disabled' },
+          ]"
+          :disabled="saving"
+          @update:model-value="form.disableFast = $event === 'disabled'"
+        />
+      </BaseFormItem>
       <BaseFormItem label="描述（可选）">
         <BaseTextarea
           v-model="form.description"
           aria-label="分组描述"
           :rows="4"
           placeholder="说明这个分组的用途..."
-          :disabled="saving"
-        />
-      </BaseFormItem>
-      <BaseFormItem description="开启后，绑定本分组的密钥将以普通模式处理 Fast 请求。任一绑定分组或全局关闭 Fast 时，限制均生效。">
-        <BaseSwitch
-          v-model="form.disableFast"
-          label="关闭 Fast"
-          show-label
           :disabled="saving"
         />
       </BaseFormItem>

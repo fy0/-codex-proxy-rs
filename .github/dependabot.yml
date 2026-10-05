@@ -1,8 +1,10 @@
 version: 2
 
+# 标签由维护者手动添加，各生态关闭默认打标，避免重新创建旧标签。
 updates:
   - package-ecosystem: github-actions
     directory: /
+    labels: []
     schedule:
       interval: weekly
       day: monday
@@ -16,6 +18,7 @@ updates:
 
   - package-ecosystem: cargo
     directory: /backend
+    labels: []
     schedule:
       interval: weekly
       day: monday
@@ -49,7 +52,8 @@ updates:
           - patch
 
   - package-ecosystem: npm
-    directory: /frontend
+    directory: /
+    labels: []
     schedule:
       interval: weekly
       day: monday
@@ -64,7 +68,10 @@ updates:
           - patch
 
   - package-ecosystem: docker
-    directory: /deploy
+    directories:
+      - /deploy
+      - /.github/actions/cargo-cache
+    labels: []
     schedule:
       interval: weekly
       day: monday

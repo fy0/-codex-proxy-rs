@@ -1,30 +1,34 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import type { ApiKey } from '@/api'
+import { BaseCard, BaseCheckbox, BaseConfirmModal, BasePageHeader, BaseTable, BaseTablePagination } from '@codex-proxy/ui'
 
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
-import BasePageHeader from '@/components/base/BasePageHeader.vue'
-import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
-import BaseTable from '@/components/base/BaseTable/index.vue'
+import { ref, shallowRef, watch } from 'vue'
+import ApiKeyConfigModal from '@/components/ApiKeyConfigModal.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { usePageSelection } from '@/composables/usePageSelection'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyBudgetCell from './components/ApiKeyBudgetCell.vue'
+import ApiKeyBudgetResetModal from './components/ApiKeyBudgetResetModal.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
 import ApiKeyFilters from './components/ApiKeyFilters.vue'
 import ApiKeyIdentityCell from './components/ApiKeyIdentityCell.vue'
 import ApiKeyPrefixCell from './components/ApiKeyPrefixCell.vue'
 import ApiKeyScopeCell from './components/ApiKeyScopeCell.vue'
 import ApiKeyStatusBadge from './components/ApiKeyStatusBadge.vue'
-import ApiKeyUseModal from './components/ApiKeyUseModal.vue'
 import { useApiKeyMutations } from './composables/useApiKeyMutations'
 import { useApiKeysQuery } from './composables/useApiKeysQuery'
 import { useApiKeyUse } from './composables/useApiKeyUse'
 import { apiKeyColumns } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
+const showBudgetResetModal = shallowRef(false)
+const resettingKey = shallowRef<ApiKey | null>(null)
+
+function openBudgetReset(key: ApiKey) {
+  resettingKey.value = key
+  showBudgetResetModal.value = true
+}
 const {
   loading,
   apiKeys,
@@ -53,6 +57,7 @@ const {
   createdKeyName,
   editingKey,
   pendingDeleteKey,
+  deleteCount,
   savingKey,
   deletingKey,
   batchDeleting,
@@ -61,6 +66,8 @@ const {
   form,
   openCreate,
   openEdit,
+  clearCustomKey,
+  clearCreatedKey,
   requestSave,
   confirmAllAccountsScope,
   requestDeleteKey,
@@ -162,13 +169,13 @@ watch(
             </template>
             <template #limits="{ row }">
               <dl class="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs tabular-nums">
-                <dt class="text-cp-text-tertiary">
+                <dt class="text-right text-cp-text-tertiary">
                   并发
                 </dt>
                 <dd class="m-0 truncate text-cp-text" :title="String(row.maxConcurrency || '∞')">
                   {{ row.maxConcurrency || '∞' }}
                 </dd>
-                <dt class="text-cp-text-tertiary">
+                <dt class="text-right text-cp-text-tertiary">
                   RPM
                 </dt>
                 <dd class="m-0 truncate text-cp-text" :title="String(row.requestsPerMinute || '∞')">
@@ -180,7 +187,7 @@ watch(
               <ApiKeyStatusBadge :api-key="row" />
             </template>
             <template #lastUsedAt="{ row }">
-              <LastUsedAtCell :value="row.lastUsedAt" />
+              <LastUsedAtCell :value="row.lastUsedAt" :display="row.lastUsedAtDisplay" :full-display="row.lastUsedAtFullDisplay" />
             </template>
             <template #actions="{ row }">
               <ApiKeyActions
@@ -189,6 +196,7 @@ watch(
                 :revealing="revealingKeyIds.has(row.id)"
                 :updating-status="updatingStatusKeyIds.has(row.id)"
                 @edit="openEdit"
+                @reset-budget="openBudgetReset"
                 @delete="requestDeleteKey"
                 @import-ccs="importToCcs"
                 @toggle="handleToggleStatus"
@@ -218,25 +226,34 @@ watch(
       @copy="copyToClipboard"
       @save="requestSave"
       @import-ccs="importCreatedKeyToCcs"
+      @after-leave="clearCustomKey"
+      @created-after-leave="clearCreatedKey"
     />
 
-    <ApiKeyUseModal
+    <ApiKeyBudgetResetModal
+      v-model="showBudgetResetModal"
+      :api-key="resettingKey"
+      @reset="loadApiKeys"
+    />
+
+    <ApiKeyConfigModal
       v-model="showUseKeyModal"
       :api-key="selectedUseKey"
       :api-base-url="openAiBaseUrl"
       @copy="copyToClipboard"
+      @after-leave="selectedUseKey = null"
     />
 
     <BaseConfirmModal
       v-model="showAllAccountsConfirm"
       title="授予全部账号权限"
-      description="保存后，该密钥可以使用所有账号。"
+      description="保存后，该密钥可以使用所有账号"
       confirm-text="确认授予全部账号"
       :loading="savingKey"
       @confirm="confirmAllAccountsScope"
     >
       <p class="m-0">
-        该密钥可以使用所有账号，包括以后新增和未分组的账号。
+        该密钥可以使用所有账号，包括以后新增和未分组的账号
       </p>
     </BaseConfirmModal>
 
@@ -250,7 +267,7 @@ watch(
       @confirm="handleBatchDelete"
     >
       <p class="m-0">
-        确定删除选中的 {{ selectedIds.size }} 个 API Key 吗？
+        确定删除选中的 {{ deleteCount }} 个 API Key 吗？
       </p>
     </BaseConfirmModal>
 

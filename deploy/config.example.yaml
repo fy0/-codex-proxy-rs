@@ -8,6 +8,8 @@
 schema_version: 1
 
 host:
+  # 统一展示、查询日期、限额重置和定时任务的 IANA 时区，修改后重启生效。
+  timezone: 'Asia/Shanghai'
   listen:
     # 本地 cargo run 使用；Docker 内由 CPR_SERVER_HOST/PORT 覆盖。
     host: '127.0.0.1'
@@ -29,6 +31,12 @@ host:
       directory: '../.runtime/logs'
       retention_days: 7
       max_file_size_mb: 20
+  # 二进制部署需要管理端自重启时，取消以下注释；可选路径改为实际程序绝对路径。
+  # Compose 已通过环境变量开启，保持本段注释即可；详情见 deploy/README.md。
+  # system_update:
+  #   deployment_mode: 'binary'
+  #   self_restart_enabled: true
+  #   executable_path: '/opt/codex-proxy-rs/codex-proxy-rs' # 可选：覆盖启动时解析的程序路径。
   drain_timeout_seconds: 30
   worker_shutdown_timeout_seconds: 30
 
@@ -39,6 +47,7 @@ store:
     password: &postgres_password ''
   redis:
     # Docker 内由 CPR_REDIS_URL 覆盖；密码不要写进 URL。
+    # ACL 用户写在 URL 中，例如 redis://u1@redis-host:6379/0；配置步骤见 deploy/README.md。
     url: 'redis://127.0.0.1:6379/'
     password: &redis_password ''
   # 可选：PostgreSQL 连接池预算；下列值与当前推荐默认一致。
@@ -64,33 +73,8 @@ api:
   request_id_header: 'x-request-id'
 
 openai:
-  # 每账号/上游模型的 missingStatePolicy 在管理页或管理 API 配置，默认 allow；不属于部署级开关。
-  # 上游地址、WebSocket 池、额度刷新和 OAuth 使用 Provider 内置默认值；模板只保留画像启动基线。
-  wire_profile:
-    # 版本元组来自同一个官方 macOS Desktop ZIP；Provider 每 24 小时检查 appcast，
-    # 仅在包内 Core 核验和 Redis 条件覆盖都成功后原子更新。
-    originator: 'Codex Desktop'
-    codex_version: '0.153.4'
-    desktop_version: '26.901.51231'
-    desktop_build: '8109'
-    os_type: 'Mac OS'
-    os_version: '15.7.1'
-    arch: 'arm64'
-    terminal: 'unknown'
-    # 部署选择的 US residency；省略或 null 时使用官方无地域约束的默认分支。
-    residency: us
-    verified_at: '2026-09-06T11:26:12.084+08:00'
-
-xai:
-  # OAuth 端点、额度与模型目录策略由 xAI Provider 固定管理；这里只声明请求画像启动基线。
-  wire_profile:
-    # Provider 每 24 小时读取官方 npm metadata，仅在进程内更新 client_version。
-    client_identifier: 'GrokShell'
-    client_version: '1.0.13'
-    client_mode: 'headless'
-    target_os: 'linux'
-    target_arch: 'x86_64'
-    verified_at: '2026-08-31T00:00:00+08:00'
+  # 数据驻留约束；省略或 null 不指定地域约束，与管理端客户端身份无关。
+  residency: us
 
 # Compose 凭据桥接区；密码仍只维护在 store 中。
 services:

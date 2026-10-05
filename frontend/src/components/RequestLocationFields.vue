@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { RequestLocation } from '@/api'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
+import { BaseFormItem, BaseInput } from '@codex-proxy/ui'
 
 defineProps<{ disabled?: boolean }>()
 const location = defineModel<RequestLocation>({ required: true })

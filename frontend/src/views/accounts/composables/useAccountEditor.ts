@@ -1,30 +1,26 @@
-import type { Ref } from 'vue'
 import type { AccountModelAccess, ApiKeyConfiguration, getAccounts } from '@/api'
 
-import { computed, ref, shallowRef, watch } from 'vue'
-import { getAccountDetail, updateAccount, updateAccountApiKey } from '@/api'
-import { toast } from '@/components/base/BaseToast'
+import { toast } from '@codex-proxy/ui'
+import { ref, shallowRef, watch } from 'vue'
+import { getAccountDetail, updateAccount } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError } from '../utils/modelAccess'
-import { concurrencyLimitInput, parseAccountSchedulingForm, parseOptionalConcurrencyLimit } from '../utils/schedulingForm'
-import { apiKeyAccountError, emptyApiKeyAccountForm } from '../utils/upstreamApiKey'
+import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
+import { apiKeyAccountError, emptyApiKeyAccountForm, isOpenAiApiKeyAccount, isOpenAiOAuthAccount, parseApiKeyConfiguration } from '../utils/upstreamApiKey'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
 
 export function useAccountEditor(options: {
-  accounts: Ref<AccountRow[]>
   reloadAccounts: () => Promise<unknown>
   reloadGroups: () => Promise<unknown>
 }) {
   const showEditModal = shallowRef(false)
-  const editingAccountId = shallowRef<string | null>(null)
+  // 保存后列表可能因筛选移除该账号，编辑窗口的退场仍需保留原账号内容。
+  const editingAccount = shallowRef<AccountRow | null>(null)
   const notes = shallowRef('')
-  const turnStateOverride = shallowRef('')
-  const basispointsEnabled = shallowRef(false)
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
-  const bpsConcurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
   const modelAccess = ref<AccountModelAccess | undefined>()
   const proxyMode = shallowRef('preserve')
@@ -37,6 +33,8 @@ export function useAccountEditor(options: {
   const configurationLoading = configurationRequest.loading
   const configurationReady = shallowRef(false)
   const savedConfiguration = shallowRef<ApiKeyConfiguration>()
+  const oauthTransport = shallowRef<ApiKeyConfiguration['transport']>('prefer_websocket')
+  const savedOAuthTransport = shallowRef<ApiKeyConfiguration['transport']>('prefer_websocket')
 
   async function loadConfiguration(accountId: string) {
     const requestId = configurationRequest.start()
@@ -44,10 +42,20 @@ export function useAccountEditor(options: {
       const detail = await getAccountDetail({ accountId }, { signal: configurationRequest.signal })
       if (!configurationRequest.isCurrent(requestId))
         return
-      if (!detail.credentialConfiguration)
+      if (isOpenAiOAuthAccount(detail.account)) {
+        const transport = detail.credentialConfiguration?.transport
+        if (transport !== 'http' && transport !== 'prefer_websocket')
+          throw new Error('该账号没有 OAuth 上游设置')
+        oauthTransport.value = transport
+        savedOAuthTransport.value = transport
+        configurationReady.value = true
+        return
+      }
+      const configuration = parseApiKeyConfiguration(detail.credentialConfiguration)
+      if (!configuration)
         throw new Error('该账号没有 API Key 上游设置')
-      apiKey.value = { ...emptyApiKeyAccountForm(), ...detail.credentialConfiguration }
-      savedConfiguration.value = detail.credentialConfiguration
+      apiKey.value = { ...emptyApiKeyAccountForm(), ...configuration }
+      savedConfiguration.value = configuration
       configurationReady.value = true
     }
     catch (error) {
@@ -58,43 +66,36 @@ export function useAccountEditor(options: {
     }
   }
 
-  const editingAccount = computed(() => {
-    const accountId = editingAccountId.value
-    return accountId
-      ? options.accounts.value.find(account => account.id === accountId) ?? null
-      : null
-  })
-
   function open(account: AccountRow) {
     configurationRequest.invalidate()
-    editingAccountId.value = account.id
+    editingAccount.value = account
     notes.value = account.notes ?? ''
-    turnStateOverride.value = account.turnStateOverride ?? ''
-    basispointsEnabled.value = account.basispointsEnabled
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
-    bpsConcurrencyLimit.value = concurrencyLimitInput(account.bpsConcurrencyLimit)
     weight.value = String(account.weight)
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
     apiKey.value = emptyApiKeyAccountForm()
+    oauthTransport.value = 'prefer_websocket'
+    savedOAuthTransport.value = 'prefer_websocket'
     savedConfiguration.value = undefined
     configurationReady.value = false
     showEditModal.value = true
-    if (account.authenticationKind === 'api_key')
+    if (isOpenAiApiKeyAccount(account) || isOpenAiOAuthAccount(account))
       void loadConfiguration(account.id)
   }
 
   async function save() {
-    const accountId = editingAccountId.value
+    const accountId = editingAccount.value?.id
     if (!accountId || saving.value)
       return
-    const isApiKey = editingAccount.value?.authenticationKind === 'api_key'
+    const isApiKey = isOpenAiApiKeyAccount(editingAccount.value)
+    const isOAuth = isOpenAiOAuthAccount(editingAccount.value)
+    if (isApiKey && !configurationReady.value)
+      return
     if (isApiKey) {
-      if (!configurationReady.value)
-        return
       const error = apiKeyAccountError(apiKey.value, true)
       if (error) {
         toast.warning(error)
@@ -107,7 +108,6 @@ export function useAccountEditor(options: {
       return
     }
     const scheduling = parseAccountSchedulingForm(concurrencyLimit.value, weight.value)
-    const bpsLimit = parseOptionalConcurrencyLimit(bpsConcurrencyLimit.value)
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
       toast.warning('请选择已通过测试的代理')
       return
@@ -116,23 +116,14 @@ export function useAccountEditor(options: {
       toast.warning(scheduling.message)
       return
     }
-    if (!bpsLimit.valid) {
-      toast.warning(bpsLimit.message)
-      return
-    }
 
     await saveAction.run(async () => {
-      const isBasispointsAccount = editingAccount.value?.provider === 'openai'
-        && editingAccount.value?.authenticationKind === 'oauth'
       const settings = {
         accountId,
         notes: notes.value,
-        turnStateOverride: turnStateOverride.value.trim(),
-        basispointsEnabled: isBasispointsAccount ? basispointsEnabled.value : undefined,
         outboundProxyId: proxyMode.value === 'preserve' ? undefined : proxyMode.value === 'direct' ? '' : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
-        bpsConcurrencyLimit: bpsLimit.value,
         weight: scheduling.values.weight,
         modelAccess: modelAccess.value,
         groupIds: [...new Set(selectedGroupIds.value)],
@@ -142,51 +133,41 @@ export function useAccountEditor(options: {
         || apiKey.value.base_url.trim() !== savedConfiguration.value?.base_url
         || apiKey.value.transport !== savedConfiguration.value?.transport
       )
-      if (connectionChanged) {
-        await updateAccountApiKey({ accountId, baseUrl: apiKey.value.base_url.trim(), transport: apiKey.value.transport, apiKey: apiKey.value.apiKey || undefined, settings })
-      }
-      else {
-        await updateAccount(settings)
-      }
+      await updateAccount({
+        ...settings,
+        connection: connectionChanged
+          ? { baseUrl: apiKey.value.base_url.trim(), transport: apiKey.value.transport, apiKey: apiKey.value.apiKey || undefined }
+          : isOAuth && configurationReady.value && oauthTransport.value !== savedOAuthTransport.value
+            ? { transport: oauthTransport.value }
+            : undefined,
+      })
       showEditModal.value = false
-      await Promise.all([options.reloadAccounts(), options.reloadGroups()])
       toast.success('账号已更新')
+      void Promise.allSettled([options.reloadAccounts(), options.reloadGroups()])
     })
   }
 
-  watch([showEditModal, saving], ([open, isSaving]) => {
-    if (open || isSaving)
-      return
+  watch(showEditModal, (open) => {
+    if (!open)
+      configurationRequest.invalidate({ resetLoading: false })
+  })
+
+  function clearCredentials() {
     configurationRequest.invalidate()
     apiKey.value = emptyApiKeyAccountForm()
     savedConfiguration.value = undefined
-    configurationReady.value = false
-    editingAccountId.value = null
-    notes.value = ''
-    turnStateOverride.value = ''
-    basispointsEnabled.value = false
-    proxyMode.value = 'preserve'
-    proxyId.value = ''
-    schedulingEnabled.value = true
-    concurrencyLimit.value = ''
-    bpsConcurrencyLimit.value = ''
-    weight.value = '1'
-    modelAccess.value = undefined
-    selectedGroupIds.value = []
-  })
+  }
 
   return {
     apiKey,
+    oauthTransport,
     configurationLoading,
     configurationReady,
     showEditModal,
     editingAccount,
     notes,
-    turnStateOverride,
-    basispointsEnabled,
     schedulingEnabled,
     concurrencyLimit,
-    bpsConcurrencyLimit,
     weight,
     modelAccess,
     proxyMode,
@@ -195,5 +176,6 @@ export function useAccountEditor(options: {
     saving,
     open,
     save,
+    clearCredentials,
   }
 }

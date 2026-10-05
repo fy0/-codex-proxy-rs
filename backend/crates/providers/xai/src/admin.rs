@@ -321,6 +321,76 @@ impl XaiAdminProvider {
 
 #[async_trait]
 impl ProviderAdmin for XaiAdminProvider {
+    fn account_capabilities(
+        &self,
+        _account_id: &ProviderAccountId,
+        authentication_kind: &str,
+    ) -> gateway_admin::model::accounts::ProviderAccountCapabilities {
+        let oauth = authentication_kind == crate::credential::XAI_AUTHENTICATION_KIND_OAUTH;
+        gateway_admin::model::accounts::ProviderAccountCapabilities {
+            quota: oauth,
+            quota_refresh: oauth,
+            ..Default::default()
+        }
+    }
+
+    fn client_profile_options(
+        &self,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        crate::transport::client_profile::object(&serde_json::json!({
+            "defaults": crate::transport::client_profile::GrokClientProfileSelection::default(),
+        }))
+        .map_err(|_| ProviderAdminError::new(ProviderAdminErrorKind::Invalid))
+    }
+
+    fn preview_client_profile(
+        &self,
+        configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        crate::transport::client_profile::GrokClientProfileSelection::parse(configuration)
+            .and_then(|selection| {
+                selection.preview(&self.wire_profile, &self.cli_release.snapshot())
+            })
+            .map_err(|_| ProviderAdminError::new(ProviderAdminErrorKind::Invalid))
+    }
+
+    fn configured_wire_profile(
+        &self,
+        configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Option<DashboardWireProfile> {
+        use crate::transport::client_profile::{GrokClientProfileSelection, VersionMode};
+        let selection = GrokClientProfileSelection::parse(configuration).ok()?;
+        let profile = selection.resolve(&self.wire_profile).ok()?;
+        let mut view = self.dashboard_wire_profile()?;
+        view.user_agent = profile.user_agent();
+        view.version = profile.client_version;
+        view.target.os_type = profile.target_os;
+        view.target.arch = profile.target_arch;
+        view.target.terminal = profile.client_mode.clone();
+        view.attributes = vec![
+            DashboardWireAttribute {
+                label: "客户端标识".to_owned(),
+                value: profile.client_identifier,
+            },
+            DashboardWireAttribute {
+                label: "运行模式".to_owned(),
+                value: profile.client_mode,
+            },
+            DashboardWireAttribute {
+                label: "Token 认证".to_owned(),
+                value: "xai-grok-cli".to_owned(),
+            },
+        ];
+        if selection.version_mode == VersionMode::Fixed {
+            view.release = None;
+            view.verified_at = None;
+        }
+        Some(view)
+    }
+
+    fn pricing_catalog(&self) -> gateway_admin::model::pricing::ProviderPricingCatalog {
+        crate::transport::canonical::pricing_catalog()
+    }
     fn provider_kind(&self) -> &ProviderKind {
         &self.provider_kind
     }
@@ -334,7 +404,7 @@ impl ProviderAdmin for XaiAdminProvider {
         self.quota.invalidate_scheduling(account_ids);
     }
 
-    fn connection_test_operation(
+    async fn connection_test_operation(
         &self,
         upstream_model: &UpstreamModelId,
         input_text: &str,
@@ -356,13 +426,7 @@ impl ProviderAdmin for XaiAdminProvider {
                 arch: profile.target_arch.clone(),
                 terminal: profile.client_mode.clone(),
             },
-            user_agent: format!(
-                "{}/{} ({}; {})",
-                profile.client_identifier,
-                profile.client_version,
-                profile.target_os,
-                profile.target_arch
-            ),
+            user_agent: profile.user_agent(),
             attributes: vec![
                 DashboardWireAttribute {
                     label: "客户端标识".to_owned(),
@@ -404,6 +468,10 @@ impl ProviderAdmin for XaiAdminProvider {
             return Ok(None);
         }
         Ok(Some(CalculatedBillingBreakdown {
+            // 历史总额只能核对费用拆分，不能证明当时保存过长上下文标记。
+            long_context_billing_applied: false,
+            image: None,
+            custom_multiplier_bps: breakdown.custom_multiplier_bps(),
             input_amount: currency_cost(breakdown.input_amount())?,
             output_amount: currency_cost(breakdown.output_amount())?,
             cache_read_amount: currency_cost(breakdown.cache_read_amount())?,
@@ -531,7 +599,7 @@ impl ProviderAdmin for XaiAdminProvider {
 
     async fn start_authorization(
         &self,
-        pending: PendingAuthorizationMutation,
+        pending: gateway_admin::model::provider_credentials::PendingAuthorizationMutation,
     ) -> Result<AuthorizationStarted, ProviderAdminError> {
         if pending.provider_kind() != &self.provider_kind {
             return Err(provider_error(ProviderAdminErrorKind::Invalid));
@@ -846,16 +914,19 @@ impl XaiAdminProvider {
                         .with_outbound_proxy(stored.mutation.outbound_proxy().cloned()),
                     credential: prepared.credential,
                 };
-                PreparedAuthorizationCredential::Create(prepared_create(prepared, Utc::now())?)
+                PreparedAuthorizationCredential::Create(Box::new(prepared_create(
+                    prepared,
+                    Utc::now(),
+                )?))
             }
             AuthorizationMutationTarget::Reauthorize { .. } => {
                 let current =
                     current.ok_or_else(|| provider_error(ProviderAdminErrorKind::Internal))?;
                 let prepared = verified_rotation(current, tokens)?;
-                PreparedAuthorizationCredential::Reauthorize(prepared_rotation(
+                PreparedAuthorizationCredential::Reauthorize(Box::new(prepared_rotation(
                     prepared,
                     self.provider_kind.clone(),
-                )?)
+                )?))
             }
         };
         Ok(PreparedAuthorizationCommit::new(
@@ -978,6 +1049,7 @@ fn prepared_rotation(
             email: profile.email,
             plan_type: profile.plan_type,
             preserve_profile,
+            preserve_credential_state: false,
             provider_material: ProviderDocument::new(OpaqueProviderData::new(
                 credential.into_inner(),
             )),
@@ -1081,6 +1153,7 @@ fn project_quota(
 ) -> ProviderQuota {
     let Some(snapshot) = snapshot else {
         return ProviderQuota {
+            credits: None,
             plan_type: None,
             observed_at: None,
             refresh_token_expires_at,
@@ -1153,6 +1226,7 @@ fn project_quota(
         }
     };
     ProviderQuota {
+        credits: None,
         plan_type: billing.plan_type().map(str::to_owned),
         observed_at: Some(snapshot.observed_at()),
         refresh_token_expires_at,

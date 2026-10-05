@@ -162,8 +162,10 @@ impl From<GatewayError> for AccountProbeError {
 }
 
 pub trait AccountProbe: Send + Sync {
+    /// 插件管理操作传入其冻结快照；其他调用可使用当前发布视图。
     fn probe(
         &self,
         request: AccountProbeRequest,
+        snapshot: Option<std::sync::Arc<crate::routing::RuntimeSnapshot>>,
     ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>>;
 }

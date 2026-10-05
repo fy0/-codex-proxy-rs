@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, Request};
 use axum::routing::get;
 use gateway_admin::AdminServices;
 use gateway_core::engine::execution::ExecutionService;
@@ -19,7 +19,6 @@ use serde::Deserialize;
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use url::Url;
 
@@ -32,8 +31,13 @@ pub mod admin;
 pub mod auth;
 mod health;
 mod key_usage;
+mod middleware;
 pub mod openai;
+mod provider;
 mod session_cookie;
+mod time;
+
+pub use time::{RequestBucketView, TimePresenter};
 
 /// API-owned HTTP 与静态资源配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -111,11 +115,50 @@ pub enum ApiConfigError {
 /// 完成组装的唯一 API router。
 pub struct ApiBundle {
     router: Router,
+    settings: middleware::SettingsSource,
+    middleware: Option<middleware::PlanSource>,
+    timeout: Option<Duration>,
+    request_id_header: HeaderName,
 }
 
 impl ApiBundle {
+    /// 组合根从请求已冻结的快照解析计划；响应流持有同一代次。
+    #[must_use]
+    pub fn with_middleware(
+        mut self,
+        source: impl Fn(
+            Option<&gateway_core::routing::RuntimeSnapshot>,
+        ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.middleware = Some(Arc::new(source));
+        self
+    }
+
+    /// 内部调用使用同一总路由；组合根持有强引用，Runtime 只保存 Weak。
+    pub fn dispatcher(&self) -> Arc<dyn gateway_core::middleware::http::Dispatcher> {
+        Arc::new(middleware::RouterDispatcher {
+            router: middleware::wrap(
+                self.router.clone(),
+                self.middleware.clone(),
+                self.timeout,
+                self.request_id_header.clone(),
+                self.settings.clone(),
+            ),
+            settings: self.settings.clone(),
+        })
+    }
+
     pub fn router(self) -> Router {
-        self.router
+        middleware::wrap(
+            self.router,
+            self.middleware,
+            self.timeout,
+            self.request_id_header,
+            self.settings,
+        )
     }
 }
 
@@ -132,6 +175,17 @@ pub fn initialize(
     config.validate().map_err(ApiError::Config)?;
     let request_id_header = HeaderName::from_str(&config.request_id_header)
         .map_err(|_| ApiError::Config(ApiConfigError::InvalidRequestIdHeader))?;
+    let settings: middleware::SettingsSource = {
+        let execution = execution.clone();
+        let timeout_ms = config
+            .request_timeout_seconds
+            .map(|seconds| seconds.saturating_mul(1000));
+        Arc::new(move || {
+            execution
+                .request_settings()
+                .map(|settings| settings.with_http_timeout(timeout_ms))
+        })
+    };
     let state = ApiState {
         admin,
         openai: OpenAiService::new(execution, lifecycle),
@@ -141,10 +195,18 @@ pub fn initialize(
     let mut router = Router::new()
         .route("/healthz", get(health::healthz))
         .merge(openai::router::router())
+        .merge(provider::router())
         .merge(admin::router::<ApiState>())
+        .merge(admin::model_router())
         .merge(auth::router::<ApiState>())
         .merge(key_usage::router::<ApiState>())
-        .fallback_service(ServeDir::new(config.asset_directory).fallback(ServeFile::new(index)));
+        .fallback_service(
+            Router::new()
+                .fallback_service(
+                    ServeDir::new(config.asset_directory).fallback(ServeFile::new(index)),
+                )
+                .layer(axum::middleware::map_response(static_cache_control)),
+        );
     if !config.cors_allowed_origins.is_empty() {
         let origins = config
             .cors_allowed_origins
@@ -167,12 +229,6 @@ pub fn initialize(
                 ])
                 .allow_credentials(true),
         );
-    }
-    if let Some(seconds) = config.request_timeout_seconds {
-        router = router.layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(seconds),
-        ));
     }
     // Trace 必须在 SetRequestId 内侧，span 才能捕获本服务生成的 request_id；
     // 默认 DEBUG span 会被 info 日志过滤器丢弃，这里显式用 info_span。
@@ -202,9 +258,26 @@ pub fn initialize(
     let router = router
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(trace_layer)
-        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+        .layer(SetRequestIdLayer::new(
+            request_id_header.clone(),
+            MakeRequestUuid,
+        ))
         .with_state(state);
-    Ok(ApiBundle { router })
+    Ok(ApiBundle {
+        settings,
+        router,
+        middleware: None,
+        timeout: config.request_timeout_seconds.map(Duration::from_secs),
+        request_id_header,
+    })
+}
+
+async fn static_cache_control(mut response: axum::response::Response) -> axum::response::Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    response
 }
 
 /// API 初始化失败的脱敏分类。

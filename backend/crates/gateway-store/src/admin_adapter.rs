@@ -1,6 +1,7 @@
 //! Admin 认证与设置 adapter。
 
 use super::*;
+use gateway_admin::model::audit::MutationAuditOperation;
 
 pub(crate) struct AuthStoreAdapter {
     pub(crate) security: postgres::PgAdminSecurityAuditRepository,
@@ -15,6 +16,51 @@ pub(crate) struct AdminSettingsStoreAdapter {
 
 #[async_trait::async_trait]
 impl SettingsStore for AdminSettingsStoreAdapter {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        self.control_plane
+            .load_pricing()
+            .await
+            .map_err(|error| admin_store_error("model pricing", error))
+    }
+
+    async fn sync_pricing(
+        &self,
+        changes: gateway_admin::model::pricing::PricingSyncChanges,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        let audit = mutation_audit(
+            context,
+            MutationAuditOperation::ModelPricingSync,
+            "models.dev",
+            vec!["synced".to_owned()],
+        );
+        let revision = self
+            .control_plane
+            .sync_pricing(changes, audit)
+            .await
+            .map_err(|error| admin_store_error("model pricing sync", error))?;
+        admin_revision(revision)
+    }
+
+    async fn update_pricing(
+        &self,
+        command: gateway_admin::model::pricing::UpdatePricing,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        let audit = mutation_audit(
+            context,
+            MutationAuditOperation::ModelPricingUpdate,
+            &command.provider,
+            command.models.clone(),
+        );
+        let revision = self
+            .control_plane
+            .update_pricing(command, audit)
+            .await
+            .map_err(|error| admin_store_error("model pricing", error))?;
+        admin_revision(revision)
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<AdminRuntimeSettings> {
         let snapshot = postgres::ControlPlaneRepository::load_control_plane(&self.control_plane)
             .await
@@ -34,27 +80,25 @@ impl SettingsStore for AdminSettingsStoreAdapter {
         command: ReplaceRuntimeSettings,
         context: &MutationContext,
     ) -> AdminStoreResult<AdminRuntimeSettings> {
-        let current = postgres::ControlPlaneRepository::load_control_plane(&self.control_plane)
-            .await
-            .map_err(|error| admin_store_error("runtime settings", error))?;
         let replacement = postgres::ControlPlaneReplacement {
+            expected_revision: store_revision(command.expected_revision)?,
             settings: postgres::RuntimeSettingsUpdate {
-                admin_api_key: current.settings.admin_api_key,
+                request_profile_updates: command.request_profile_updates,
                 refresh_margin_seconds: command.refresh_margin_seconds,
                 refresh_concurrency: command.refresh_concurrency,
                 max_concurrent_per_account: command.max_concurrent_per_account,
-                disable_fast: command.disable_fast,
                 request_location_enabled: command.request_location_enabled,
                 request_location: command.request_location,
                 request_interval_ms: command.request_interval_ms,
                 max_waiting_per_key: command.max_waiting_per_key,
                 max_waiting_per_account: command.max_waiting_per_account,
                 concurrency_wait_timeout_seconds: command.concurrency_wait_timeout_seconds,
+                openai_guardian_reserved_concurrency: command.openai_guardian_reserved_concurrency,
                 responses_max_decompressed_body_bytes: command
                     .responses_max_decompressed_body_bytes,
+                smart_scheduling: command.smart_scheduling,
                 rotation_strategy: command.rotation_strategy.as_str().to_owned(),
                 model_mappings: store_model_mappings(command.model_mappings),
-                bps_model_mappings: store_model_mappings(command.bps_model_mappings),
                 min_codex_desktop_version: command.min_codex_desktop_version,
                 min_codex_cli_version: command.min_codex_cli_version,
                 usage_retention_days: command.usage_retention_days,
@@ -68,18 +112,19 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                 account_auto_freeze_probe_model: command.account_auto_freeze_probe_model,
                 account_auto_freeze_adaptive_concurrency: command
                     .account_auto_freeze_adaptive_concurrency,
+                account_warmup_enabled: command.account_warmup_enabled,
+                account_warmup_schedule_time: command.account_warmup_schedule_time,
+                account_warmup_model: command.account_warmup_model,
             },
             audit: mutation_audit(
                 context,
-                "settings.replace",
-                "runtime_settings",
+                MutationAuditOperation::RuntimeSettingsReplace,
                 "1",
                 vec![
-                    "disable_fast".to_owned(),
+                    "provider_request_profiles_json".to_owned(),
                     "request_location_enabled".to_owned(),
                     "request_location_json".to_owned(),
                     "model_mappings_json".to_owned(),
-                    "bps_model_mappings_json".to_owned(),
                     "refresh_margin_seconds".to_owned(),
                     "refresh_concurrency".to_owned(),
                     "max_concurrent_per_account".to_owned(),
@@ -87,8 +132,10 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     "max_waiting_per_key".to_owned(),
                     "max_waiting_per_account".to_owned(),
                     "concurrency_wait_timeout_seconds".to_owned(),
+                    "openai_guardian_reserved_concurrency".to_owned(),
                     "responses_max_decompressed_body_bytes".to_owned(),
                     "rotation_strategy".to_owned(),
+                    "smart_scheduling_json".to_owned(),
                     "min_codex_desktop_version".to_owned(),
                     "min_codex_cli_version".to_owned(),
                     "retention".to_owned(),
@@ -134,12 +181,7 @@ impl AdminSettingsStoreAdapter {
             admin_api_key,
             mutation_audit(
                 context,
-                if exists {
-                    "admin_api_key.replace"
-                } else {
-                    "admin_api_key.delete"
-                },
-                "runtime_settings",
+                MutationAuditOperation::AdminApiKeyChanged { exists },
                 "1",
                 vec!["admin_api_key".to_owned()],
             ),
@@ -164,44 +206,8 @@ pub(crate) fn admin_runtime_settings(
                 "rotation strategy is invalid",
             )
         })?;
-    let model_mappings = admin_model_mappings(settings.model_mappings)?;
-    let bps_model_mappings = admin_model_mappings(settings.bps_model_mappings)?;
-    Ok(AdminRuntimeSettings {
-        config_revision: admin_revision(settings.config_revision)?,
-        disable_fast: settings.disable_fast,
-        request_location_enabled: settings.request_location_enabled,
-        request_location: settings.request_location,
-        model_mappings,
-        bps_model_mappings,
-        refresh_margin_seconds: settings.refresh_margin_seconds,
-        refresh_concurrency: settings.refresh_concurrency,
-        max_concurrent_per_account: settings.max_concurrent_per_account,
-        request_interval_ms: settings.request_interval_ms,
-        max_waiting_per_key: settings.max_waiting_per_key,
-        max_waiting_per_account: settings.max_waiting_per_account,
-        concurrency_wait_timeout_seconds: settings.concurrency_wait_timeout_seconds,
-        responses_max_decompressed_body_bytes: settings.responses_max_decompressed_body_bytes,
-        rotation_strategy,
-        min_codex_desktop_version: settings.min_codex_desktop_version,
-        min_codex_cli_version: settings.min_codex_cli_version,
-        usage_retention_days: settings.usage_retention_days,
-        ops_event_retention_days: settings.ops_event_retention_days,
-        audit_retention_days: settings.audit_retention_days,
-        account_auto_freeze_enabled: settings.account_auto_freeze_enabled,
-        account_auto_freeze_threshold: settings.account_auto_freeze_threshold,
-        account_auto_freeze_window_seconds: settings.account_auto_freeze_window_seconds,
-        account_auto_freeze_duration_seconds: settings.account_auto_freeze_duration_seconds,
-        account_auto_freeze_probe_enabled: settings.account_auto_freeze_probe_enabled,
-        account_auto_freeze_probe_model: settings.account_auto_freeze_probe_model,
-        account_auto_freeze_adaptive_concurrency: settings.account_auto_freeze_adaptive_concurrency,
-        updated_at: settings.updated_at,
-    })
-}
-
-fn admin_model_mappings(
-    mappings: std::collections::BTreeMap<String, String>,
-) -> AdminStoreResult<ModelMappings> {
-    mappings
+    let model_mappings = settings
+        .model_mappings
         .into_iter()
         .map(|(public, upstream)| {
             let public = gateway_core::routing::PublicModelId::new(public).map_err(|_| {
@@ -220,7 +226,41 @@ fn admin_model_mappings(
             })?;
             Ok((public, upstream))
         })
-        .collect()
+        .collect::<AdminStoreResult<ModelMappings>>()?;
+    Ok(AdminRuntimeSettings {
+        request_profiles: settings.request_profiles,
+        config_revision: admin_revision(settings.config_revision)?,
+        request_location_enabled: settings.request_location_enabled,
+        request_location: settings.request_location,
+        model_mappings,
+        refresh_margin_seconds: settings.refresh_margin_seconds,
+        refresh_concurrency: settings.refresh_concurrency,
+        max_concurrent_per_account: settings.max_concurrent_per_account,
+        request_interval_ms: settings.request_interval_ms,
+        max_waiting_per_key: settings.max_waiting_per_key,
+        max_waiting_per_account: settings.max_waiting_per_account,
+        concurrency_wait_timeout_seconds: settings.concurrency_wait_timeout_seconds,
+        openai_guardian_reserved_concurrency: settings.openai_guardian_reserved_concurrency,
+        responses_max_decompressed_body_bytes: settings.responses_max_decompressed_body_bytes,
+        smart_scheduling: settings.smart_scheduling,
+        rotation_strategy,
+        min_codex_desktop_version: settings.min_codex_desktop_version,
+        min_codex_cli_version: settings.min_codex_cli_version,
+        usage_retention_days: settings.usage_retention_days,
+        ops_event_retention_days: settings.ops_event_retention_days,
+        audit_retention_days: settings.audit_retention_days,
+        account_auto_freeze_enabled: settings.account_auto_freeze_enabled,
+        account_auto_freeze_threshold: settings.account_auto_freeze_threshold,
+        account_auto_freeze_window_seconds: settings.account_auto_freeze_window_seconds,
+        account_auto_freeze_duration_seconds: settings.account_auto_freeze_duration_seconds,
+        account_auto_freeze_probe_enabled: settings.account_auto_freeze_probe_enabled,
+        account_auto_freeze_probe_model: settings.account_auto_freeze_probe_model,
+        account_auto_freeze_adaptive_concurrency: settings.account_auto_freeze_adaptive_concurrency,
+        account_warmup_enabled: settings.account_warmup_enabled,
+        account_warmup_schedule_time: settings.account_warmup_schedule_time,
+        account_warmup_model: settings.account_warmup_model,
+        updated_at: settings.updated_at,
+    })
 }
 
 pub(crate) fn store_model_mappings(
@@ -238,6 +278,24 @@ impl AuthStore for AuthStoreAdapter {
         postgres::AdminSecurityAuditRepository::password_hash(&self.security, admin_user_id)
             .await
             .map_err(|error| admin_store_error("admin authentication", error))
+    }
+
+    async fn change_password(
+        &self,
+        admin_user_id: &str,
+        expected_hash: &str,
+        password_hash: &str,
+        audit: AdminAuditModel,
+    ) -> AdminStoreResult<bool> {
+        postgres::AdminSecurityAuditRepository::change_password(
+            &self.security,
+            admin_user_id,
+            expected_hash,
+            password_hash,
+            auth_audit_record(audit)?,
+        )
+        .await
+        .map_err(|error| admin_store_error("administrator password", error))
     }
 
     async fn create_password_hash_if_absent(
@@ -271,8 +329,12 @@ impl AuthStore for AuthStoreAdapter {
 
     async fn store_session(&self, session_id: &str, session: &AuthSession) -> AdminStoreResult<()> {
         let subject = match &session.subject {
-            SessionSubject::Admin { admin_user_id } => redis::SessionSubjectRecord::Admin {
+            SessionSubject::Admin {
+                admin_user_id,
+                credential_fingerprint,
+            } => redis::SessionSubjectRecord::Admin {
                 admin_user_id: admin_user_id.clone(),
+                credential_fingerprint: credential_fingerprint.clone(),
             },
             SessionSubject::Key { client_key_id } => redis::SessionSubjectRecord::Key {
                 client_key_id: client_key_id.as_str().to_owned(),
@@ -324,57 +386,51 @@ impl AuthStore for AuthStoreAdapter {
     }
 
     async fn append_audit_event(&self, event: AdminAuditModel) -> AdminStoreResult<()> {
-        let config_revision = event
-            .config_revision
-            .map(|revision| i64::try_from(revision.get()))
-            .transpose()
-            .map_err(|_| {
-                AdminStoreError::new(
-                    AdminStoreErrorKind::Invalid,
-                    "admin audit",
-                    "config revision is outside the supported range",
-                )
-            })?;
-        let actor_kind = match event.actor_kind {
-            gateway_admin::model::auth::AuditActorKind::AdminSession => {
-                postgres::AdminAuditActorKind::AdminSession
-            }
-            gateway_admin::model::auth::AuditActorKind::AdminApiKey => {
-                postgres::AdminAuditActorKind::AdminApiKey
-            }
-            gateway_admin::model::auth::AuditActorKind::System => {
-                postgres::AdminAuditActorKind::System
-            }
-            gateway_admin::model::auth::AuditActorKind::Anonymous => {
-                postgres::AdminAuditActorKind::Anonymous
-            }
-        };
         postgres::AdminSecurityAuditRepository::append_admin_audit_event(
             &self.security,
-            postgres::AdminAuditEvent {
-                id: event.id,
-                actor_kind,
-                actor_admin_user_id: event.actor_admin_user_id,
-                actor_ref: event.actor_ref,
-                admin_request_id: event.request_id,
-                action: event.action,
-                entity_kind: event.entity_kind,
-                entity_ref: event.entity_ref,
-                config_revision,
-                changed_fields: event.changed_fields,
-                created_at: event.occurred_at,
-            },
+            auth_audit_record(event)?,
         )
         .await
         .map_err(|error| admin_store_error("admin audit", error))
     }
 }
 
+fn auth_audit_record(event: AdminAuditModel) -> AdminStoreResult<postgres::AdminAuditEvent> {
+    let config_revision = event
+        .config_revision
+        .map(|revision| i64::try_from(revision.get()))
+        .transpose()
+        .map_err(|_| {
+            AdminStoreError::new(
+                AdminStoreErrorKind::Invalid,
+                "admin audit",
+                "config revision is outside the supported range",
+            )
+        })?;
+    Ok(postgres::AdminAuditEvent {
+        id: event.id,
+        actor_kind: event.actor_kind.into(),
+        actor_admin_user_id: event.actor_admin_user_id,
+        actor_ref: event.actor_ref,
+        admin_request_id: event.request_id,
+        action: event.action,
+        entity_kind: event.entity_kind,
+        entity_ref: event.entity_ref,
+        config_revision,
+        changed_fields: event.changed_fields,
+        created_at: event.occurred_at,
+    })
+}
+
 fn auth_session(record: redis::AuthSessionRecord) -> AdminStoreResult<AuthSession> {
     let subject = match record.subject {
-        redis::SessionSubjectRecord::Admin { admin_user_id } => {
-            SessionSubject::Admin { admin_user_id }
-        }
+        redis::SessionSubjectRecord::Admin {
+            admin_user_id,
+            credential_fingerprint,
+        } => SessionSubject::Admin {
+            admin_user_id,
+            credential_fingerprint,
+        },
         redis::SessionSubjectRecord::Key { client_key_id } => SessionSubject::Key {
             client_key_id: gateway_core::policy::ClientApiKeyId::new(client_key_id).map_err(
                 |_| {

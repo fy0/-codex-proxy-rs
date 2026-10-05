@@ -67,15 +67,15 @@ impl fmt::Debug for GrokHeaderValue {
 /// 一个官方 Grok CLI 代理请求头。
 #[derive(Debug, Clone)]
 pub struct GrokHeader {
-    name: &'static str,
+    name: String,
     value: GrokHeaderValue,
 }
 
 impl GrokHeader {
-    /// 返回静态 header 名。
+    /// 返回 header 名。
     #[must_use]
-    pub const fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// 返回类型化的 header 值。
@@ -84,16 +84,16 @@ impl GrokHeader {
         &self.value
     }
 
-    pub(crate) fn public(name: &'static str, value: impl Into<String>) -> Self {
+    pub(crate) fn public(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
-            name,
+            name: name.into(),
             value: GrokHeaderValue::Public(value.into()),
         }
     }
 
-    pub(crate) fn sensitive(name: &'static str, value: SecretValue) -> Self {
+    pub(crate) fn sensitive(name: impl Into<String>, value: SecretValue) -> Self {
         Self {
-            name,
+            name: name.into(),
             value: GrokHeaderValue::Sensitive(value),
         }
     }

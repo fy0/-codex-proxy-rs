@@ -124,6 +124,33 @@ impl fmt::Display for BackupStatus {
     }
 }
 
+/// 已通过领域状态机校验的显式迁移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackupStatusTransition {
+    from: BackupStatus,
+    to: BackupStatus,
+}
+
+impl BackupStatusTransition {
+    /// 校验并构造显式迁移；非法状态边返回 `None`。
+    #[must_use]
+    pub fn try_new(from: BackupStatus, to: BackupStatus) -> Option<Self> {
+        from.allows_transition_to(to).then_some(Self { from, to })
+    }
+
+    /// 迁移要求的当前状态。
+    #[must_use]
+    pub const fn from(self) -> BackupStatus {
+        self.from
+    }
+
+    /// 迁移完成后的目标状态。
+    #[must_use]
+    pub const fn to(self) -> BackupStatus {
+        self.to
+    }
+}
+
 /// S3 存储配置更新命令；`secret_access_key` 为 `None` 表示保留旧值。
 #[derive(Clone)]
 pub struct UpdateBackupStorageCommand {
@@ -156,7 +183,6 @@ impl fmt::Debug for UpdateBackupStorageCommand {
 pub struct UpdateBackupScheduleCommand {
     pub schedule_enabled: bool,
     pub cron_expression: String,
-    pub schedule_timezone: String,
     pub retention_days: u32,
     pub retention_count: u32,
 }
@@ -176,6 +202,7 @@ pub struct BackupSettings {
     pub force_path_style: bool,
     pub schedule_enabled: bool,
     pub cron_expression: Option<String>,
+    /// 记录持久化游标采用的时区，由服务端维护，不是独立部署设置。
     pub schedule_timezone: Option<String>,
     pub retention_days: u32,
     pub retention_count: u32,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use futures::{FutureExt as _, pin_mut};
 use gateway_core::lifecycle::CancellationToken;
 
 #[test]
@@ -9,6 +10,36 @@ fn cancellation_token_should_wake_current_state() {
     token.cancel();
 
     assert!(token.is_cancelled());
+}
+
+#[test]
+fn child_cancellation_inherits_parent_without_cancelling_parent() {
+    futures::executor::block_on(async {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        child.cancel();
+
+        child.cancelled().await;
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+    });
+}
+
+#[test]
+fn parent_cancellation_wakes_nested_descendants() {
+    futures::executor::block_on(async {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        let grandchild = child.child_token();
+        let waiting = grandchild.cancelled();
+        pin_mut!(waiting);
+        assert!(waiting.as_mut().now_or_never().is_none());
+
+        parent.cancel();
+        waiting.await;
+        assert!(child.is_cancelled());
+        assert!(grandchild.is_cancelled());
+    });
 }
 use gateway_core::lifecycle::{ConnectionDraining, ConnectionGuard, ConnectionLifecycle};
 

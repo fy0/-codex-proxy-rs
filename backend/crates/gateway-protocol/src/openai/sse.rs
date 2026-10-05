@@ -527,14 +527,8 @@ fn track_event_buffer_bytes(current_bytes: &mut usize, line: &str) -> Result<(),
 }
 
 fn sse_frame_separator_bytes(bytes: &[u8]) -> Option<(usize, usize)> {
-    let lf = bytes
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|position| (position, 2));
-    let crlf = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|position| (position, 4));
+    let lf = memchr::memmem::find(bytes, b"\n\n").map(|position| (position, 2));
+    let crlf = memchr::memmem::find(bytes, b"\r\n\r\n").map(|position| (position, 4));
     match (lf, crlf) {
         (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
         (Some(found), None) | (None, Some(found)) => Some(found),

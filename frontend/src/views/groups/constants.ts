@@ -1,5 +1,5 @@
 import type { AccountGroup } from '@/api'
-import { defineTableColumns } from '@/components/base/BaseTable/columns'
+import { defineTableColumns } from '@codex-proxy/ui'
 
 export const DEFAULT_ACCOUNT_GROUP_COLOR = '#60A5FA80'
 

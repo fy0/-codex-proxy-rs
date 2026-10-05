@@ -40,7 +40,7 @@ const cliCommands = [
           安装或升级 Codex CLI
         </h3>
         <p class="mt-1.5 mb-0 text-cp-sm leading-[1.45] font-semibold text-cp-text-secondary">
-          按当前安装来源执行一种命令；官方安装器会自动选择当前平台架构。
+          按当前安装来源执行一种命令，官方安装器会自动选择当前平台架构
         </p>
       </div>
     </div>
@@ -53,7 +53,7 @@ const cliCommands = [
     </div>
 
     <div class="flex flex-wrap items-center justify-between gap-3 px-1 text-cp-sm font-semibold text-cp-text-secondary">
-      <span>重新执行对应命令即可升级到当前发布版本。</span>
+      <span>重新执行对应命令即可升级到当前发布版本</span>
       <a
         href="https://learn.chatgpt.com/docs/codex/cli"
         target="_blank"

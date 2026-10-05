@@ -4,12 +4,12 @@ import { accountModelAccessError } from '../../utils/modelAccess'
 import { parseAccountSchedulingForm } from '../../utils/schedulingForm'
 import { emptyApiKeyAccountForm } from '../../utils/upstreamApiKey'
 
-export type AccountCreateProvider = 'batch' | 'openai' | 'xai'
+export type AccountCreateSource = { kind: 'bundle' } | { kind: 'provider', id: string }
 export type AccountImportMode = 'oauth' | 'api_key' | 'access_token' | 'refresh_token' | 'json'
-export type AccountImportInputMode = Exclude<AccountImportMode, 'oauth' | 'api_key'>
+export type AccountImportInputMode = 'access_token' | 'refresh_token' | 'json'
 
 export interface AccountCreateForm {
-  provider: AccountCreateProvider | ''
+  source: AccountCreateSource | null
   apiKey: ApiKeyAccountForm
   notes: string
   enabled: boolean
@@ -20,16 +20,13 @@ export interface AccountCreateForm {
   step: 'settings' | 'import'
   mode: AccountImportMode
   importTexts: Record<AccountImportInputMode, string>
-  oauthFlowId: string
-  oauthAuthUrl: string
-  oauthCallback: string
   proxyMode: string
   proxyId: string
 }
 
 export function emptyAccountCreateForm(): AccountCreateForm {
   return {
-    provider: '',
+    source: null,
     apiKey: emptyApiKeyAccountForm(),
     notes: '',
     enabled: true,
@@ -39,12 +36,17 @@ export function emptyAccountCreateForm(): AccountCreateForm {
     step: 'settings',
     mode: 'oauth',
     importTexts: { access_token: '', refresh_token: '', json: '' },
-    oauthFlowId: '',
-    oauthAuthUrl: '',
-    oauthCallback: '',
     proxyMode: 'direct',
     proxyId: '',
   }
+}
+
+export function accountCreateProvider(form: AccountCreateForm) {
+  return form.source?.kind === 'provider' ? form.source.id : undefined
+}
+
+export function accountCreateSourceKey(form: AccountCreateForm) {
+  return form.source?.kind === 'provider' ? `provider:${form.source.id}` : form.source?.kind ?? ''
 }
 
 export function accountProxyError(form: AccountCreateForm): string | undefined {
@@ -63,7 +65,7 @@ export function accountImportSettings(form: AccountCreateForm) {
   if (modelError)
     throw new Error(modelError)
   return {
-    modelAccess: form.modelAccess,
+    modelAccess: form.modelAccess ? { ...form.modelAccess, models: [...form.modelAccess.models] } : undefined,
     enabled: form.enabled,
     ...scheduling.values,
     groupIds: [...new Set(form.groupIds)],

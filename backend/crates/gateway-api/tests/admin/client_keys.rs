@@ -11,6 +11,127 @@ use serde_json::json;
 use super::{AdminTestFixture, AdminTestState};
 
 #[test]
+fn reset_budget_requires_an_explicit_supported_period_and_valid_key() {
+    use gateway_api::admin::client_keys::ResetClientKeyBudgetRequest;
+    for period in ["daily", "weekly", "all"] {
+        let command = serde_json::from_value::<ResetClientKeyBudgetRequest>(
+            json!({"id":"key_reset", "period":period}),
+        )
+        .unwrap()
+        .into_command()
+        .unwrap();
+        assert_eq!(command.id.as_str(), "key_reset");
+    }
+    for payload in [
+        json!({"id":"key_reset"}),
+        json!({"id":"key_reset", "period":"monthly"}),
+        json!({"id":"key_reset", "period":"all", "amount":0}),
+    ] {
+        assert!(serde_json::from_value::<ResetClientKeyBudgetRequest>(payload).is_err());
+    }
+    assert!(
+        serde_json::from_value::<ResetClientKeyBudgetRequest>(json!({"id":" ", "period":"all"}))
+            .unwrap()
+            .into_command()
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn reset_budget_route_requires_admin_and_maps_missing_keys() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt as _;
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    for (cookie, expected) in [
+        ("", StatusCode::UNAUTHORIZED),
+        ("cpr_session=valid-session", StatusCode::NOT_FOUND),
+    ] {
+        let response = client_keys::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/client-keys/reset-budget")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-request-id", "req_reset")
+                    .body(Body::from(r#"{"id":"missing","period":"all"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
+async fn budget_reset_allows_admin_but_rejects_key_sessions_without_changing_usage() {
+    use crate::support::{RAW_KEY, json_request, key_fixture, response_json};
+    use axum::http::{Method, StatusCode, header};
+    use gateway_core::policy::ClientApiKeyId;
+    use tower::ServiceExt as _;
+
+    let fixture = key_fixture().await;
+    fixture.auth.insert_session("valid-admin");
+    let mut record = fixture
+        .services
+        .client_keys()
+        .reveal(&ClientApiKeyId::new("key-42").unwrap())
+        .await
+        .unwrap()
+        .record;
+    record.budget.daily_used_usd = "1.25".parse().unwrap();
+    record.budget.weekly_used_usd = "4.5".parse().unwrap();
+    *fixture.client_key.lock().unwrap() = Some(record);
+    let app = crate::openai::api_router_with_admin(fixture.services.clone());
+    let login = app
+        .clone()
+        .oneshot(json_request(
+            Method::POST,
+            "/api/auth/login",
+            json!({"mode":"key", "apiKey":RAW_KEY}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let key_cookie = login.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    for (cookie, expected, used) in [
+        (key_cookie.as_str(), StatusCode::FORBIDDEN, "1.25"),
+        ("cpr_session=valid-admin", StatusCode::OK, "0"),
+    ] {
+        let mut request = json_request(
+            Method::POST,
+            "/api/admin/client-keys/reset-budget",
+            json!({"id":"key-42", "period":"daily"}),
+        );
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookie.parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            assert_eq!(
+                response_json(response).await["data"],
+                json!({"id":"key-42"})
+            );
+        }
+        let key = fixture.client_key.lock().unwrap().clone().unwrap();
+        assert_eq!(key.budget.daily_used_usd.canonical(), used);
+        assert_eq!(key.budget.weekly_used_usd.canonical(), "4.5");
+    }
+}
+
+#[test]
 fn custom_client_keys_preserve_migrated_values_and_redact_debug() {
     for value in [
         "q".to_owned(),
@@ -310,25 +431,29 @@ fn client_key_responses_should_keep_shape_and_redact_creation_debug() {
         .with_ymd_and_hms(2026, 7, 18, 8, 0, 0)
         .single()
         .expect("valid time");
-    let view = ClientKeyView::from(gateway_admin::model::client_keys::ClientKeyRecord {
-        budget: Default::default(),
-        id: gateway_core::policy::ClientApiKeyId::new("key_visible").expect("Client Key ID"),
-        name: "visible".to_owned(),
-        label: None,
-        groups: Vec::new(),
-        provider_kinds: vec![
-            gateway_core::routing::ProviderKind::new("openai").expect("Provider kind"),
-        ],
-        prefix: "sk_visible12".to_owned(),
-        enabled: true,
-        limits: gateway_core::policy::RateLimits {
-            max_concurrency: 2,
-            requests_per_minute: 60,
+    let view = ClientKeyView::from((
+        gateway_admin::model::client_keys::ClientKeyRecord {
+            request_profile_overrides: Default::default(),
+            budget: Default::default(),
+            id: gateway_core::policy::ClientApiKeyId::new("key_visible").expect("Client Key ID"),
+            name: "visible".to_owned(),
+            label: None,
+            groups: Vec::new(),
+            provider_kinds: vec![
+                gateway_core::routing::ProviderKind::new("openai").expect("Provider kind"),
+            ],
+            prefix: "sk_visible12".to_owned(),
+            enabled: true,
+            limits: gateway_core::policy::RateLimits {
+                max_concurrency: 2,
+                requests_per_minute: 60,
+            },
+            created_at,
+            updated_at: created_at,
+            last_used_at: Some(created_at),
         },
-        created_at,
-        updated_at: created_at,
-        last_used_at: Some(created_at),
-    });
+        gateway_api::TimePresenter::new(Default::default()),
+    ));
     let list =
         serde_json::to_value(ClientKeyListData::new(vec![view], None, 1)).expect("serialize list");
     assert!(list.get("configRevision").is_none());
@@ -445,4 +570,127 @@ async fn list_route_should_accept_the_full_nonzero_u16_page_size() {
         .expect("client key list response");
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[test]
+fn profile_override_distinguishes_omission_from_explicit_inheritance() {
+    let mut payload = json!({"id":"key_profile", "name":"profile", "groupIds":[], "maxConcurrency":0, "requestsPerMinute":0});
+    let decode = |body| {
+        let mut command = serde_json::from_value::<UpdateClientKeyRequest>(body)
+            .unwrap()
+            .into_command()
+            .unwrap();
+        command
+            .request_profile_override_updates
+            .remove(&gateway_core::routing::ProviderKind::new("openai").expect("Provider kind"))
+    };
+    assert_eq!(decode(payload.clone()), None);
+    payload["openaiClientProfileOverride"] = json!(null);
+    assert_eq!(decode(payload.clone()), Some(None));
+    payload["openaiClientProfileOverride"] =
+        json!({"client":"cli", "platform":"linux", "versionMode":"latest"});
+    assert!(decode(payload).unwrap().is_some());
+}
+
+#[test]
+fn xai_profile_override_distinguishes_omission_from_explicit_inheritance() {
+    let mut payload = json!({"id":"key_profile", "name":"profile", "groupIds":[], "maxConcurrency":0, "requestsPerMinute":0});
+    let decode = |body| {
+        let mut command = serde_json::from_value::<UpdateClientKeyRequest>(body)
+            .unwrap()
+            .into_command()
+            .unwrap();
+        command
+            .request_profile_override_updates
+            .remove(&gateway_core::routing::ProviderKind::new("xai").expect("Provider kind"))
+    };
+    assert_eq!(decode(payload.clone()), None);
+    payload["xaiClientProfileOverride"] = json!(null);
+    assert_eq!(decode(payload.clone()), Some(None));
+    payload["xaiClientProfileOverride"] = json!({"versionMode":"latest"});
+    assert!(decode(payload).unwrap().is_some());
+}
+
+#[test]
+fn generic_profile_overrides_accept_native_providers_and_reject_legacy_conflicts() {
+    let profile = json!({"preset":"desktop"});
+    let xai = json!({"preset":"managed"});
+    let request: CreateClientKeyRequest = serde_json::from_value(json!({
+        "name":"profile",
+        "groupIds":[],
+        "maxConcurrency":0,
+        "requestsPerMinute":0,
+        "providerRequestProfileOverrides": {
+            "openai": profile,
+            "xai": xai,
+        },
+        "openaiClientProfileOverride": {"preset":"desktop"},
+    }))
+    .unwrap();
+    let command = request.into_command().unwrap();
+    assert_eq!(command.request_profile_overrides.len(), 2);
+    assert!(
+        command
+            .request_profile_overrides
+            .contains_key(&gateway_core::routing::ProviderKind::new("xai").expect("Provider kind"))
+    );
+
+    let conflict: CreateClientKeyRequest = serde_json::from_value(json!({
+        "name":"profile",
+        "groupIds":[],
+        "maxConcurrency":0,
+        "requestsPerMinute":0,
+        "providerRequestProfileOverrides": {"openai":{"preset":"desktop"}},
+        "openaiClientProfileOverride": {"preset":"cli"},
+    }))
+    .unwrap();
+    assert_eq!(
+        conflict.into_command().unwrap_err().field(),
+        "providerRequestProfileOverrides"
+    );
+
+    let unknown: CreateClientKeyRequest = serde_json::from_value(json!({
+        "name":"profile",
+        "groupIds":[],
+        "maxConcurrency":0,
+        "requestsPerMinute":0,
+        "providerRequestProfileOverrides": {"provider.example":{"preset":"managed"}},
+    }))
+    .unwrap();
+    assert_eq!(
+        unknown.into_command().unwrap_err().field(),
+        "providerRequestProfileOverrides"
+    );
+
+    let unknown_clear: UpdateClientKeyRequest = serde_json::from_value(json!({
+        "id":"key_profile",
+        "name":"profile",
+        "groupIds":[],
+        "maxConcurrency":0,
+        "requestsPerMinute":0,
+        "providerRequestProfileOverrides": {"provider.example":null},
+    }))
+    .unwrap();
+    assert_eq!(
+        unknown_clear.into_command().unwrap_err().field(),
+        "providerRequestProfileOverrides"
+    );
+}
+
+#[test]
+fn generic_profile_override_clear_rejects_conflicting_legacy_update() {
+    let request: UpdateClientKeyRequest = serde_json::from_value(json!({
+        "id":"key_profile",
+        "name":"profile",
+        "groupIds":[],
+        "maxConcurrency":0,
+        "requestsPerMinute":0,
+        "providerRequestProfileOverrides": {"xai":null},
+        "xaiClientProfileOverride": {"preset":"desktop"},
+    }))
+    .unwrap();
+    assert_eq!(
+        request.into_command().unwrap_err().field(),
+        "providerRequestProfileOverrides"
+    );
 }

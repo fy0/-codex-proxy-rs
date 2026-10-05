@@ -4,12 +4,16 @@ mod error;
 mod http;
 mod request;
 mod response;
+mod validation;
 pub mod websocket;
 
 pub use error::{ProtocolError, ProtocolErrorBody, RequestDecodeError, ResponseEncodeError};
-pub(crate) use http::responses;
-pub(super) use http::{PendingExecution, request_client_context};
+pub(crate) use http::{
+    ResponseAuthorization, ResponsesHttpRequest, execute_prepared_responses,
+    request_client_context, responses,
+};
 pub use http::{collect_execution_response, stream_execution_response};
+pub(crate) use request::decode_request_with_body;
 pub use request::{
     ContinuationIntent, DecodedResponsesRequest, OpenAiRequestHeaders, ResponsesRequestMetadata,
     decode_request_with_headers,
@@ -19,6 +23,7 @@ pub(crate) use websocket::responses_websocket;
 pub use websocket::{ResponseCreateFrameError, decode_response_create_with_context};
 
 use gateway_core::event::ProviderResponseHeader;
+pub(super) use gateway_protocol::openai::response_header_is_forwardable;
 
 pub(super) fn response_connection_options(headers: &[ProviderResponseHeader]) -> Vec<String> {
     headers
@@ -30,50 +35,4 @@ pub(super) fn response_connection_options(headers: &[ProviderResponseHeader]) ->
         .filter(|name| !name.is_empty())
         .map(str::to_ascii_lowercase)
         .collect()
-}
-
-pub(super) fn response_header_is_forwardable(name: &str, connection_options: &[String]) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    if connection_options
-        .iter()
-        .any(|option| option.eq_ignore_ascii_case(&name))
-        || name.starts_with("sec-websocket-")
-    {
-        return false;
-    }
-
-    !matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-connection"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "content-length"
-            | "content-type"
-            | "content-encoding"
-            | "authorization"
-            | "x-api-key"
-            | "www-authenticate"
-            | "authentication-info"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-authentication-info"
-            | "cookie"
-            | "cookie2"
-            | "set-cookie"
-            | "set-cookie2"
-            | "chatgpt-account-id"
-            | "chatgpt-organization-id"
-            | "chatgpt-org-id"
-            | "chatgpt-project-id"
-            | "openai-organization"
-            | "openai-project"
-            | "x-openai-organization"
-            | "x-openai-project"
-            | "x-codex-installation-id"
-            | "x-codex-turn-metadata"
-    )
 }

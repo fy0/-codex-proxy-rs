@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import type { getAccounts } from '@/api'
-import { AlertTriangle, Gauge, ShieldCheck, Users } from '@lucide/vue'
+import { BaseCard, BaseMotionIcon } from '@codex-proxy/ui'
 
+import { AlertTriangle, Gauge, ShieldCheck, Users } from '@lucide/vue'
 import { computed } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
-import { formatInteger } from '@/utils/number'
+import { formatInteger } from '@/utils/format'
 
 const props = defineProps<{
   summary: Awaited<ReturnType<typeof getAccounts>>['summary']

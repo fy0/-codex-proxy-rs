@@ -183,14 +183,14 @@ async fn retention_cleans_expired_scheduled_backups() {
         expires_at: None,
     };
     repository
-        .insert_scheduled_record(old_seed.clone())
+        .insert_backup_record(old_seed.clone())
         .await
         .expect("insert old");
     // 旧备份 40 天前完成（释放活跃名额），再插入新备份。
     let now = Utc::now();
     repository.set_completed(&backup_id("old"), now - Duration::days(40));
     repository
-        .insert_scheduled_record(new_seed.clone())
+        .insert_backup_record(new_seed.clone())
         .await
         .expect("insert new");
     // 新备份 1 天前完成。
@@ -213,12 +213,13 @@ async fn retention_cleans_expired_scheduled_backups() {
             UpdateBackupScheduleCommand {
                 schedule_enabled: false,
                 cron_expression: "0 2 * * *".to_owned(),
-                schedule_timezone: "Asia/Shanghai".to_owned(),
+
                 retention_days: 30,
                 retention_count: 0,
             },
             None,
             &system_context(),
+            Default::default(),
         )
         .await
         .expect("set retention");
@@ -234,4 +235,27 @@ async fn retention_cleans_expired_scheduled_backups() {
     assert_eq!(ids, vec![backup_id("new").as_str()]);
     assert!(object_store.object(&old_seed.object_key).is_none());
     assert!(object_store.object(&new_seed.object_key).is_some());
+}
+
+#[tokio::test]
+async fn timezone_change_rebases_future_cursor_without_running_old_due_backup() {
+    let mut settings = configured_settings();
+    settings.schedule_enabled = true;
+    settings.cron_expression = Some("0 2 * * *".to_owned());
+    settings.schedule_timezone = Some("Asia/Shanghai".to_owned());
+    settings.next_run_at = Some(Utc::now() - Duration::days(1));
+    let repository = Arc::new(FakeBackupRepository::new(settings));
+    let task = BackupTask::new(
+        repository.clone(),
+        Arc::new(FakeDumpPort::new()),
+        Arc::new(FakeObjectStore::new()),
+    )
+    .with_timezone("UTC".parse().unwrap());
+    task.run_cycle(&CancellationToken::new()).await.unwrap();
+    let settings = repository.load_settings().await.unwrap();
+    assert_eq!(settings.schedule_timezone.as_deref(), Some("UTC"));
+    assert!(settings.next_run_at.unwrap() > Utc::now());
+    assert!(repository.all_records().is_empty());
+    task.run_cycle(&CancellationToken::new()).await.unwrap();
+    assert!(repository.all_records().is_empty());
 }

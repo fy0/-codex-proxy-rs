@@ -11,6 +11,7 @@ use gateway_core::account::{
     ProviderAccountStore,
 };
 use gateway_core::engine::continuation::ContinuationBinding;
+use gateway_core::engine::middleware::MiddlewareHeader;
 use gateway_core::engine::provider::{
     EventStream, Provider, ProviderCallMetadata, ProviderRequest, ProviderRequestObservation,
     ProviderSelectionObservation, ProviderStream,
@@ -25,7 +26,8 @@ use gateway_core::event::{
     ProviderResponseTimings, ResponseMeta,
 };
 use gateway_core::operation::{
-    Feature, GenerateRequest, Operation, OperationKind, ProviderSessionState,
+    CapabilityRequirements, Feature, GenerateRequest, Operation, OperationKind,
+    ProviderSessionState,
 };
 use gateway_core::routing::{
     ModelCapabilities, ModelPresentation, ProviderCandidate, ProviderCatalogGeneration,
@@ -52,7 +54,7 @@ use crate::reasoning_replay::{
     GrokReasoningReplay, GrokReasoningReplayCapture, GrokReasoningReplayKey,
     valid_reasoning_ciphertext,
 };
-use crate::transport::canonical::GrokCanonicalDecoder;
+use crate::transport::canonical::{GrokCanonicalDecoder, GrokNativeResponseTranslator};
 use crate::transport::config::XAI_PROVIDER_NAME;
 use crate::transport::headers::{GrokClientIdentity, build_grok_headers};
 use crate::transport::profile::{GROK_CLI_RELEASE_POLL_INTERVAL, GrokCliReleaseService};
@@ -70,6 +72,7 @@ use crate::{GrokCatalogCapabilityEvidence, GrokCatalogModel};
 mod continuation;
 mod failure;
 mod stream;
+mod upstream_adapter;
 mod workers;
 
 use continuation::*;
@@ -89,6 +92,7 @@ const RESPONSE_NOT_FOUND_CODE: &str = "not_found";
 /// 每次调用只选择一个 OAuth 会话。仅当 xAI 明确拒绝历史 reasoning 密文时，
 /// 允许在同账号、同凭据、同会话绑定上剥离密文后有界重试一次。凭据轮换、
 /// endpoint fallback 以及公开 xAI API key 推理都不在该 adapter 内。
+#[derive(Clone)]
 pub struct GrokBuildProvider {
     selector: Arc<dyn GrokSessionSelector>,
     transport: Arc<dyn GrokInferenceTransport>,
@@ -99,6 +103,24 @@ pub struct GrokBuildProvider {
     reasoning_replay: GrokReasoningReplay,
     wire_profile: XaiWireProfileState,
     responses_url: Url,
+}
+
+struct PreparedGrokAttempt {
+    generate: GenerateRequest,
+    middleware_headers: Vec<MiddlewareHeader>,
+    previous_session: Option<XaiSessionState>,
+    upstream_model: UpstreamModelId,
+    selected: SelectedGrokSession,
+    account_selection_wait_ms: u64,
+    context: AttemptContext,
+}
+
+struct SelectedGrokAttempt {
+    upstream_model: UpstreamModelId,
+    selected: SelectedGrokSession,
+    account_selection_wait_ms: u64,
+    context: AttemptContext,
+    frozen_requirements: CapabilityRequirements,
 }
 
 impl GrokBuildProvider {
@@ -129,6 +151,23 @@ impl GrokBuildProvider {
 
 #[async_trait]
 impl Provider for GrokBuildProvider {
+    fn resolve_request_profile(
+        &self,
+        configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderError> {
+        use crate::transport::client_profile::{GrokClientProfileSelection, object};
+        let profile = GrokClientProfileSelection::parse(configuration)
+            .and_then(|selection| selection.resolve(&self.wire_profile))
+            .and_then(|profile| object(&profile))
+            .map_err(|_| {
+                provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                )
+            })?;
+        Ok(profile)
+    }
+
     fn name(&self) -> &'static str {
         XAI_PROVIDER_NAME
     }
@@ -177,7 +216,7 @@ impl Provider for GrokBuildProvider {
     }
 
     async fn execute(
-        &self,
+        self: Arc<Self>,
         request: ProviderRequest,
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
@@ -203,20 +242,223 @@ impl Provider for GrokBuildProvider {
 }
 
 impl GrokBuildProvider {
-    async fn execute_generate(
+    fn request_wire_profile(
         &self,
+        context: &AttemptContext,
+    ) -> Result<XaiWireProfileState, ProviderError> {
+        let profile = match context.request_profile() {
+            Some(profile) => serde_json::from_value(serde_json::Value::Object(
+                profile.expose_to_provider().clone(),
+            ))
+            .map_err(|_| {
+                provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                )
+            })?,
+            None => self.wire_profile.snapshot(),
+        };
+        Ok(XaiWireProfileState::new(profile))
+    }
+
+    async fn execute_generate(
+        self: Arc<Self>,
         generate: &GenerateRequest,
         candidate: &ProviderCandidate,
         context: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
-        if crate::transport::compaction::has_terminal_compaction_trigger(generate) {
-            return self.execute_compaction(generate, candidate, context).await;
+        let adapter =
+            context.upstream_adapter(candidate.provider(), candidate_upstream_model(candidate)?)?;
+        if adapter.is_none()
+            && generate
+                .provider_session_state(XAI_PROVIDER_NAME)
+                .is_some_and(|state| state.extension_owner().is_some())
+        {
+            return Err(invalid_continuation());
         }
+        let selected = self
+            .select_grok_attempt(generate, candidate, context, adapter.is_some())
+            .await?;
+        let provider_kind =
+            ProviderKind::new(XAI_PROVIDER_NAME).map_err(|_| protocol_not_sent())?;
+        let account_id = selected.selected.account_id().clone();
+        let model = selected.upstream_model.as_str().to_owned();
+        let middleware_context = selected.context.clone();
+        let provider = Arc::clone(&self);
+        middleware_context
+            .execute_middleware(
+                Operation::Generate(generate.clone()),
+                provider_kind,
+                Some(model),
+                account_id,
+                Box::new(move |operation, middleware_headers| {
+                    Box::pin(async move {
+                        if let Some(adapter) = adapter {
+                            return provider.execute_upstream_adapter(
+                                operation,
+                                middleware_headers,
+                                selected,
+                                adapter,
+                            );
+                        }
+                        provider
+                            .execute_selected_grok(operation, middleware_headers, selected)
+                            .await
+                    })
+                }),
+            )
+            .await
+    }
+
+    async fn select_grok_attempt(
+        &self,
+        generate: &GenerateRequest,
+        candidate: &ProviderCandidate,
+        context: AttemptContext,
+        adapted: bool,
+    ) -> Result<SelectedGrokAttempt, ProviderError> {
         let upstream_model = candidate_upstream_model(candidate)?;
-        let previous_session = decode_xai_session_state(generate)?;
-        let continuation_account = continuation_account(&context, previous_session.as_ref())?;
-        let mut upstream_request = GrokResponsesRequest::encode(
+        let previous_session = if adapted {
+            None
+        } else {
+            decode_xai_session_state(generate)?
+        };
+        let native_source = !adapted && generate.protocol_payload().protocol() == "openai";
+        let native_compaction = native_source
+            && crate::transport::compaction::has_terminal_compaction_trigger(generate);
+        let (selection_model, operation_account, affinity) = if native_compaction {
+            validate_compaction_context(&context)?;
+            let operation_account = previous_session_account(previous_session.as_ref())?;
+            let request = GrokCompactionRequest::encode(
+                generate,
+                upstream_model.as_str(),
+                context.client_api_key_ref(),
+            )
+            .map_err(map_request_error)?;
+            let selection_model = request
+                .upstream_model()
+                .ok_or_else(protocol_not_sent)?
+                .to_owned();
+            (
+                selection_model,
+                merge_frozen_account_owner(&context, operation_account)?,
+                request.affinity().cloned(),
+            )
+        } else if native_source {
+            let operation_account = continuation_account(&context, previous_session.as_ref())?;
+            let request = GrokResponsesRequest::encode(
+                generate,
+                upstream_model.as_str(),
+                context.client_api_key_ref(),
+            )
+            .map_err(map_request_error)?;
+            let selection_model = request
+                .upstream_model()
+                .ok_or_else(protocol_not_sent)?
+                .to_owned();
+            (
+                selection_model,
+                merge_frozen_account_owner(&context, operation_account)?,
+                request.affinity().cloned(),
+            )
+        } else {
+            // 源协议由转换插件拥有；这里只使用冻结的候选模型与 Core 账号 owner，
+            // 不把未知 JSON 中的同名字段解释为 xAI 会话或亲和事实。
+            let operation_account = continuation_account(&context, previous_session.as_ref())?;
+            (
+                upstream_model.as_str().to_owned(),
+                merge_frozen_account_owner(&context, operation_account)?,
+                None,
+            )
+        };
+        let selection_model =
+            UpstreamModelId::new(selection_model).map_err(|_| protocol_not_sent())?;
+        let selection_started_at = Instant::now();
+        let selected = select_grok_session(
+            self.selector.as_ref(),
+            candidate,
+            &selection_model,
+            &context,
+            operation_account,
+            affinity,
+        )
+        .await?;
+        let account_selection_wait_ms =
+            u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok(SelectedGrokAttempt {
+            upstream_model: upstream_model.clone(),
+            selected,
+            account_selection_wait_ms,
+            context,
+            frozen_requirements: Operation::Generate(generate.clone()).capability_requirements(),
+        })
+    }
+
+    async fn execute_selected_grok(
+        &self,
+        operation: Operation,
+        middleware_headers: Vec<MiddlewareHeader>,
+        selected: SelectedGrokAttempt,
+    ) -> Result<ProviderStream, ProviderError> {
+        let SelectedGrokAttempt {
+            upstream_model,
+            selected,
+            account_selection_wait_ms,
+            context,
+            frozen_requirements,
+        } = selected;
+        let Operation::Generate(generate) = operation else {
+            return Err(protocol_not_sent());
+        };
+        if generate.protocol_payload().protocol() != "openai"
+            || native_request_requirements(&generate) != frozen_requirements
+        {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            ));
+        }
+        let previous_session = decode_xai_session_state(&generate)?;
+        let operation_account =
+            if crate::transport::compaction::has_terminal_compaction_trigger(&generate) {
+                validate_compaction_context(&context)?;
+                previous_session_account(previous_session.as_ref())?
+            } else {
+                continuation_account(&context, previous_session.as_ref())?
+            };
+        let operation_account = merge_frozen_account_owner(&context, operation_account)?;
+        validate_selected_grok_account(&selected, &context, operation_account.as_ref())?;
+        let prepared = PreparedGrokAttempt {
             generate,
+            middleware_headers,
+            previous_session,
+            upstream_model,
+            selected,
+            account_selection_wait_ms,
+            context,
+        };
+        if crate::transport::compaction::has_terminal_compaction_trigger(&prepared.generate) {
+            self.execute_prepared_compaction(prepared).await
+        } else {
+            self.execute_prepared_generate(prepared).await
+        }
+    }
+
+    async fn execute_prepared_generate(
+        &self,
+        prepared: PreparedGrokAttempt,
+    ) -> Result<ProviderStream, ProviderError> {
+        let PreparedGrokAttempt {
+            generate,
+            middleware_headers,
+            previous_session,
+            upstream_model,
+            selected,
+            account_selection_wait_ms,
+            context,
+        } = prepared;
+        let mut upstream_request = GrokResponsesRequest::encode(
+            &generate,
             upstream_model.as_str(),
             context.client_api_key_ref(),
         )
@@ -233,18 +475,6 @@ impl GrokBuildProvider {
         if let Some(previous) = previous_session.as_ref() {
             upstream_request.inherit_session(previous.session_id.as_deref());
         }
-        let selection_started_at = Instant::now();
-        let selected = select_grok_session(
-            self.selector.as_ref(),
-            candidate,
-            &wire_upstream_model,
-            &context,
-            continuation_account,
-            upstream_request.affinity().cloned(),
-        )
-        .await?;
-        let account_selection_wait_ms =
-            u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         // 首字计时的起点：账号选择完成之后、上游建立之前。
         let output_started_at = Instant::now();
         apply_continuation(
@@ -284,6 +514,8 @@ impl GrokBuildProvider {
                 .set_replay_input(input)
                 .map_err(map_request_error)?;
         }
+        let native_response_translator =
+            GrokNativeResponseTranslator::for_request(&upstream_request);
         let reasoning_replay_capture =
             reasoning_replay_key.map(|key| self.reasoning_replay.capture(key));
         let session_capture = (!matches!(
@@ -305,58 +537,55 @@ impl GrokBuildProvider {
         });
         let selected = Arc::new(selected);
         let allows_account_state_mutation = selected.allows_account_state_mutation();
-        let metadata = provider_call_metadata(candidate, &selected, account_selection_wait_ms)?;
+        let metadata =
+            provider_call_metadata(&upstream_model, &selected, account_selection_wait_ms)?;
         let events = cold_http_sse_stream(
             Arc::clone(&self.selector),
             Arc::clone(&self.transport),
             GrokStreamAttempt {
                 client_identity: self.client_identity.clone(),
-                wire_profile: self.wire_profile.clone(),
+                wire_profile: self.request_wire_profile(&context)?,
                 credential_recovery: Arc::clone(&self.credential_recovery),
                 responses_url: self.responses_url.clone(),
                 request: upstream_request,
+                middleware_headers,
                 upstream_model: wire_upstream_model,
                 context,
                 session: Arc::clone(&selected),
                 output_started_at,
+                native_response_boundary: true,
                 session_capture,
                 reasoning_replay_capture,
             },
         );
         let stream = ProviderStream::new(metadata, events, selected);
-        Ok(if allows_account_state_mutation {
+        let stream = if allows_account_state_mutation {
             stream.with_account_feedback(Arc::clone(&self.account_feedback))
         } else {
             stream
-        })
+        };
+        Ok(stream.with_native_response_translator(native_response_translator))
     }
 
-    async fn execute_compaction(
+    async fn execute_prepared_compaction(
         &self,
-        generate: &GenerateRequest,
-        candidate: &ProviderCandidate,
-        context: AttemptContext,
+        prepared: PreparedGrokAttempt,
     ) -> Result<ProviderStream, ProviderError> {
-        if context.continuation().is_some()
-            || context.continuation_attempt() != ContinuationAttempt::None
-        {
-            return Err(provider_error(
-                ProviderErrorKind::InvalidRequest,
-                UpstreamSendState::NotSent,
-            ));
-        }
-        let previous_session = decode_xai_session_state(generate)?;
-        let operation_account = previous_session
-            .as_ref()
-            .map(|previous| ProviderAccountId::new(previous.account_id.clone()))
-            .transpose()
-            .map_err(|_| protocol_not_sent())?;
+        let PreparedGrokAttempt {
+            generate,
+            middleware_headers,
+            previous_session,
+            upstream_model,
+            selected,
+            account_selection_wait_ms,
+            context,
+        } = prepared;
+        validate_compaction_context(&context)?;
         let inherited_session_id = previous_session
             .as_ref()
             .and_then(|previous| previous.session_id.clone());
-        let upstream_model = candidate_upstream_model(candidate)?;
         let upstream_request = GrokCompactionRequest::encode(
-            generate,
+            &generate,
             upstream_model.as_str(),
             context.client_api_key_ref(),
         )
@@ -374,20 +603,7 @@ impl GrokBuildProvider {
         let upstream_session_id = inherited_session_id
             .clone()
             .or_else(|| explicit_replay_session_id.clone());
-        let selection_started_at = Instant::now();
-        let selected = Arc::new(
-            select_grok_session(
-                self.selector.as_ref(),
-                candidate,
-                &wire_upstream_model,
-                &context,
-                operation_account,
-                upstream_request.affinity().cloned(),
-            )
-            .await?,
-        );
-        let account_selection_wait_ms =
-            u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let selected = Arc::new(selected);
         let reasoning_replay_key = explicit_replay_session_id
             .as_deref()
             .or(inherited_session_id.as_deref())
@@ -399,16 +615,18 @@ impl GrokBuildProvider {
                 )
             });
         let allows_account_state_mutation = selected.allows_account_state_mutation();
-        let metadata = provider_call_metadata(candidate, &selected, account_selection_wait_ms)?;
+        let metadata =
+            provider_call_metadata(&upstream_model, &selected, account_selection_wait_ms)?;
         let events = cold_compaction_http_sse_stream(
             Arc::clone(&self.selector),
             Arc::clone(&self.transport),
             GrokCompactionStreamAttempt {
                 client_identity: self.client_identity.clone(),
-                wire_profile: self.wire_profile.clone(),
+                wire_profile: self.request_wire_profile(&context)?,
                 credential_recovery: Arc::clone(&self.credential_recovery),
                 responses_url: self.responses_url.clone(),
                 request: upstream_request,
+                middleware_headers,
                 upstream_model: wire_upstream_model,
                 upstream_session_id,
                 context,
@@ -424,6 +642,14 @@ impl GrokBuildProvider {
             stream
         })
     }
+}
+
+fn native_request_requirements(request: &GenerateRequest) -> CapabilityRequirements {
+    // 这里只读取本 Provider 已知的 Responses 字段；工具别名等原生保护字段另行校验。
+    Operation::Generate(GenerateRequest::from_protocol_payload(
+        request.protocol_payload().clone(),
+    ))
+    .capability_requirements()
 }
 
 async fn select_grok_session(
@@ -445,6 +671,10 @@ async fn select_grok_session(
         context.client_api_key_ref().clone(),
     )
     .with_concurrency_wait_budget(context.concurrency_wait_budget().clone())
+    .with_request_policy(
+        context.request_policy_context().cloned(),
+        context.attempt_index(),
+    )
     .with_eligibility_policy(if context.is_diagnostic_required_account() {
         AccountEligibilityPolicy::BypassForDiagnostic
     } else {
@@ -480,13 +710,13 @@ async fn select_grok_session(
 }
 
 fn provider_call_metadata(
-    candidate: &ProviderCandidate,
+    upstream_model: &UpstreamModelId,
     selected: &SelectedGrokSession,
     account_selection_wait_ms: u64,
 ) -> Result<ProviderCallMetadata, ProviderError> {
     Ok(ProviderCallMetadata::new(
         ProviderKind::new(XAI_PROVIDER_NAME).map_err(|_| protocol_not_sent())?,
-        candidate_upstream_model(candidate)?.clone(),
+        upstream_model.clone(),
         selected.account_id().clone(),
         UpstreamTransport::new(HTTP_SSE_TRANSPORT).map_err(|_| protocol_not_sent())?,
     )
@@ -494,6 +724,66 @@ fn provider_call_metadata(
         account_selection_wait_ms,
         selected.capacity_snapshot(),
     )))
+}
+
+fn validate_compaction_context(context: &AttemptContext) -> Result<(), ProviderError> {
+    if context.continuation().is_some()
+        || context.continuation_attempt() != ContinuationAttempt::None
+    {
+        return Err(provider_error(
+            ProviderErrorKind::InvalidRequest,
+            UpstreamSendState::NotSent,
+        ));
+    }
+    Ok(())
+}
+
+fn previous_session_account(
+    previous_session: Option<&XaiSessionState>,
+) -> Result<Option<ProviderAccountId>, ProviderError> {
+    previous_session
+        .map(|previous| ProviderAccountId::new(previous.account_id.clone()))
+        .transpose()
+        .map_err(|_| protocol_not_sent())
+}
+
+fn merge_frozen_account_owner(
+    context: &AttemptContext,
+    operation_account: Option<ProviderAccountId>,
+) -> Result<Option<ProviderAccountId>, ProviderError> {
+    if context.continuation_attempt() == ContinuationAttempt::ReplayAny {
+        return Ok(operation_account);
+    }
+    let provider = ProviderKind::new(XAI_PROVIDER_NAME).map_err(|_| protocol_not_sent())?;
+    let Some(owner) = context
+        .account_state_owner()
+        .filter(|owner| owner.provider() == &provider)
+    else {
+        return Ok(operation_account);
+    };
+    if operation_account
+        .as_ref()
+        .is_some_and(|account| account != owner.account())
+    {
+        return Err(invalid_continuation());
+    }
+    Ok(Some(owner.account().clone()))
+}
+
+fn validate_selected_grok_account(
+    selected: &SelectedGrokSession,
+    context: &AttemptContext,
+    operation_account: Option<&ProviderAccountId>,
+) -> Result<(), ProviderError> {
+    if context.excluded_accounts().contains(selected.account_id())
+        || context
+            .required_account()
+            .is_some_and(|required| required != selected.account_id())
+        || operation_account.is_some_and(|required| required != selected.account_id())
+    {
+        return Err(protocol_not_sent());
+    }
+    Ok(())
 }
 
 fn candidate_upstream_model(

@@ -2,7 +2,7 @@ import type { AccountImportTask, AccountImportTaskDetail } from '@/api'
 import { computed, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
 import { getAccountImportTask, getAccountImportTasks, stopAccountImportTask } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
-import { errorMessage } from '@/utils/async'
+import { errorMessage } from '@/utils/operation'
 
 export function useAccountImportTasks(options: { reload: () => Promise<unknown> }) {
   const open = shallowRef(false)
@@ -100,7 +100,15 @@ export function useAccountImportTasks(options: { reload: () => Promise<unknown> 
     })
   }
 
-  watch(open, () => void refresh())
+  watch(open, (isOpen) => {
+    if (isOpen) {
+      void refresh()
+      return
+    }
+    controller?.abort()
+    clearTimeout(timer)
+  }, { flush: 'sync' })
+
   onMounted(() => void refresh())
   onScopeDispose(() => {
     disposed = true

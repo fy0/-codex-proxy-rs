@@ -9,6 +9,7 @@ use gateway_core::account::{
     AccountCapacitySnapshot, AccountEligibilityPolicy, AccountSelectionPolicy, CredentialRevision,
     ProviderAccountId,
 };
+use gateway_core::engine::policy::RequestPolicyContext;
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::routing::{FrozenAccountScope, UpstreamModelId};
 use sha2::{Digest as _, Sha256};
@@ -238,6 +239,8 @@ pub struct GrokSessionSelection {
     account_scope: Arc<FrozenAccountScope>,
     client_api_key_id: ClientApiKeyId,
     concurrency_wait_budget: gateway_core::concurrency::ConcurrencyWaitBudget,
+    request_policy: Option<RequestPolicyContext>,
+    attempt_index: std::num::NonZeroU32,
 }
 
 impl GrokSessionSelection {
@@ -263,7 +266,21 @@ impl GrokSessionSelection {
             account_scope,
             client_api_key_id,
             concurrency_wait_budget: gateway_core::concurrency::ConcurrencyWaitBudget::default(),
+            request_policy: None,
+            attempt_index: std::num::NonZeroU32::MIN,
         }
+    }
+
+    /// 附着普通数据面请求冻结的插件策略；管理诊断保持空值。
+    #[must_use]
+    pub(crate) fn with_request_policy(
+        mut self,
+        policy: Option<RequestPolicyContext>,
+        attempt_index: std::num::NonZeroU32,
+    ) -> Self {
+        self.request_policy = policy;
+        self.attempt_index = attempt_index;
+        self
     }
 
     /// 附着仅由显式客户端会话派生的账号亲和键。
@@ -348,6 +365,16 @@ impl GrokSessionSelection {
     #[must_use]
     pub const fn client_api_key_id(&self) -> &ClientApiKeyId {
         &self.client_api_key_id
+    }
+
+    #[must_use]
+    pub(crate) const fn request_policy(&self) -> Option<&RequestPolicyContext> {
+        self.request_policy.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) const fn attempt_index(&self) -> std::num::NonZeroU32 {
+        self.attempt_index
     }
 }
 
@@ -456,6 +483,12 @@ pub enum GrokSessionSelectorError {
     /// 选择器依赖的后端服务不可用。
     #[error("Grok Build session selector is unavailable")]
     Unavailable,
+    /// 插件调度策略明确拒绝本次请求。
+    #[error("account scheduling policy rejected the request")]
+    PolicyRejected,
+    /// 插件调度策略调用失败且配置为拒绝。
+    #[error("account scheduling policy is unavailable")]
+    PolicyUnavailable,
 }
 
 /// 构造选中会话时的失败。

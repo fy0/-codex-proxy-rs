@@ -1,10 +1,16 @@
 import type { RequestOptions } from '../request'
 import type { AccountGroupRef } from './account-groups'
+import type { ClientProfileSelection, ProviderRequestProfile, ProviderRequestProfiles, XaiClientProfileSelection } from './client-profiles'
 import request from '../request'
 
 export type ApiKeyRoutingScope = 'all' | 'groups'
+export type ApiKeyBudgetPeriod = 'daily' | 'weekly' | 'all'
 
 export interface ApiKey {
+  providerRequestProfileOverrides: ProviderRequestProfiles
+  openaiClientProfileOverride: ClientProfileSelection | null
+  xaiClientProfileOverride: XaiClientProfileSelection | null
+
   id: string
   name: string
   label: string | null
@@ -17,10 +23,16 @@ export interface ApiKey {
   dailyUsedUsd: string
   weeklyUsedUsd: string
   dailyResetsAt: string | null
+  dailyResetsAtDisplay: string | null
   weeklyResetsAt: string | null
+  weeklyResetsAtDisplay: string | null
   createdAt: string
+  createdAtDisplay: string
   updatedAt: string
+  updatedAtDisplay: string
   lastUsedAt: string | null
+  lastUsedAtDisplay: string
+  lastUsedAtFullDisplay: string | null
   routingScope: ApiKeyRoutingScope
   groups: AccountGroupRef[]
   providerKinds: string[]
@@ -68,9 +80,11 @@ export interface ApiKeyWriteParam {
 
 interface ApiKeyUpdateParam extends ApiKeyWriteParam {
   id: string
+  providerRequestProfileOverrides: Record<string, ProviderRequestProfile | null>
 }
 
 interface ApiKeyCreateParam extends ApiKeyWriteParam {
+  providerRequestProfileOverrides: ProviderRequestProfiles
   customKey?: string
 }
 
@@ -114,6 +128,14 @@ export function revealApiKey(data: ApiKeyIdParam) {
 export function deleteApiKey(data: ApiKeyIdParam) {
   return request<ApiKeyMutationResponse>({
     url: '/api/admin/client-keys/delete',
+    method: 'POST',
+    data,
+  })
+}
+
+export function resetApiKeyBudget(data: ApiKeyIdParam & { period: ApiKeyBudgetPeriod }) {
+  return request<ApiKeyMutationResponse>({
+    url: '/api/admin/client-keys/reset-budget',
     method: 'POST',
     data,
   })

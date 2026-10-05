@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt as _;
 use gateway_admin::model::Revision;
@@ -20,12 +21,12 @@ use gateway_admin::model::provider_credentials::{
     PrepareCredentialRotation, PreparedAuthorizationCommit, PreparedAuthorizationCredential,
     PreparedCredentialCreate, PreparedCredentialImport, PreparedCredentialRotation,
     PreparedCredentialRotationFacts, ProviderDocument, ProviderExport,
-    ProviderExportCredentialInput, ProviderModel, ProviderModels, ProviderProfileActivityInsights,
-    ProviderProfileAvatar, ProviderProfileAvatarStreamError, ProviderProfileDailyUsage,
-    ProviderProfileInvocation, ProviderProfileStatistics, ProviderProfileStatisticsSummary,
-    ProviderQuota, ProviderQuotaRequest, ProviderQuotaWindow, ProviderQuotaWindowRole,
-    ProviderResetCredit, ProviderResetCreditResult, ProviderResetCredits, ProviderSubscription,
-    QuotaLocalUsageAttribution,
+    ProviderExportCredentialInput, ProviderModel, ProviderModelCatalogDocument, ProviderModels,
+    ProviderProfileActivityInsights, ProviderProfileAvatar, ProviderProfileAvatarStreamError,
+    ProviderProfileDailyUsage, ProviderProfileInvocation, ProviderProfileStatistics,
+    ProviderProfileStatisticsSummary, ProviderQuota, ProviderQuotaCredits, ProviderQuotaRequest,
+    ProviderQuotaWindow, ProviderQuotaWindowRole, ProviderResetCredit, ProviderResetCreditResult,
+    ProviderResetCredits, ProviderSubscription, QuotaLocalUsageAttribution,
 };
 use gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation;
 use gateway_admin::ports::provider::{ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind};
@@ -36,7 +37,7 @@ use gateway_core::account::{
 };
 use gateway_core::error::StoreErrorKind;
 use gateway_core::metering::Money;
-use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload};
+use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload, RawJsonPayload};
 use gateway_core::provider_ports::{
     NewOAuthPendingFlow, OAuthPendingBinding, OAuthPendingClaimOutcome, OAuthPendingConsumeOutcome,
     OAuthPendingFlowPort, OAuthPendingPutOutcome, OAuthPendingReleaseOutcome, ProviderStoreError,
@@ -163,6 +164,44 @@ impl OpenAiAdminProvider {
 
 #[async_trait]
 impl ProviderAdmin for OpenAiAdminProvider {
+    fn account_capabilities(
+        &self,
+        _account_id: &ProviderAccountId,
+        authentication_kind: &str,
+    ) -> gateway_admin::model::accounts::ProviderAccountCapabilities {
+        let oauth = authentication_kind == crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH;
+        gateway_admin::model::accounts::ProviderAccountCapabilities {
+            quota: oauth,
+            quota_refresh: oauth,
+            profile: oauth,
+            subscription: oauth,
+            avatar: oauth,
+            reset_credits: oauth,
+            consume_reset_credit: oauth,
+        }
+    }
+
+    fn pricing_catalog(&self) -> gateway_admin::model::pricing::ProviderPricingCatalog {
+        crate::transport::usage::pricing_catalog()
+    }
+
+    fn client_profile_options(
+        &self,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        self.profile
+            .selection_options()
+            .map_err(map_client_profile_error)
+    }
+
+    fn preview_client_profile(
+        &self,
+        configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        self.profile
+            .preview_selection(configuration)
+            .map_err(map_client_profile_error)
+    }
+
     fn provider_kind(&self) -> &ProviderKind {
         &self.provider_kind
     }
@@ -209,28 +248,12 @@ impl ProviderAdmin for OpenAiAdminProvider {
         }
     }
 
-    fn connection_test_operation(
+    async fn connection_test_operation(
         &self,
         upstream_model: &UpstreamModelId,
         input_text: &str,
     ) -> Result<Operation, ProviderAdminError> {
         build_connection_test_operation(upstream_model, input_text)
-    }
-
-    fn turn_state_probe_preview(
-        &self,
-        config: &gateway_core::account::TurnStateConfig,
-    ) -> Option<gateway_admin::model::accounts::TurnStateProbePreview> {
-        let profile = self.profile.snapshot();
-        Some(gateway_admin::model::accounts::TurnStateProbePreview {
-            user_agent: profile.turn_state_user_agent(config),
-            version: config.client_version.clone(),
-            timezone: config.timezone.to_string(),
-            current_date: chrono::Utc::now()
-                .with_timezone(&config.timezone)
-                .format("%Y-%m-%d")
-                .to_string(),
-        })
     }
 
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile> {
@@ -260,6 +283,89 @@ impl ProviderAdmin for OpenAiAdminProvider {
         })
     }
 
+    fn configured_wire_profile(
+        &self,
+        configuration: &OpaqueProviderData,
+    ) -> Option<DashboardWireProfile> {
+        use crate::transport::profile::identity::RequestProfileSelection;
+        use crate::transport::profile::selection::{ClientKind, ClientPlatform, VersionMode};
+        let selection = RequestProfileSelection::parse(configuration).ok()?;
+        let profile = selection.resolve(&self.profile).ok()?;
+        let custom = selection.version_mode() == VersionMode::Fixed;
+        let release = selection.preset().and_then(|selection| {
+            let (checked_at, error) = self.profile.client_release_status(
+                selection.client,
+                selection.platform,
+                selection.architecture(),
+            );
+            if custom {
+                None
+            } else if selection.client == ClientKind::Desktop
+                && selection.platform == ClientPlatform::Macos
+            {
+                Some(dashboard_desktop_release(
+                    &profile,
+                    self.desktop_release.snapshot(),
+                ))
+            } else {
+                Some(DashboardDesktopRelease {
+                    status: if error.is_some() {
+                        DesktopReleaseStatus::Failed
+                    } else if checked_at.is_some() {
+                        DesktopReleaseStatus::Current
+                    } else {
+                        DesktopReleaseStatus::Unchecked
+                    },
+                    checked_at,
+                    latest_version: Some(profile.codex_version.clone()),
+                    latest_build: None,
+                    published_at: None,
+                    minimum_system_version: None,
+                    hardware_requirements: None,
+                    download_url: None,
+                    download_size: None,
+                    signature_present: None,
+                    error,
+                })
+            }
+        });
+        Some(DashboardWireProfile {
+            provider: self.provider_kind.as_str().to_owned(),
+            product: profile.originator.clone(),
+            version: profile.codex_version.clone(),
+            build: None,
+            user_agent: profile.user_agent(),
+            target: DashboardWireTarget {
+                os_type: profile.os_type,
+                os_version: profile.os_version,
+                arch: profile.arch,
+                terminal: profile.terminal,
+            },
+            attributes: vec![
+                DashboardWireAttribute {
+                    label: "客户端标识".to_owned(),
+                    value: if profile.client_kind == ClientKind::Desktop {
+                        format!("{}; {}", profile.originator, profile.desktop_version)
+                    } else {
+                        profile.originator
+                    },
+                },
+                DashboardWireAttribute {
+                    label: "版本策略".to_owned(),
+                    value: if custom {
+                        "固定身份"
+                    } else {
+                        "自动最新"
+                    }
+                    .to_owned(),
+                },
+            ],
+            verified_at: (!custom && profile.verified_at != chrono::DateTime::UNIX_EPOCH)
+                .then_some(profile.verified_at),
+            release,
+        })
+    }
+
     fn calculated_billing(
         &self,
         input: &ProviderBillingInput,
@@ -285,6 +391,10 @@ impl ProviderAdmin for OpenAiAdminProvider {
             return Ok(None);
         }
         Ok(Some(CalculatedBillingBreakdown {
+            // 历史总额只能核对费用拆分，不能证明当时保存过长上下文标记。
+            long_context_billing_applied: false,
+            image: None,
+            custom_multiplier_bps: breakdown.custom_multiplier_bps(),
             input_amount: currency_cost(breakdown.input_amount())?,
             output_amount: currency_cost(breakdown.output_amount())?,
             cache_read_amount: currency_cost(breakdown.cache_read_amount())?,
@@ -339,7 +449,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
 
     async fn start_authorization(
         &self,
-        pending: PendingAuthorizationMutation,
+        pending: gateway_admin::model::provider_credentials::PendingAuthorizationMutation,
     ) -> Result<AuthorizationStarted, ProviderAdminError> {
         if pending.provider_kind() != &self.provider_kind {
             return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
@@ -388,13 +498,16 @@ impl ProviderAdmin for OpenAiAdminProvider {
             (
                 AuthorizationMutationTarget::Create { .. },
                 CompletedCodexOAuthCredential::Create(credential),
-            ) => prepared_create(*credential, Utc::now())
-                .map(PreparedAuthorizationCredential::Create),
+            ) => prepared_create(credential, Utc::now())
+                .map(|credential| PreparedAuthorizationCredential::Create(Box::new(credential))),
             (
                 AuthorizationMutationTarget::Reauthorize { .. },
                 CompletedCodexOAuthCredential::Reauthorize(credential),
-            ) => prepared_rotation(*credential, mutation.provider_kind().clone())
-                .map(PreparedAuthorizationCredential::Reauthorize),
+            ) => {
+                prepared_rotation(credential, mutation.provider_kind().clone()).map(|credential| {
+                    PreparedAuthorizationCredential::Reauthorize(Box::new(credential))
+                })
+            }
             _ => Err(provider_admin_error(ProviderAdminErrorKind::Internal)),
         };
         let credential = match credential {
@@ -441,6 +554,21 @@ impl ProviderAdmin for OpenAiAdminProvider {
                 )
                 .map_err(map_credential_admin_error)?;
             return prepared_rotation(prepared, command.account.provider_kind);
+        }
+        if command
+            .provider_material
+            .expose_to_provider()
+            .expose_to_provider()
+            .contains_key("transport")
+        {
+            let prepared = CodexCredentialAdmin
+                .prepare_transport_update(
+                    current,
+                    Value::Object(command.provider_material.into_provider_data().into_inner()),
+                )
+                .map_err(map_credential_admin_error)?;
+            return prepared_rotation(prepared, command.account.provider_kind)
+                .map(PreparedCredentialRotation::preserving_credential_state);
         }
         let mut secret = rotation_secret(command.provider_material)?;
         if secret.id_token.is_none() {
@@ -491,23 +619,23 @@ impl ProviderAdmin for OpenAiAdminProvider {
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<Option<ProviderDocument>, ProviderAdminError> {
-        let account = self.account(account_id).await?;
-        if account.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY {
-            return Ok(None);
-        }
+        self.account(account_id).await?;
         let current = self
             .accounts
             .load_current_credential(account_id)
             .await
             .map_err(map_store_error)?;
-        let crate::credential::CodexCredentialData::ApiKey(data) =
-            CodexCredentialCodec::decode_complete(&current.credential)
-                .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?
-        else {
-            return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
+        let data = CodexCredentialCodec::decode_complete(&current.credential)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let value = match data {
+            crate::credential::CodexCredentialData::ApiKey(data) => {
+                serde_json::to_value(data.configuration())
+                    .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?
+            }
+            crate::credential::CodexCredentialData::OAuth(data) => {
+                serde_json::json!({"transport": data.transport})
+            }
         };
-        let value = serde_json::to_value(data.configuration())
-            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?;
         let object = value
             .as_object()
             .cloned()
@@ -716,6 +844,40 @@ impl ProviderAdmin for OpenAiAdminProvider {
         })
     }
 
+    async fn model_catalog_document(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<ProviderModelCatalogDocument, ProviderAdminError> {
+        let account = self.account(account_id).await?;
+        let (models, observed_at) = self
+            .catalog
+            .account_catalog_documents(&account)
+            .await
+            .map_err(map_catalog_error)?;
+        // 只有 Codex 原生对象带齐推理强度、上下文窗口等元数据；API 目录只有模型 ID，
+        // 拼出来的文件不满足 Codex `model_catalog_json` 的加载要求，这里直接拒绝而不降格。
+        let mut entries = Vec::with_capacity(models.len());
+        for model in &models {
+            if model.document().protocol() != "codex" {
+                return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported)
+                    .with_public_message("该账号没有可导出的 Codex 原生模型目录"));
+            }
+            let entry: serde_json::Value = serde_json::from_slice(model.document().body())
+                .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?;
+            entries.push(entry);
+        }
+        let model_count = entries.len();
+        let body = serde_json::to_vec(&serde_json::json!({ "models": entries }))
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?;
+        let document = RawJsonPayload::new("codex", Bytes::from(body))
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Internal))?;
+        Ok(ProviderModelCatalogDocument {
+            document,
+            model_count,
+            observed_at: DateTime::<Utc>::from(observed_at),
+        })
+    }
+
     async fn export_credentials(
         &self,
         credentials: Vec<ProviderExportCredentialInput>,
@@ -821,6 +983,7 @@ fn prepared_rotation(
             email: profile.email,
             plan_type: profile.plan_type,
             preserve_profile,
+            preserve_credential_state: false,
             provider_material: ProviderDocument::new(OpaqueProviderData::new(
                 credential.into_inner(),
             )),
@@ -946,6 +1109,7 @@ fn account_matches_record(account: &ProviderAccount, record: &AccountRecord) -> 
 
 fn empty_quota() -> ProviderQuota {
     ProviderQuota {
+        credits: None,
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
@@ -1011,6 +1175,11 @@ fn project_quota_snapshot(snapshot: CodexAccountQuotaSnapshot) -> ProviderQuota 
         observed_at: Some(DateTime::<Utc>::from(snapshot.observed_at())),
         refresh_token_expires_at: None,
         windows,
+        credits: snapshot.credits().map(|credits| ProviderQuotaCredits {
+            has_credits: credits.has_credits,
+            unlimited: credits.unlimited,
+            balance: credits.balance.clone(),
+        }),
         limit_reached,
         provider_data: Some(ProviderDocument::new(OpaqueProviderData::new(
             provider_data,
@@ -1628,23 +1797,63 @@ const fn oauth_error_code(error: &CodexOAuthAdminError) -> &'static str {
 fn map_quota_error(error: CodexCredentialQuotaError) -> ProviderAdminError {
     use CodexCredentialQuotaError as Error;
     use ProviderAdminErrorKind as Kind;
-    let (kind, message) = match error {
-        Error::InvalidCredentialData => (Kind::Invalid, "OpenAI 额度查询凭据无效，请检查账号授权"),
-        Error::NotFound => (Kind::NotFound, "OpenAI 额度查询账号不存在"),
-        Error::RevisionConflict => (Kind::Conflict, "账号凭据已被更新，请刷新账号列表后重试"),
+    let (kind, public_message, upstream_message) = match error {
+        Error::InvalidCredentialData => (
+            Kind::Invalid,
+            "OpenAI 额度查询凭据无效，请检查账号授权",
+            None,
+        ),
+        Error::NotFound => (Kind::NotFound, "OpenAI 额度查询账号不存在", None),
+        Error::RevisionConflict => (
+            Kind::Conflict,
+            "账号凭据已被更新，请刷新账号列表后重试",
+            None,
+        ),
         Error::CredentialRefreshRequired => (
             Kind::Unavailable,
             "OpenAI 额度查询需要有效凭据，请刷新令牌后重试",
+            None,
         ),
         Error::Repository(_) | Error::Store { .. } => {
-            (Kind::Unavailable, "OpenAI 额度查询的依赖服务暂不可用")
+            (Kind::Unavailable, "OpenAI 额度查询的依赖服务暂不可用", None)
         }
-        Error::Upstream { .. } => (
-            Kind::Unavailable,
-            "OpenAI 额度查询失败，请检查出站连接与上游服务",
-        ),
+        Error::Upstream {
+            status,
+            code,
+            detail,
+        } => {
+            // 公开文案只解释已知状态和错误码；原始上游材料留在内部诊断，
+            // 额度查询拒绝不作为凭据失效证据，也不写入账号的凭据错误字段。
+            let (kind, public_message) = match (status, code.as_deref()) {
+                (Some(401), Some("token_revoked")) => (
+                    Kind::BadGateway,
+                    "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
+                ),
+                (Some(401), _) => (
+                    Kind::BadGateway,
+                    "OpenAI 拒绝了额度查询（HTTP 401），请检查账号授权状态；若令牌已在服务端失效，请重新授权",
+                ),
+                (Some(403), _) => (
+                    Kind::BadGateway,
+                    "OpenAI 拒绝了额度查询（HTTP 403），请检查账号授权状态",
+                ),
+                (Some(429), _) => (Kind::BadGateway, "OpenAI 额度查询被限流，请稍后重试"),
+                (Some(500..=599), _) => (Kind::BadGateway, "OpenAI 额度查询服务异常，请稍后重试"),
+                _ => (
+                    Kind::Unavailable,
+                    "OpenAI 额度查询失败，请检查出站连接与上游服务",
+                ),
+            };
+            let upstream_message =
+                format!("OpenAI 额度查询失败：上游 HTTP {status:?}，code = {code:?}：{detail}");
+            (kind, public_message, Some(upstream_message))
+        }
     };
-    provider_admin_error(kind).with_public_message(message)
+    let error = provider_admin_error(kind).with_public_message(public_message);
+    match upstream_message {
+        Some(message) => error.with_message(message),
+        None => error,
+    }
 }
 
 fn map_profile_statistics_error(error: CodexProfileStatisticsError) -> ProviderAdminError {
@@ -1765,4 +1974,26 @@ fn map_catalog_error(error: CodexCredentialCatalogError) -> ProviderAdminError {
         Error::Cache => (Kind::Unavailable, "OpenAI 模型目录缓存暂不可用"),
     };
     provider_admin_error(kind).with_public_message(message)
+}
+
+fn map_client_profile_error(
+    error: crate::transport::profile::selection::ClientProfileError,
+) -> ProviderAdminError {
+    use crate::transport::profile::selection::ClientProfileError;
+    let message = match error {
+        ClientProfileError::Invalid => "客户端身份字段或版本组合不合法",
+        ClientProfileError::InvalidUserAgent => {
+            "User-Agent 必须是 1 至 4096 字节的单行 ASCII 文本，且首尾不能含空白"
+        }
+        ClientProfileError::CompanionHeadersRequired => {
+            "无法识别 User-Agent，请补充 originator 和有效的 Core version"
+        }
+        ClientProfileError::CompanionHeadersConflict => {
+            "originator 或 Core version 与 User-Agent 不一致"
+        }
+        ClientProfileError::ReleaseUnavailable => {
+            "此客户端、平台与架构尚无已核验发布版本，请选择固定版本或稍后重试"
+        }
+    };
+    provider_admin_error(ProviderAdminErrorKind::Invalid).with_public_message(message)
 }

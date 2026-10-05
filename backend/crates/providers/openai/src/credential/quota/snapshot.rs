@@ -10,6 +10,7 @@ use gateway_core::account::{
     AccountQuotaSignals, CredentialRevision, ProviderAccountId, QuotaEvidence, QuotaObservation,
     QuotaState,
 };
+use gateway_protocol::openai::events::{CreditsSnapshot, parse_credits_from_object};
 use serde_json::{Map, Value};
 
 use super::document::{
@@ -114,6 +115,7 @@ pub struct CodexAccountQuotaSnapshot {
     credential_revision: CredentialRevision,
     observed_at: SystemTime,
     plan_type: Option<String>,
+    credits: Option<CreditsSnapshot>,
     fact: CodexQuotaFact,
     quota: QuotaState,
     windows: Vec<CodexQuotaWindow>,
@@ -140,6 +142,12 @@ impl CodexAccountQuotaSnapshot {
     #[must_use]
     pub fn plan_type(&self) -> Option<&str> {
         self.plan_type.as_deref()
+    }
+
+    /// 点数只用于展示，不改变套餐限额或账号可用性。
+    #[must_use]
+    pub fn credits(&self) -> Option<&CreditsSnapshot> {
+        self.credits.as_ref()
     }
 
     #[must_use]
@@ -350,6 +358,7 @@ pub(crate) fn parse_account_quota_snapshot(
             .get("plan_type")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        credits: object.get("credits").and_then(parse_credits_from_object),
         fact,
         quota,
         windows,

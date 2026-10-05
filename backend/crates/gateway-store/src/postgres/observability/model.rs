@@ -335,6 +335,7 @@ pub struct RequestMetricPoint {
 /// 已完整交付且由 Provider 计算费用的请求事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalculatedUsageBillingFact {
+    pub billing_snapshot_json: Option<serde_json::Value>,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
     pub upstream_model_id: String,
@@ -414,7 +415,7 @@ pub struct ProviderAccountUsageQuery {
     pub range: ObservabilityRange,
     pub account_ids: Option<Vec<String>>,
     pub limit: u16,
-    pub(crate) include_hourly_request_buckets: bool,
+    pub(crate) request_bucket_range: Option<ObservabilityRange>,
 }
 
 impl ProviderAccountUsageQuery {
@@ -430,7 +431,7 @@ impl ProviderAccountUsageQuery {
             limit: u16::try_from(account_ids.len())
                 .map_err(|_| invalid("account usage query is too large"))?,
             account_ids: Some(account_ids),
-            include_hourly_request_buckets: false,
+            request_bucket_range: None,
         })
     }
 
@@ -442,17 +443,22 @@ impl ProviderAccountUsageQuery {
             range,
             account_ids: None,
             limit,
-            include_hourly_request_buckets: false,
+            request_bucket_range: None,
         })
     }
 
     pub fn with_hourly_request_buckets(mut self) -> StoreResult<Self> {
-        if self.range.end.signed_duration_since(self.range.start)
-            > TimeDelta::hours(ACCOUNT_USAGE_TIMELINE_HOURS)
-        {
-            return Err(invalid("account request timeline cannot exceed 24 hours"));
-        }
-        self.include_hourly_request_buckets = true;
+        // 小时图独立展示最近 24 个 UTC 小时桶，自然日统计不能限制为 24 小时。
+        let current_hour =
+            DateTime::from_timestamp(self.range.end.timestamp().div_euclid(3600) * 3600, 0)
+                .ok_or_else(|| invalid("account request timeline exceeds supported timestamps"))?;
+        let start = current_hour
+            .checked_sub_signed(TimeDelta::hours(ACCOUNT_USAGE_TIMELINE_HOURS - 1))
+            .ok_or_else(|| invalid("account request timeline exceeds supported timestamps"))?;
+        self.request_bucket_range = Some(ObservabilityRange {
+            start,
+            end: self.range.end,
+        });
         Ok(self)
     }
 }
@@ -479,6 +485,8 @@ pub struct DashboardObservation {
 /// 使用记录列表所需的窄投影；完整执行、路由和客户端详情按 ID 单独读取。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub client_api_key_name: Option<String>,
+    pub billing_snapshot_json: Option<serde_json::Value>,
     pub id: String,
     pub endpoint: String,
     pub client_transport: String,
@@ -487,6 +495,8 @@ pub struct UsageListRecord {
     pub provider_account_ref: Option<String>,
     pub provider_account_name: Option<String>,
     pub provider_account_email: Option<String>,
+    pub provider_account_notes: Option<String>,
+    pub provider_account_plan_type: Option<String>,
     pub provider_account_authentication_kind: Option<String>,
     pub upstream_model_id: Option<String>,
     pub upstream_transport: Option<String>,
@@ -527,6 +537,7 @@ pub struct UsageListRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub billing_snapshot_json: Option<serde_json::Value>,
     pub id: String,
     pub client_api_key_ref: String,
     pub config_revision: u64,
@@ -670,10 +681,18 @@ pub struct UsageOverview {
     pub providers: Vec<ProviderObservation>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiagnosticsObservation {
+    pub total_request_count: u64,
+    pub items: Vec<DiagnosticObservation>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticObservation {
     pub key: String,
     pub name: String,
+    pub account_provider_kind: Option<String>,
+    pub account_plan_type: Option<String>,
     pub request_count: u64,
     pub success_count: u64,
     pub failure_count: u64,
@@ -684,12 +703,14 @@ pub struct DiagnosticObservation {
     pub first_token_p95_ms: Option<u64>,
     pub non_completion_count: u64,
     pub retry_count: u64,
+    pub retried_request_count: u64,
     pub cost_coverage: CostCoverage,
     pub costs: Vec<CurrencyCostTotal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsErrorRecord {
+    pub client_api_key_name: Option<String>,
     pub source: String,
     pub event_id: String,
     pub request_id: Option<String>,
@@ -706,6 +727,7 @@ pub struct OpsErrorRecord {
     pub provider_account_ref: Option<String>,
     pub provider_account_name: Option<String>,
     pub provider_account_email: Option<String>,
+    pub provider_account_plan_type: Option<String>,
     pub provider_account_authentication_kind: Option<String>,
     pub upstream_model_id: Option<String>,
     pub upstream_transport: Option<String>,
@@ -787,6 +809,6 @@ pub trait ObservabilityRepository: Send + Sync {
         range: ObservabilityRange,
         filter: UsageRecordFilter,
         dimension: DiagnosticDimension,
-    ) -> StoreResult<Vec<DiagnosticObservation>>;
+    ) -> StoreResult<DiagnosticsObservation>;
     async fn list_ops_errors(&self, query: OpsErrorQuery) -> StoreResult<OpsErrorPage>;
 }

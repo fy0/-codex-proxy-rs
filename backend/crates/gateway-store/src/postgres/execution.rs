@@ -268,6 +268,7 @@ impl ModelRequestTimings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequestFinalization {
+    pub billing_snapshot_json: Option<Value>,
     pub model_request_id: String,
     pub outcome: ModelRequestOutcome,
     pub upstream_send_state: UpstreamSendState,
@@ -716,6 +717,7 @@ impl ModelRequestRepository for PgExecutionStore {
         finalization: ModelRequestFinalization,
     ) -> StoreResult<bool> {
         finalization.validate()?;
+        // 墙上时间可能回拨；终态必须可落盘，实际耗时仍保留 Core 的单调时钟观测。
         let finalized = sqlx::query_scalar::<_, i64>(
             "with finalized as (
              update model_requests
@@ -733,7 +735,7 @@ impl ModelRequestRepository for PgExecutionStore {
                  transport_decision_wait_ms = $27, connect_ms = $28,
                  headers_ms = $29, first_event_ms = $30, first_reasoning_ms = $31,
                  first_text_ms = $32, first_token_ms = $33, provider_processing_ms = $34,
-                 latency_ms = $35, completed_at = $36,
+                 latency_ms = $35, completed_at = greatest($36, started_at),
                  upstream_transport = coalesce($37, upstream_transport),
                  http_version = coalesce($38, http_version), websocket_pool = $39,
                  service_tier = $40, provider_observation_json = $41,
@@ -743,7 +745,7 @@ impl ModelRequestRepository for PgExecutionStore {
                  upstream_connection_exit_reason = $45,
                  upstream_connection_age_ms = $46,
                  upstream_connection_idle_ms = $47, diagnostic_trace_json = $48,
-                 upstream_response_model = $49
+                 upstream_response_model = $49, billing_snapshot_json = $50
              where id = $1 and outcome = 'running'
              returning id, client_api_key_ref, continuation_affinity_hash,
                        continuation_requested, provider_kind, upstream_transport,
@@ -936,6 +938,7 @@ impl ModelRequestRepository for PgExecutionStore {
         )?)
         .bind(finalization.diagnostic_trace_json.map(sqlx::types::Json))
         .bind(finalization.upstream_response_model)
+        .bind(finalization.billing_snapshot_json.map(sqlx::types::Json))
         .fetch_one(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("finalize model request"))?;
@@ -1105,6 +1108,48 @@ impl ExecutionStore for PgExecutionStore {
         .map_err(core_store_error)
     }
 
+    async fn record_entry_rejection(
+        &self,
+        rejection: gateway_core::engine::EntryRejection,
+    ) -> Result<(), CoreStoreError> {
+        let error = rejection.error;
+        super::OpsEventRepository::append_ops_event(
+            &super::PgOpsEventRepository::new(self.pool.clone()),
+            super::OpsEvent {
+                id: Uuid::now_v7().to_string(),
+                model_request_id: None,
+                attempt_index: None,
+                level: super::OpsEventLevel::Warning,
+                component: "request_entry".to_owned(),
+                operation: "reject".to_owned(),
+                provider_kind: None,
+                provider_account_id: None,
+                provider_account_ref: None,
+                upstream_model_id: None,
+                failure_kind: error.kind().as_str().to_owned(),
+                upstream_send_state: None,
+                raw_upstream_error: None,
+                status_code: None,
+                provider_error_code: error.client_error_code().map(str::to_owned),
+                retry_after_ms: error
+                    .retry_after()
+                    .and_then(|delay| u64::try_from(delay.as_millis()).ok()),
+                upstream_request_id: None,
+                latency_ms: u64::try_from(rejection.latency.as_millis()).ok(),
+                // 入口尚无 model_requests 行，关联 ID 放在安全消息中，不能伪造外键。
+                message: serde_json::json!({
+                    "requestId": rejection.request_id.as_str(),
+                    "clientKeyId": rejection.client_key_id.as_str(),
+                    "message": error.client_message(),
+                })
+                .to_string(),
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .map_err(core_store_error)
+    }
+
     async fn record_probe_failure(&self, failure: ProbeFailure) -> Result<(), CoreStoreError> {
         let error = failure.error;
         let retry_after_ms = error
@@ -1216,6 +1261,10 @@ impl ExecutionStore for PgExecutionStore {
         let completed = ModelRequestRepository::finalize_model_request(
             self,
             ModelRequestFinalization {
+                billing_snapshot_json: finalization
+                    .cost
+                    .breakdown()
+                    .map(super::pricing::encode_billing_snapshot),
                 model_request_id: finalization.request_id.as_str().to_owned(),
                 outcome: outcome_from_core(finalization.outcome)?,
                 upstream_send_state: send_state_from_core(finalization.send_state),

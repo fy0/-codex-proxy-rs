@@ -1,12 +1,8 @@
 <script setup lang="ts">
 import type { useAccountConnectionTest } from '../composables/useAccountConnectionTest'
 
+import { BaseButton, BaseIconButton, BaseModal, BaseSelect } from '@codex-proxy/ui'
 import { RefreshCw } from '@lucide/vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
 import AccountStatusBadge from './AccountStatusBadge/index.vue'
 
@@ -62,10 +58,11 @@ function connectionLogClass(tone: string) {
           :status="account.status"
           :error-reason="account.errorReason"
           :error-message="account.errorMessage"
-          :rate-limited-until="account.quota.rateLimitedUntil"
+          :rate-limit-recovery-display="account.quota.rateLimitRecoveryDisplay"
           :rate-limit-reason="account.quota.rateLimitReason"
           :recovery-probe-required="account.quota.recoveryProbeRequired"
           :next-refresh-at="account.nextRefreshAt"
+          :next-refresh-at-display="account.nextRefreshAtDisplay"
           variant="pill"
         />
       </section>
@@ -176,46 +173,40 @@ function connectionLogClass(tone: string) {
           <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
             事件轨迹
           </p>
-          <BaseScrollbar max-height="260px">
-            <div class="pt-2">
-              <div v-if="logs.length === 0" class="text-cp-sm font-emphasis text-cp-text-quaternary">
-                -
-              </div>
-              <div v-else class="flex flex-col gap-1.5">
-                <div
-                  v-for="item in logs"
-                  :key="item.key"
-                  class="grid grid-cols-[54px_minmax(0,1fr)] gap-2 text-cp-sm leading-[1.45] font-emphasis"
-                >
-                  <span class="font-mono text-cp-text-quaternary">{{ item.time }}</span>
-                  <div class="min-w-0">
+          <div class="pt-2">
+            <div v-if="logs.length === 0" class="text-cp-sm font-emphasis text-cp-text-quaternary">
+              -
+            </div>
+            <div v-else class="flex flex-col gap-1.5">
+              <div
+                v-for="item in logs"
+                :key="item.key"
+                class="grid grid-cols-[54px_minmax(0,1fr)] gap-2 text-cp-sm leading-[1.45] font-emphasis"
+              >
+                <span class="font-mono text-cp-text-quaternary">{{ item.time }}</span>
+                <div class="min-w-0">
+                  <p
+                    class="m-0 wrap-break-word"
+                    :class="connectionLogClass(item.tone)"
+                  >
+                    {{ item.text }}
+                  </p>
+                  <div v-if="item.detail" class="mt-2 rounded-lg bg-cp-fill-quaternary px-3 py-2">
                     <p
-                      class="m-0 wrap-break-word"
-                      :class="connectionLogClass(item.tone)"
+                      v-if="item.tone === 'danger'"
+                      class="mt-0 mb-2 text-cp-xs font-heavy text-cp-text-quaternary"
                     >
-                      {{ item.text }}
+                      原始诊断
                     </p>
-                    <div v-if="item.detail" class="mt-2 rounded-lg bg-cp-fill-quaternary px-3 py-2">
-                      <p
-                        v-if="item.tone === 'danger'"
-                        class="mt-0 mb-2 text-cp-xs font-heavy text-cp-text-quaternary"
-                      >
-                        原始诊断
-                      </p>
-                      <BaseScrollbar max-height="138px">
-                        <div>
-                          <pre
-                            class="m-0 whitespace-pre-wrap wrap-break-word font-mono text-cp-xs leading-[1.6] font-emphasis text-cp-text"
-                            v-text="item.detail"
-                          />
-                        </div>
-                      </BaseScrollbar>
-                    </div>
+                    <pre
+                      class="m-0 whitespace-pre-wrap wrap-break-word font-mono text-cp-xs leading-[1.6] font-emphasis text-cp-text"
+                      v-text="item.detail"
+                    />
                   </div>
                 </div>
               </div>
             </div>
-          </BaseScrollbar>
+          </div>
         </div>
       </section>
     </div>

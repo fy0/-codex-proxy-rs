@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
+import { BaseScrollbar } from '@codex-proxy/ui'
 
 // 详情弹窗的代码面板：标题 + 滚动区内的预格式化文本。
 defineProps<{

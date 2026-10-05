@@ -4,6 +4,7 @@ use std::{borrow::Cow, fmt, net::IpAddr};
 
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
 use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload, ProviderSessionState};
 use gateway_protocol::openai::{
     X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
@@ -271,6 +272,14 @@ pub struct DecodedResponsesRequest {
 }
 
 impl DecodedResponsesRequest {
+    pub(crate) fn with_middleware_capabilities(
+        mut self,
+        request: &gateway_core::engine::middleware::MiddlewareRequest,
+    ) -> Result<Self, gateway_core::engine::middleware::MiddlewareError> {
+        self.operation = request.apply_capabilities(self.operation)?;
+        Ok(self)
+    }
+
     /// 附着当前 WebSocket 连接保存的 Provider 私有上一轮状态。
     #[must_use]
     pub fn with_provider_session_state(mut self, state: ProviderSessionState) -> Self {
@@ -331,6 +340,20 @@ pub fn decode_request_with_headers(
 ) -> Result<DecodedResponsesRequest, RequestDecodeError> {
     let body = decompress_request_body(body, headers, max_decompressed_bytes)?;
     decode_request_inner(&body, &OpenAiRequestHeaders::from_headers(headers))
+}
+
+/// 解码请求并返回已经解除 HTTP content encoding 的中间件正文。
+///
+/// 外层中间件只接收有界的协议正文；terminal 会用中间件返回的正文重新解码，
+/// 因而不能把压缩字节与已经移除的传输编码语义混用。
+pub(crate) fn decode_request_with_body(
+    body: &[u8],
+    headers: &HeaderMap,
+    max_decompressed_bytes: usize,
+) -> Result<(DecodedResponsesRequest, Bytes), RequestDecodeError> {
+    let body = decompress_request_body(body, headers, max_decompressed_bytes)?;
+    let decoded = decode_request_inner(&body, &OpenAiRequestHeaders::from_headers(headers))?;
+    Ok((decoded, Bytes::copy_from_slice(&body)))
 }
 
 /// zstd 回溯窗口独立于输出上限，调整设置不能放大解码器内部窗口分配。
@@ -446,10 +469,11 @@ pub(super) fn decode_request_object(
         });
     }
     let model = model.to_owned();
-    let stream = object
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    // 缺省值只决定下游交付方式，不补写正文或改变 Provider 的上游流式执行。
+    let stream = match object.get("stream") {
+        Some(value) => value.as_bool().unwrap_or(true),
+        None => matches!(source, RequestDecodeSource::WebSocketFrame),
+    };
     let store = object
         .get("store")
         .and_then(Value::as_bool)
@@ -561,6 +585,8 @@ fn passthrough_header_name(name: &str, connection_headers: &[String]) -> bool {
             | "chatgpt-project-id"
             | "openai-organization"
             | "openai-project"
+            | "x-openai-account-routing-override"
+            | "x-openai-fedramp"
             // 上游指纹必须由运行时画像统一生成，客户端 originator/User-Agent/version
             // 不能作为不透明头透传覆盖，避免不同下游客户端暴露不一致的设备指纹。
             | "originator"

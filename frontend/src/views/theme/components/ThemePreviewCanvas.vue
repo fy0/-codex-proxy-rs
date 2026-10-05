@@ -1,11 +1,10 @@
 <script setup lang="ts">
+import type { ThemeName } from '@codex-proxy/ui/theme'
 import type { CSSProperties } from 'vue'
-import type { ThemeName } from '@/theme'
+import { BaseButton, BaseIconButton } from '@codex-proxy/ui'
+
 import { Maximize2, Minus, Move, Plus } from '@lucide/vue'
 import { computed, useTemplateRef } from 'vue'
-
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
 
 import { useThemePreviewCanvas } from '../composables/useThemePreviewCanvas'
 import ThemePreviewScope from './ThemePreviewScope.vue'

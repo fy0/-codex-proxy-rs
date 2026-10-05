@@ -18,6 +18,7 @@ const props = withDefaults(
 
 const planPalettes: Record<string, string> = {
   free: 'bg-cp-cyan-container text-cp-cyan-on-container',
+  plus: 'bg-cp-blue-container-strong text-cp-blue-on-container',
   pro: 'bg-cp-purple-container-strong text-cp-purple-on-container',
   prolite: 'bg-cp-purple-container text-cp-purple-on-container',
 }

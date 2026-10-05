@@ -1,4 +1,4 @@
-//! Provider 管理能力与动态注册表。
+//! 原生 Provider 管理能力与启动时注册表。
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -15,9 +15,9 @@ use crate::model::observability::{
 };
 use crate::model::provider_credentials::{
     AuthorizationStarted, CompleteAuthorization, ConsumeProviderResetCredit,
-    PendingAuthorizationMutation, PrepareCredentialImport, PrepareCredentialRefresh,
-    PrepareCredentialRotation, PreparedAuthorizationCommit, PreparedCredentialImport,
-    PreparedCredentialRotation, ProviderExport, ProviderExportCredentialInput, ProviderModels,
+    PrepareCredentialImport, PrepareCredentialRefresh, PrepareCredentialRotation,
+    PreparedAuthorizationCommit, PreparedCredentialImport, PreparedCredentialRotation,
+    ProviderExport, ProviderExportCredentialInput, ProviderModelCatalogDocument, ProviderModels,
     ProviderProfileAvatar, ProviderProfileStatistics, ProviderQuota, ProviderQuotaRequest,
     ProviderResetCreditResult, ProviderResetCredits, ProviderSubscription, explicit_plan_type,
 };
@@ -110,7 +110,41 @@ impl ProviderAdminError {
 /// 全部由 [`crate::ports::store::AccountStore`] 提交。运行时资源通知只在事务成功后发生。
 #[async_trait]
 pub trait ProviderAdmin: Send + Sync {
+    /// 只读内置价目；没有本地计价能力的 Provider 返回空目录。
+    fn pricing_catalog(&self) -> crate::model::pricing::ProviderPricingCatalog {
+        Default::default()
+    }
+
     fn provider_kind(&self) -> &ProviderKind;
+
+    /// 只读取原生 Provider 能力及账号类型，不执行网络或数据库查询。
+    fn account_capabilities(
+        &self,
+        _account_id: &ProviderAccountId,
+        _authentication_kind: &str,
+    ) -> crate::model::accounts::ProviderAccountCapabilities {
+        Default::default()
+    }
+
+    /// 提供该 Provider 的可选客户端身份；通用管理层不解释内部字段。
+    fn client_profile_options(
+        &self,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
+
+    /// 没有持久选择时使用的 Provider 默认画像；只返回已准备的本地事实。
+    fn default_client_profile(&self) -> Option<gateway_core::account::OpaqueProviderData> {
+        None
+    }
+
+    /// 校验并投影客户端身份，结果不含认证或账号材料。
+    fn preview_client_profile(
+        &self,
+        _configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Result<gateway_core::account::OpaqueProviderData, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
 
     /// 将原始套餐值投影为展示名称；默认保留未知 Provider 的原始名称。
     fn plan_type_display(&self, plan_type: &str) -> String {
@@ -130,7 +164,7 @@ pub trait ProviderAdmin: Send + Sync {
     async fn account_facts_changed(&self, _account_ids: &[ProviderAccountId]) {}
 
     /// 生成一次连接测试所需的 Provider-owned operation；Core 负责实际执行与落账。
-    fn connection_test_operation(
+    async fn connection_test_operation(
         &self,
         upstream_model: &UpstreamModelId,
         input_text: &str,
@@ -139,15 +173,15 @@ pub trait ProviderAdmin: Send + Sync {
     /// 返回该 Provider 实际持有的 Dashboard 上游身份画像。
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile>;
 
-    /// 预览与实际探测共享运行时画像，不从 Dashboard 文案反推版本。
-    fn turn_state_probe_preview(
+    fn configured_wire_profile(
         &self,
-        _config: &gateway_core::account::TurnStateConfig,
-    ) -> Option<crate::model::accounts::TurnStateProbePreview> {
-        None
+        _configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Option<DashboardWireProfile> {
+        self.dashboard_wire_profile()
     }
 
     /// 使用 Provider-owned 价格规则恢复持久请求的逐项费用。
+    /// 未保存的长上下文计费标记不得从当前价格反推。
     fn calculated_billing(
         &self,
         input: &ProviderBillingInput,
@@ -160,7 +194,7 @@ pub trait ProviderAdmin: Send + Sync {
 
     async fn start_authorization(
         &self,
-        pending: PendingAuthorizationMutation,
+        pending: crate::model::provider_credentials::PendingAuthorizationMutation,
     ) -> Result<AuthorizationStarted, ProviderAdminError>;
 
     async fn complete_authorization(
@@ -246,19 +280,34 @@ pub trait ProviderAdmin: Send + Sync {
         refresh: bool,
     ) -> Result<ProviderModels, ProviderAdminError>;
 
+    /// 导出该账号的 Provider 原生模型目录正文；不提供原生目录的 Provider 使用默认拒绝。
+    async fn model_catalog_document(
+        &self,
+        _account_id: &ProviderAccountId,
+    ) -> Result<ProviderModelCatalogDocument, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
+
     async fn export_credentials(
         &self,
         credentials: Vec<ProviderExportCredentialInput>,
     ) -> Result<ProviderExport, ProviderAdminError>;
 }
 
-/// 按 ProviderKind 动态发现管理能力；不含具体 Provider 分支。
+/// 启动时注册原生 Provider，按 ProviderKind 查找管理能力。
 #[derive(Clone)]
 pub struct ProviderAdminRegistry {
     providers: Arc<BTreeMap<ProviderKind, Arc<dyn ProviderAdmin>>>,
 }
 
 impl ProviderAdminRegistry {
+    pub fn pricing_catalog(&self) -> gateway_core::metering::PricingOverrides {
+        self.providers
+            .iter()
+            .map(|(kind, provider)| (kind.as_str().to_owned(), provider.pricing_catalog()))
+            .collect()
+    }
+
     /// 创建无重复 ProviderKind 的注册表。
     ///
     /// # Errors
@@ -311,7 +360,7 @@ impl ProviderAdminRegistry {
         let plan_type = explicit_plan_type(plan_type)?.trim();
         let provider = ProviderKind::new(provider_kind.to_owned())
             .ok()
-            .and_then(|kind| self.providers.get(&kind));
+            .and_then(|kind| self.require(&kind).ok());
         let display = provider.map_or_else(
             || plan_type.to_owned(),
             |provider| provider.plan_type_display(plan_type),
@@ -321,14 +370,23 @@ impl ProviderAdminRegistry {
     }
 
     /// 返回所有已注册 Provider 的 Dashboard 上游身份画像。
-    pub fn dashboard_wire_profiles(&self) -> Vec<DashboardWireProfile> {
+    pub fn dashboard_wire_profiles(
+        &self,
+        configurations: &std::collections::BTreeMap<
+            ProviderKind,
+            gateway_core::account::OpaqueProviderData,
+        >,
+    ) -> Vec<DashboardWireProfile> {
         self.providers
-            .values()
-            .filter_map(|provider| provider.dashboard_wire_profile())
+            .iter()
+            .filter_map(|(kind, provider)| match configurations.get(kind) {
+                Some(configuration) => provider.configured_wire_profile(configuration),
+                None => provider.dashboard_wire_profile(),
+            })
             .collect()
     }
 
-    /// 动态分派 Provider-owned 费用规则，不含任何具体 Provider 分支。
+    /// 按平台计算请求费用。
     pub fn calculated_billing(
         &self,
         provider_kind: &ProviderKind,

@@ -77,35 +77,60 @@ fn astra_billing_should_preserve_components_across_tiers_and_context_boundary() 
 }
 
 #[test]
-fn sol_6_1_billing_should_preserve_components_across_tiers_and_context_boundary() {
-    // USD per million tokens, in order: input, cache read, cache write, output.
-    for (tier, input, expected, multiplier) in [
-        (None, 272_000, ["2", "0.1", "2.5", "10"], 100),
-        (None, 272_001, ["4", "0.2", "5", "15"], 100),
-        (Some("flex"), 272_000, ["1", "0.05", "1.25", "5"], 50),
-        (Some("flex"), 272_001, ["2", "0.1", "2.5", "7.5"], 50),
-        (Some("fast"), 272_000, ["4", "0.2", "5", "20"], 200),
-        (Some("priority"), 272_001, ["8", "0.4", "10", "30"], 200),
+fn new_gpt_6_models_should_use_published_prices_across_tiers_and_context_boundary() {
+    // 每档依次核对每百万 Token 的输入、缓存读取、缓存写入和输出价格。
+    for (model, cases) in [
+        (
+            "gpt-6.1-sol",
+            [
+                (None, 272_000, ["2", "0.1", "2.5", "10"]),
+                (None, 272_001, ["4", "0.2", "5", "15"]),
+                (Some("flex"), 272_000, ["1", "0.05", "1.25", "5"]),
+                (Some("flex"), 272_001, ["2", "0.1", "2.5", "7.5"]),
+                (Some("fast"), 272_000, ["4", "0.2", "5", "20"]),
+                (Some("priority"), 272_001, ["8", "0.4", "10", "30"]),
+            ],
+        ),
+        (
+            "gpt-6-sol",
+            [
+                (None, 272_000, ["2", "0.2", "2.5", "10"]),
+                (None, 272_001, ["4", "0.4", "5", "15"]),
+                (Some("flex"), 272_000, ["1", "0.1", "1.25", "5"]),
+                (Some("flex"), 272_001, ["2", "0.2", "2.5", "7.5"]),
+                (Some("fast"), 272_000, ["4", "0.4", "5", "20"]),
+                (Some("priority"), 272_001, ["8", "0.8", "10", "30"]),
+            ],
+        ),
+        (
+            "gpt-6-luna",
+            [
+                (None, 272_000, ["0.1", "0.01", "0.125", "0.5"]),
+                (None, 272_001, ["0.2", "0.02", "0.25", "0.75"]),
+                (Some("flex"), 272_000, ["0.05", "0.005", "0.0625", "0.25"]),
+                (Some("flex"), 272_001, ["0.1", "0.01", "0.125", "0.375"]),
+                (Some("fast"), 272_000, ["0.2", "0.02", "0.25", "1"]),
+                (Some("priority"), 272_001, ["0.4", "0.04", "0.5", "1.5"]),
+            ],
+        ),
     ] {
-        let breakdown =
-            openai_billing_breakdown("gpt-6.1-sol", billing_usage(input, 5, 20, 10), tier)
-                .expect("published GPT-6.1 Sol pricing");
-        let prices = [
-            breakdown.input_price_per_million(),
-            breakdown.cache_read_price_per_million(),
-            breakdown.cache_write_price_per_million(),
-            breakdown.output_price_per_million(),
-        ]
-        .map(|price| {
-            price
-                .amount()
-                .to_string()
-                .trim_end_matches('0')
-                .trim_end_matches('.')
-                .to_owned()
-        });
-        assert_eq!(prices, expected, "tier={tier:?}, input={input}");
-        assert_eq!(breakdown.multiplier_percent(), multiplier);
+        for (tier, input, expected) in cases {
+            let breakdown = openai_billing_breakdown(model, billing_usage(input, 5, 20, 10), tier)
+                .expect("published GPT-6 pricing");
+            let actual = [
+                breakdown.input_price_per_million(),
+                breakdown.cache_read_price_per_million(),
+                breakdown.cache_write_price_per_million(),
+                breakdown.output_price_per_million(),
+            ]
+            .map(|price| price.amount().canonical());
+            assert_eq!(actual, expected, "{model} {tier:?} {input}");
+            assert_eq!(
+                breakdown.long_context_billing_applied(),
+                input > 272_000,
+                "{model} {tier:?} {input}"
+            );
+        }
     }
 }
 
@@ -162,6 +187,7 @@ fn billing_breakdown_should_apply_fast_and_flex_tiers_without_guessing_unknown_m
     assert_eq!(fast.total_amount().amount().scaled(), 350_000);
     assert_eq!(fast.service_tier(), Some("fast"));
     assert_eq!(fast.multiplier_percent(), 200);
+    assert!(!fast.long_context_billing_applied());
     assert_eq!(flex.total_amount().amount().scaled(), 87_500);
     assert_eq!(flex.multiplier_percent(), 50);
     assert!(openai_billing_breakdown("unknown-model", billing_usage(1, 1, 0, 0), None).is_none());
@@ -239,6 +265,14 @@ fn billing_breakdown_should_switch_only_after_the_long_context_threshold() {
         .expect("short-context boundary");
     let long = openai_billing_breakdown("gpt-5.4", billing_usage(272_001, 0, 0, 0), None)
         .expect("long-context pricing");
+
+    assert!(!boundary.long_context_billing_applied());
+    assert!(long.long_context_billing_applied());
+    assert!(
+        !openai_billing_breakdown("gpt-4o", billing_usage(272_001, 0, 0, 0), None)
+            .expect("model without long-context pricing")
+            .long_context_billing_applied()
+    );
 
     assert_eq!(
         boundary.input_price_per_million().amount().scaled(),
@@ -511,6 +545,7 @@ async fn usage_not_found_should_preserve_status_without_a_nonofficial_fallback()
         .await;
 
     let error = client(&server.uri())
+        .with_official_base_url(server.uri())
         .fetch_usage(context())
         .await
         .expect_err("usage 404");
@@ -653,6 +688,67 @@ async fn chunked_body_over_limit_should_be_rejected_without_content_length() {
     assert_oversized_error(error, StatusCode::BAD_GATEWAY, None);
 }
 
+#[tokio::test]
+async fn fetch_usage_should_fallback_to_official_endpoint_when_custom_upstream_returns_404() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(StatusCode::NOT_FOUND))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(
+            ResponseTemplate::new(StatusCode::OK)
+                .set_body_json(serde_json::json!({"rate_limit": {"limit": 100}})),
+        )
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let test_client = client(&custom_server.uri())
+        .with_official_base_url(format!("{}/backend-api", official_server.uri()));
+    let usage = test_client
+        .fetch_usage(context())
+        .await
+        .expect("usage after fallback");
+    assert_eq!(usage["rate_limit"]["limit"], 100);
+}
+
+#[tokio::test]
+async fn fetch_usage_should_not_fallback_when_error_is_not_404() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(StatusCode::UNAUTHORIZED))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(StatusCode::OK))
+        .expect(0)
+        .mount(&official_server)
+        .await;
+
+    let test_client = client(&custom_server.uri()).with_official_base_url(official_server.uri());
+    let error = test_client
+        .fetch_usage(context())
+        .await
+        .expect_err("should return 401");
+    let CodexClientError::Upstream { status, .. } = error else {
+        panic!("expected upstream error");
+    };
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 fn assert_oversized_error(
     error: CodexClientError,
     expected_status: StatusCode,
@@ -729,6 +825,7 @@ fn client(base_url: &str) -> CodexBackendClient {
 
 fn profile() -> CodexWireProfileState {
     CodexWireProfileState::new(CodexWireProfile {
+        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
         originator: "codex_cli_rs".to_owned(),
         codex_version: "0.144.0".to_owned(),
         desktop_version: "1.0.0".to_owned(),
@@ -737,6 +834,7 @@ fn profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "xterm".to_owned(),
+        exact_user_agent: None,
         residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 7, 18, 0, 0, 0)
@@ -766,4 +864,90 @@ fn context() -> CodexRequestContext<'static> {
         turn_id: None,
         account_selection: Default::default(),
     }
+}
+
+use gateway_core::metering::ModelPriceOverride;
+use provider_openai::transport::openai_billing_breakdown_with_override;
+use serde_json::json;
+
+#[test]
+fn custom_price_has_exact_cache_and_multiplier_math() {
+    let custom: ModelPriceOverride = serde_json::from_value(json!({"multiplierBps":12500,"bands":{
+        "standard":{"input":"2","output":"10","cacheRead":"0","cacheWrite":"3"}
+    }}))
+    .unwrap();
+    let breakdown = openai_billing_breakdown_with_override(
+        "custom-model",
+        billing_usage(100, 10, 20, 10),
+        None,
+        Some(&custom),
+    )
+    .unwrap();
+    assert_eq!(breakdown.input_amount().amount().canonical(), "0.000175");
+    assert_eq!(breakdown.output_amount().amount().canonical(), "0.000125");
+    assert_eq!(breakdown.cache_read_amount().amount().canonical(), "0");
+    assert_eq!(
+        breakdown.cache_write_amount().amount().canonical(),
+        "0.0000375"
+    );
+    assert_eq!(breakdown.total_amount().amount().canonical(), "0.0003375");
+    assert_eq!(breakdown.custom_multiplier_bps(), 12500);
+    assert!(
+        openai_billing_breakdown_with_override(
+            "custom-model",
+            billing_usage(100, 10, 0, 0),
+            Some("flex"),
+            Some(&custom)
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn a_custom_long_priority_band_does_not_require_a_long_standard_band() {
+    let pricing = serde_json::from_value(json!({"multiplierBps":10000,"bands":{
+        "standard":{"input":"2","output":"10","cacheRead":"0","cacheWrite":"0"},
+        "long_fast":{"input":"8","output":"40","cacheRead":"0","cacheWrite":"0"}
+    }}))
+    .unwrap();
+    let result = openai_billing_breakdown_with_override(
+        "custom-model",
+        billing_usage(300_000, 0, 0, 0),
+        Some("priority"),
+        Some(&pricing),
+    )
+    .unwrap();
+    assert_eq!(result.total_amount().amount().canonical(), "2.4");
+    assert_eq!(result.standard_amount().amount().canonical(), "0.6");
+    assert!(result.long_context_billing_applied());
+}
+
+#[test]
+fn multiplier_only_preserves_builtin_tiers_and_unknown_models_remain_unknown() {
+    let custom: ModelPriceOverride =
+        serde_json::from_value(json!({"multiplierBps":20000,"bands":{}})).unwrap();
+    for tier in [None, Some("priority"), Some("flex")] {
+        for input in [100, 272_001] {
+            let usage = billing_usage(input, 10, 20, 5);
+            let original = openai_billing_breakdown("gpt-6-astra", usage, tier).unwrap();
+            let adjusted =
+                openai_billing_breakdown_with_override("gpt-6-astra", usage, tier, Some(&custom))
+                    .unwrap();
+            assert_eq!(
+                adjusted.total_amount().amount().scaled(),
+                original.total_amount().amount().scaled() * 2
+            );
+            assert_eq!(adjusted.multiplier_percent(), original.multiplier_percent());
+            assert_eq!(adjusted.long_context_billing_applied(), input > 272_000);
+        }
+    }
+    assert!(
+        openai_billing_breakdown_with_override(
+            "unknown-model",
+            billing_usage(100, 10, 0, 0),
+            None,
+            Some(&custom)
+        )
+        .is_none()
+    );
 }

@@ -40,7 +40,7 @@ const latencyDetails = computed(() => usageLatencyDetails(props.record))
         </div>
       </div>
       <p v-else class="m-0 text-cp-text-quaternary">
-        此记录未采集完整的阶段耗时。
+        此记录未采集完整的阶段耗时
       </p>
 
       <div class="flex justify-between border-t border-cp-split pt-2">
@@ -68,7 +68,7 @@ const latencyDetails = computed(() => usageLatencyDetails(props.record))
           </span>
         </div>
         <p class="m-0 text-cp-xs leading-snug text-cp-text-quaternary">
-          与阶段耗时可能重叠，不参与总耗时相加。
+          与阶段耗时可能重叠，不参与总耗时相加
         </p>
       </div>
     </UsageDetailPopover>

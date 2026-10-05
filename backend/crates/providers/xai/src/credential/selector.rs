@@ -11,6 +11,7 @@ use gateway_core::account::{
     QuotaAccessState, QuotaEvidence, QuotaState,
 };
 use gateway_core::concurrency::{CapacityWait, ConcurrencyWaitQueue};
+use gateway_core::engine::policy::AccountPolicyError;
 use gateway_core::provider_ports::{
     ProviderCooldown, ProviderCooldownPort, ProviderCooldownScope, ProviderLeaseAcquisition,
     ProviderLeasePort, ProviderLeaseRequest, ProviderSchedulingLeaseRequest,
@@ -98,7 +99,7 @@ impl GrokAccountSessionSelector {
             request.deadline(),
             request.concurrency_wait_budget(),
         );
-        loop {
+        'refresh: loop {
             let diagnostic = request.eligibility() == AccountEligibilityPolicy::BypassForDiagnostic;
             // store 侧常规调度列表不包含停用账号；管理端诊断要对固定账号执行真实上游
             // 验证，这里把不在列表里的 required 账号显式补回候选。
@@ -181,8 +182,6 @@ impl GrokAccountSessionSelector {
                     request.client_api_key_id(),
                     &self.provider_kind,
                     &account_ids,
-                    // xAI 没有专用上行通道，不读取通道子池信号。
-                    &[],
                 )
                 .await
                 .map_err(|_| GrokSessionSelectorError::Unavailable)?;
@@ -231,7 +230,7 @@ impl GrokAccountSessionSelector {
                 round_robin_cursor: scheduling.round_robin_cursor(),
                 eligibility: request.eligibility(),
                 account_scope: (!diagnostic).then(|| Arc::clone(request.account_scope())),
-                channel: gateway_core::routing::UpstreamChannel::Default,
+                reserved_concurrency: 0,
             };
             let wait_candidates = AccountSelector.wait_candidates(&candidates, &context);
             let capacity_context = context.clone();
@@ -246,7 +245,30 @@ impl GrokAccountSessionSelector {
             let mut retry_after = None;
             loop {
                 let capacity = AccountSelector.capacity_snapshot(&candidates, &capacity_context);
-                let Some(selection) = AccountSelector.select(&candidates, &context) else {
+                let selection = match request.request_policy() {
+                    Some(policy) => {
+                        policy
+                            .select_account(
+                                request.attempt_index(),
+                                &self.provider_kind,
+                                Some(request.upstream_model().as_str()),
+                                &candidates,
+                                &context,
+                            )
+                            .await
+                    }
+                    None => Ok(AccountSelector.select(&candidates, &context)),
+                };
+                let Some(selection) = (match selection {
+                    Ok(selection) => selection,
+                    Err(AccountPolicyError::StaleCandidate) => continue 'refresh,
+                    Err(AccountPolicyError::Rejected) => {
+                        return Err(GrokSessionSelectorError::PolicyRejected);
+                    }
+                    Err(AccountPolicyError::Fault) => {
+                        return Err(GrokSessionSelectorError::PolicyUnavailable);
+                    }
+                }) else {
                     break;
                 };
                 let selected = selection.candidate();
@@ -333,15 +355,18 @@ impl GrokAccountSessionSelector {
             }
 
             if !diagnostic && queue_policy.max_waiting > 0 && !wait_candidates.is_empty() {
-                waiting.wait(&wait_candidates).await.map_err(|error| {
-                    tracing::info!(
-                        queue_layer = "account",
-                        queue_wait_ms = waiting.elapsed().as_millis() as u64,
-                        reason = %error,
-                        "xAI 账号排队请求被拒绝"
-                    );
-                    GrokSessionSelectorError::QueueRejected(error)
-                })?;
+                AccountSelector
+                    .wait_for_capacity(&mut waiting, &wait_candidates, &candidates, &context)
+                    .await
+                    .map_err(|error| {
+                        tracing::info!(
+                            queue_layer = "account",
+                            queue_wait_ms = waiting.elapsed().as_millis() as u64,
+                            reason = %error,
+                            "xAI 账号排队请求被拒绝"
+                        );
+                        GrokSessionSelectorError::QueueRejected(error)
+                    })?;
                 continue;
             }
             if capacity_denied {

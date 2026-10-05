@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import type { ResolvedTheme, ThemeColorPreset, ThemeColorPresetId, ThemeMode, ThemeSeedOverrides } from '@codex-proxy/ui/theme'
 import type { ThemeEditorDraft, ThemeEditorGlobalCategory } from '../composables/useThemeEditor'
-import type { ResolvedTheme, ThemeColorPreset, ThemeColorPresetId, ThemeMode, ThemeSeedOverrides } from '@/theme'
+
+import { BaseSegmented } from '@codex-proxy/ui'
+import { resolveTheme, THEME_COLOR_PRESETS } from '@codex-proxy/ui/theme'
 
 import { Check, ChevronDown, Laptop, Moon, Sun } from '@lucide/vue'
 import { computed } from 'vue'
-
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import { resolveTheme, THEME_COLOR_PRESETS } from '@/theme'
 
 import ThemeColorTokenField from './ThemeColorTokenField.vue'
 import ThemeNumberTokenField from './ThemeNumberTokenField.vue'
@@ -290,7 +290,7 @@ function presetSwatches(preset: ThemeColorPreset) {
       <div
         class="rounded-cp-lg bg-cp-primary-container px-3 py-3 text-[10px] leading-normal font-emphasis text-cp-primary-on-container"
       >
-        固定无边设计；圆角塑形，阴影分层。
+        固定无边设计，圆角塑形，阴影分层
       </div>
       <ThemeNumberTokenField
         label="通用圆角"

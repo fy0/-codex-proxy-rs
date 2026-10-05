@@ -28,6 +28,8 @@ async fn proxy_location_is_shared_preserved_cleared_and_removed_with_binding() {
     let mut saved = proxies
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 name: "Tokyo".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:18080").unwrap(),
                 location: Some(location.clone()),
@@ -64,6 +66,8 @@ async fn proxy_location_is_shared_preserved_cleared_and_removed_with_binding() {
     saved = proxies
         .update(
             UpdateProxy {
+                auto_location: None,
+                test: None,
                 id: saved.id.clone(),
                 revision: saved.revision,
                 name: "Renamed".to_owned(),
@@ -81,6 +85,8 @@ async fn proxy_location_is_shared_preserved_cleared_and_removed_with_binding() {
     saved = proxies
         .update(
             UpdateProxy {
+                auto_location: None,
+                test: None,
                 id: saved.id.clone(),
                 revision: saved.revision,
                 name: saved.name.clone(),
@@ -107,6 +113,8 @@ async fn proxy_location_is_shared_preserved_cleared_and_removed_with_binding() {
         proxies
             .update(
                 UpdateProxy {
+                    auto_location: None,
+                    test: None,
                     id: saved.id.clone(),
                     revision: stale_revision,
                     name: saved.name.clone(),
@@ -122,6 +130,8 @@ async fn proxy_location_is_shared_preserved_cleared_and_removed_with_binding() {
     proxies
         .update(
             UpdateProxy {
+                auto_location: None,
+                test: None,
                 id: saved.id.clone(),
                 revision: saved.revision,
                 name: saved.name.clone(),
@@ -158,6 +168,7 @@ fn context() -> MutationContext {
 
 fn success() -> ProxyTestResult {
     ProxyTestResult {
+        location: Default::default(),
         success: true,
         latency_ms: 10,
         exit_ip: Some("203.0.113.5".parse().unwrap()),
@@ -170,9 +181,6 @@ fn success() -> ProxyTestResult {
 fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
     UpdateAccount {
         notes: None,
-        turn_state_override: None,
-        basispoints_enabled: None,
-        bps_concurrency_limit: None,
         model_access: Default::default(),
         account_id: account_id.to_owned(),
         enabled: true,
@@ -193,6 +201,8 @@ async fn proxy_account_removal_preserves_settings_and_rejects_changed_bindings()
     let saved = store
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 location: None,
                 name: "解绑测试".to_owned(),
                 proxy: OutboundProxy::parse("http://user:secret@127.0.0.1:17890").unwrap(),
@@ -338,6 +348,8 @@ async fn proxy_accounts_paginate_thousands_of_accounts_and_search_without_loadin
     let saved = store
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 location: None,
                 name: "分页测试".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:17890").unwrap(),
@@ -350,6 +362,8 @@ async fn proxy_accounts_paginate_thousands_of_accounts_and_search_without_loadin
     let empty = store
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 location: None,
                 name: "无关联账号".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:17891").unwrap(),
@@ -504,6 +518,80 @@ async fn rejected_import_reservations_release_proxy_lock_before_returning() {
 }
 
 #[tokio::test]
+async fn stale_proxy_test_releases_lock_before_next_update() {
+    let Some(database) = TestDatabase::create("stale_proxy_test_lock").await else {
+        return;
+    };
+    let store = PgProxyRepository::new(database.pool.clone());
+    let context = context();
+    let mut saved = store
+        .create(
+            NewProxy {
+                name: "过期检测结果".to_owned(),
+                proxy: OutboundProxy::parse("http://127.0.0.1:19090").unwrap(),
+                auto_location: true,
+                location: None,
+                test: None,
+            },
+            &context,
+        )
+        .await
+        .unwrap()
+        .record;
+    let stale_revision = saved.revision;
+    saved = store
+        .record_test(&saved.id, saved.revision, success(), &context)
+        .await
+        .unwrap()
+        .record;
+
+    // 暂停连接归还时的后台清理，确保锁由返回错误前的显式回滚释放。
+    let release_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let rejected_pool = database
+        .pool
+        .options()
+        .clone()
+        .max_connections(1)
+        .after_release({
+            let release_gate = release_gate.clone();
+            move |_, _| {
+                let release_gate = release_gate.clone();
+                Box::pin(async move {
+                    let _permit = release_gate.acquire().await.unwrap();
+                    Ok(true)
+                })
+            }
+        })
+        .connect_with((*database.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let stale_writer = PgProxyRepository::new(rejected_pool.clone());
+    let error = stale_writer
+        .record_test(&saved.id, stale_revision, success(), &context)
+        .await
+        .unwrap_err();
+    let update = store
+        .update(
+            UpdateProxy {
+                id: saved.id.clone(),
+                revision: saved.revision,
+                name: saved.name.clone(),
+                proxy: None,
+                auto_location: None,
+                location: None,
+                test: None,
+            },
+            &context,
+        )
+        .await;
+    release_gate.add_permits(1);
+    rejected_pool.close().await;
+    database.close().await;
+    assert_eq!(error.kind(), AdminStoreErrorKind::Conflict);
+    assert!(update.is_ok(), "过期检测结果不应阻挡后续编辑: {update:?}");
+}
+
+#[tokio::test]
 async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are_committed() {
     use gateway_store::postgres::{
         ImportProviderAccounts, ProviderAccountAdminRepository, ProviderAccountAdminScope,
@@ -517,6 +605,8 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
     let saved = store
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 location: None,
                 name: "导入出口".to_owned(),
                 proxy: OutboundProxy::parse("http://127.0.0.1:8080").unwrap(),
@@ -532,6 +622,7 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
             &saved.id,
             saved.revision,
             ProxyTestResult {
+                location: Default::default(),
                 success: false,
                 ..success()
             },
@@ -541,6 +632,8 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
         .unwrap();
     let reservation = store.reserve_import(&saved.id).await.unwrap();
     let replacement = UpdateProxy {
+        auto_location: None,
+        test: None,
         location: None,
         id: saved.id.clone(),
         revision: saved.revision,
@@ -565,6 +658,7 @@ async fn import_reservation_blocks_proxy_mutations_until_rotated_credentials_are
                 &saved.id,
                 saved.revision,
                 ProxyTestResult {
+                    location: Default::default(),
                     success: false,
                     ..success()
                 },
@@ -639,6 +733,8 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let created = store
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 location: None,
                 name: "Office".to_owned(),
                 proxy: old_proxy.clone(),
@@ -653,6 +749,8 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
         store
             .create(
                 NewProxy {
+                    auto_location: false,
+                    test: None,
                     location: None,
                     name: "Duplicate".to_owned(),
                     proxy: old_proxy.clone()
@@ -681,6 +779,7 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
             &created.id,
             created.revision,
             ProxyTestResult {
+                location: Default::default(),
                 success: false,
                 ..success()
             },
@@ -688,8 +787,8 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
         )
         .await
         .unwrap();
-    assert!(tested.last_test_at.is_some());
-    assert!(!tested.last_test.unwrap().success);
+    assert!(tested.record.last_test_at.is_some());
+    assert!(!tested.record.last_test.unwrap().success);
     for id in ["acct_one", "acct_two"] {
         admin
             .update_account(update(id, selection.clone()), &context)
@@ -721,6 +820,8 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let renamed = store
         .update(
             UpdateProxy {
+                auto_location: None,
+                test: None,
                 id: created.id.clone(),
                 revision: created.revision,
                 location: None,
@@ -739,6 +840,8 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
     let edited = store
         .update(
             UpdateProxy {
+                auto_location: None,
+                test: None,
                 id: created.id.clone(),
                 revision: renamed.revision,
                 location: None,
@@ -825,9 +928,6 @@ async fn legacy_urls_join_one_catalog_entry_and_invalid_batch_rolls_back() {
             .batch_update_accounts(
                 BatchUpdateAccounts {
                     model_access: Default::default(),
-                    turn_state_override: None,
-                    basispoints_enabled: None,
-                    bps_concurrency_limit: None,
                     account_ids: vec!["acct_one".to_owned(), "acct_missing".to_owned()],
                     enabled: Some(false),
                     concurrency_limit: Some(None),
@@ -863,33 +963,26 @@ async fn legacy_urls_join_one_catalog_entry_and_invalid_batch_rolls_back() {
 
 #[tokio::test]
 async fn migration_backfills_shared_proxies_without_changing_credentials() {
-    let Some(database) = TestDatabase::create("proxy_backfill").await else {
+    let Some(database) = TestDatabase::create_through("proxy_backfill", 4).await else {
         return;
     };
-    let accounts = PgProviderAccountRepository::new(database.pool.clone());
+    // 从真实旧 schema 正向升级，不拆卸最新结构，避免遗漏后续增加的引用约束。
     for id in ["acct_one", "acct_two", "acct_direct"] {
-        accounts
-            .insert_provider_account(account(id, id))
-            .await
-            .unwrap();
+        let proxy_url = (id != "acct_direct").then_some("http://user:secret@127.0.0.1:8080/");
+        sqlx::query(
+            "insert into provider_accounts (
+                id,provider_kind,name,authentication_kind,provider_credentials_json,
+                has_refresh_token,credential_observed_at,created_at,updated_at,outbound_proxy_url
+             ) values ($1,'openai',$1,'oauth','{}',false,now(),now(),now(),$2)",
+        )
+        .bind(id)
+        .bind(proxy_url)
+        .execute(&database.pool)
+        .await
+        .unwrap();
     }
-    // 回退到迁移前的结构，随后完整重放同一份位置迁移。
-    sqlx::raw_sql("alter table runtime_settings drop column request_location_json, drop column request_location_enabled;
-        alter table provider_accounts drop column outbound_proxy_id; drop table outbound_proxies;
-        update provider_accounts set outbound_proxy_url = 'http://user:secret@127.0.0.1:8080/' where id <> 'acct_direct';")
-        .execute(&database.pool).await.unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../../../migrations/0005_managed_outbound_proxies.sql"
-    ))
-    .execute(&database.pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../../../migrations/0011_proxy_request_location.sql"
-    ))
-    .execute(&database.pool)
-    .await
-    .unwrap();
+    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
+    let accounts = PgProviderAccountRepository::new(database.pool.clone());
     let inherited = gateway_core::account::ProviderAccountStore::list_accounts(&accounts)
         .await
         .unwrap();
@@ -915,6 +1008,196 @@ async fn migration_backfills_shared_proxies_without_changing_credentials() {
         .await
         .unwrap()
         .is_none()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn automatic_proxy_location_projects_to_accounts_and_guards_refresh_results() {
+    use gateway_core::account::{ProviderAccountStore, RequestLocation};
+    let Some(database) = TestDatabase::create("auto_proxy_location").await else {
+        return;
+    };
+    let proxies = PgProxyRepository::new(database.pool.clone());
+    let accounts = PgProviderAccountRepository::new(database.pool.clone());
+    let manual = RequestLocation::default();
+    let detected: RequestLocation = serde_json::from_value(serde_json::json!({"country":"JP", "region":"Tokyo", "city":"Tokyo", "timezone":"Asia/Tokyo"})).unwrap();
+    let detection = ProxyTestResult {
+        location: ProxyLocationDetection::Detected {
+            location: detected.clone(),
+        },
+        ..success()
+    };
+    let created = proxies
+        .create(
+            NewProxy {
+                name: "Auto".to_owned(),
+                proxy: OutboundProxy::parse("http://127.0.0.1:19090").unwrap(),
+                location: Some(manual.clone()),
+                auto_location: true,
+                test: Some(detection.clone()),
+            },
+            &context(),
+        )
+        .await
+        .unwrap();
+    let mut saved = created.record;
+    assert_eq!(saved.effective_location(), Some(&detected));
+    assert_eq!(saved.location, Some(manual.clone()));
+    for id in ["acct_auto_a", "acct_auto_b"] {
+        let mut input = account(id, id);
+        input.outbound_proxy = Some(saved.proxy.clone());
+        accounts.insert_provider_account(input).await.unwrap();
+    }
+    let initial_accounts = accounts.list_accounts().await.unwrap();
+    let credential_revision = initial_accounts[0].revision();
+    assert!(
+        initial_accounts
+            .iter()
+            .all(|account| account.request_location() == Some(&detected))
+    );
+    let single = accounts
+        .get_account(&ProviderAccountId::new("acct_auto_a").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(single.request_location(), Some(&detected));
+    let original_detection = saved.detected_location.clone();
+    let failed = ProxyTestResult {
+        location: ProxyLocationDetection::Failed {
+            message: "查询失败".to_owned(),
+        },
+        ..success()
+    };
+    saved = proxies
+        .record_test(&saved.id, saved.revision, failed.clone(), &context())
+        .await
+        .unwrap()
+        .record;
+    assert_eq!(saved.detected_location, original_detection);
+    let stale = saved.revision;
+    let changed_ip = ProxyTestResult {
+        exit_ip: Some("203.0.113.77".parse().unwrap()),
+        exit_ipv4: Some("203.0.113.77".parse().unwrap()),
+        ..failed
+    };
+    let before: i64 =
+        sqlx::query_scalar("select config_revision from runtime_settings where id = 1")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let changed = proxies
+        .record_test(&saved.id, saved.revision, changed_ip, &context())
+        .await
+        .unwrap();
+    assert!(changed.config_revision.get() > before as u64);
+    saved = changed.record;
+    assert!(saved.detected_location.is_none());
+    assert!(
+        accounts
+            .list_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .all(|account| account.request_location().is_none())
+    );
+    assert_eq!(
+        proxies
+            .record_test(&saved.id, stale, detection.clone(), &context())
+            .await
+            .unwrap_err()
+            .kind(),
+        AdminStoreErrorKind::Conflict
+    );
+    saved = proxies
+        .record_test(&saved.id, saved.revision, detection.clone(), &context())
+        .await
+        .unwrap()
+        .record;
+    let conflict = ProxyTestResult {
+        location: ProxyLocationDetection::Conflict,
+        ..success()
+    };
+    saved = proxies
+        .record_test(&saved.id, saved.revision, conflict, &context())
+        .await
+        .unwrap()
+        .record;
+    assert!(saved.effective_location().is_none());
+    saved = proxies
+        .record_test(&saved.id, saved.revision, detection, &context())
+        .await
+        .unwrap()
+        .record;
+    saved = proxies
+        .update(
+            UpdateProxy {
+                id: saved.id.clone(),
+                revision: saved.revision,
+                name: saved.name.clone(),
+                proxy: None,
+                auto_location: None,
+                location: None,
+                test: None,
+            },
+            &context(),
+        )
+        .await
+        .unwrap()
+        .record;
+    assert_eq!(saved.effective_location(), Some(&detected));
+    let prior_revision = saved.revision;
+    saved = proxies
+        .update(
+            UpdateProxy {
+                id: saved.id.clone(),
+                revision: saved.revision,
+                name: saved.name.clone(),
+                proxy: Some(OutboundProxy::parse("http://127.0.0.1:19091").unwrap()),
+                auto_location: None,
+                location: None,
+                test: None,
+            },
+            &context(),
+        )
+        .await
+        .unwrap()
+        .record;
+    assert!(saved.effective_location().is_none());
+    assert!(saved.last_test.is_none());
+    assert_eq!(
+        proxies
+            .record_test(&saved.id, prior_revision, success(), &context())
+            .await
+            .unwrap_err()
+            .kind(),
+        AdminStoreErrorKind::Conflict
+    );
+    saved = proxies
+        .update(
+            UpdateProxy {
+                id: saved.id.clone(),
+                revision: saved.revision,
+                name: saved.name.clone(),
+                proxy: None,
+                auto_location: Some(false),
+                location: None,
+                test: None,
+            },
+            &context(),
+        )
+        .await
+        .unwrap()
+        .record;
+    assert_eq!(saved.effective_location(), Some(&manual));
+    assert!(
+        accounts
+            .list_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .all(|account| account.request_location() == Some(&manual)
+                && account.revision() == credential_revision)
     );
     database.close().await;
 }

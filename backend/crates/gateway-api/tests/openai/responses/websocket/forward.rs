@@ -1,15 +1,23 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use axum::http::{StatusCode, header::AUTHORIZATION};
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, future::BoxFuture};
+use gateway_core::engine::middleware::{
+    FrozenMiddlewarePlan, MiddlewareContext, MiddlewareError, MiddlewareNext, MiddlewarePlan,
+    MiddlewareRequest, MiddlewareResponse,
+};
 use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError};
 use gateway_core::error::{
     ClientVisibleUpstreamError, ClientVisibleUpstreamResponse, ProviderError, ProviderErrorKind,
 };
 use gateway_core::event::{ProtocolWireEvent, ProviderEvent, ProviderResponseHeader};
+use gateway_core::runtime::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
 use gateway_core::upstream::{OpaqueUpstreamValue, UpstreamSendState};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -142,6 +150,63 @@ fn upstream_failure(
         )
 }
 
+#[derive(Debug)]
+struct InspectFailureMiddleware(Arc<AtomicUsize>);
+
+impl ExtensionSetLease for InspectFailureMiddleware {
+    fn is_ready(&self) -> bool {
+        true
+    }
+}
+
+impl MiddlewarePlan for InspectFailureMiddleware {
+    fn handle(
+        &self,
+        _: MiddlewareContext,
+        request: MiddlewareRequest,
+        next: MiddlewareNext,
+    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
+        let drops = Arc::clone(&self.0);
+        Box::pin(async move {
+            let response = next.run(request).await?;
+            assert_eq!(
+                drops.load(Ordering::Acquire),
+                0,
+                "next must retain the failed execution until the onion chain returns"
+            );
+            assert_eq!(response.status_code(), 503);
+            Ok(response)
+        })
+    }
+}
+
+#[tokio::test]
+async fn initial_failure_retains_execution_until_request_middleware_returns() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let middleware = Arc::new(InspectFailureMiddleware(Arc::clone(&drops)));
+    let trace = Arc::new(AtomicFailureTrace {
+        initial_errors: Mutex::new(VecDeque::from([EngineError::EmptyRoutingPlan])),
+        session_drops: Arc::clone(&drops),
+        middleware: Some(FrozenMiddlewarePlan::new(
+            middleware.clone(),
+            ExtensionSetReference::new(
+                ExtensionSetId::new("failure-inspector".to_owned()).unwrap(),
+                middleware,
+            ),
+        )),
+        ..AtomicFailureTrace::default()
+    });
+    let (mut socket, _server) = connect(Arc::clone(&trace), vec![]).await;
+    send_request(&mut socket).await;
+    let error = next_error(&mut socket).await;
+    assert_eq!(error["status"], 503);
+    assert_eq!(error["error"]["code"], "no_available_provider");
+    assert_no_duplicate_failure(&mut socket).await;
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    assert!(!trace.committed.load(Ordering::Acquire));
+    socket.close(None).await.unwrap();
+}
+
 #[tokio::test]
 async fn initial_http_or_opening_failure_preserves_status_and_structured_error() {
     // 分类故意都用 Unavailable：不能把收到的 401/429/500 等按网关分类改成 502。
@@ -198,6 +263,54 @@ async fn non_structured_bodies_use_safe_fallback_without_losing_status_or_ids() 
         );
         assert!(!error.to_string().contains("synthetic-private-body-marker"));
     }
+}
+
+#[tokio::test]
+async fn initial_capacity_failure_offers_client_retry_with_upstream_correlation() {
+    for code in ["server_is_overloaded", "slow_down"] {
+        for status in [400, 429, 503] {
+            let provider = upstream_failure(
+                status,
+                b"",
+                vec![
+                    header("x-request-id", b"req_capacity"),
+                    header("retry-after", b"7"),
+                ],
+            )
+            .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                "busy",
+                Some(code.to_owned()),
+                Some("service_unavailable_error".to_owned()),
+            ));
+            let error = initial_error(EngineError::Provider(provider), Vec::new()).await;
+            assert_eq!(error["status"], 503);
+            assert_eq!(error["error"]["code"], "server_error");
+            assert_eq!(error["error"]["message"], "busy");
+            assert_eq!(error["headers"]["x-request-id"], "req_capacity");
+            assert_eq!(error["headers"]["retry-after"], "7");
+        }
+    }
+}
+
+#[tokio::test]
+async fn classified_capacity_error_without_special_code_returns_retryable_websocket_status() {
+    let provider = ProviderError::new(
+        ProviderErrorKind::UpstreamCapacityUnavailable,
+        UpstreamSendState::Sent,
+    )
+    .with_status(400)
+    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+        "Selected model is at capacity. Please try a different model.",
+        None,
+        Some("server_error".to_owned()),
+    ));
+    let error = initial_error(EngineError::Provider(provider), Vec::new()).await;
+    assert_eq!(error["status"], 503);
+    assert_eq!(error["error"]["code"], "upstream_unavailable");
+    assert_eq!(
+        error["error"]["message"],
+        "Selected model is at capacity. Please try a different model."
+    );
 }
 
 #[tokio::test]
@@ -472,4 +585,39 @@ async fn initial_quota_recovery_delivers_client_projection_instead_of_upstream_s
     assert_eq!(error["error"], detail);
     assert_eq!(error["headers"]["x-request-id"], "req-quota-rejected");
     assert!(error["headers"].get("retry-after").is_none());
+}
+
+#[tokio::test]
+async fn initial_continuation_recovery_delivers_the_official_client_replay_signal() {
+    let provider = ProviderError::new(
+        ProviderErrorKind::ContinuationRecoveryRequired,
+        UpstreamSendState::NotSent,
+    )
+    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+        "Previous response was not found. Retrying the full request.",
+        Some("previous_response_not_found".to_owned()),
+        Some("invalid_request_error".to_owned()),
+    ));
+    let error = initial_error(EngineError::Provider(provider), Vec::new()).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["status"], 400);
+    assert_eq!(error["error"]["code"], "previous_response_not_found");
+    assert_eq!(error["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test]
+async fn locally_exhausted_account_pool_sends_one_official_usage_limit_error() {
+    let provider = ProviderError::new(
+        ProviderErrorKind::QuotaExhausted,
+        UpstreamSendState::NotSent,
+    )
+    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+        "All eligible accounts have exhausted their quota.",
+        Some("usage_limit_reached".to_owned()),
+        Some("usage_limit_reached".to_owned()),
+    ));
+    let error = initial_error(EngineError::Provider(provider), Vec::new()).await;
+    assert_eq!(error["status"], 429);
+    assert_eq!(error["error"]["type"], "usage_limit_reached");
+    assert_eq!(error["error"]["code"], "usage_limit_reached");
 }

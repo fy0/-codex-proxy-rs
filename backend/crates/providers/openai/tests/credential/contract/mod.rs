@@ -1,0 +1,2278 @@
+mod capacity;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use futures::executor::block_on;
+use gateway_core::account::{
+    AccountAttemptFeedback, AccountConcurrencyLimit, AccountErrorReason, AccountFeedbackStats,
+    AccountSelectionPolicy, AccountStateChange, AccountWeight, CredentialState, OpaqueProviderData,
+    ProviderAccount, ProviderAccountId, ProviderAccountStore as _, QuotaAccessChange,
+    QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaState, QuotaWriteOutcome,
+    RotationStrategy,
+};
+use gateway_core::engine::continuation::{
+    ContinuationBinding, NativeContinuationPin, PreviousResponseId,
+};
+use gateway_core::engine::{
+    AccountAttemptContext, AttemptContext, ModelRequestId, RequestAttemptContext,
+};
+use gateway_core::lifecycle::CancellationToken;
+use gateway_core::policy::ClientApiKeyId;
+use gateway_core::provider_ports::{
+    ProviderCooldownPort, ProviderLeasePort, ProviderSessionAffinityKey,
+    ProviderSessionAffinityPort,
+};
+use gateway_core::routing::{
+    ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
+};
+use provider_openai::OFFICIAL_CODEX_BASE_URL;
+use provider_openai::credential::{
+    CodexAccountFailure, CodexCookiePolicy, CodexCredentialCodec, CodexCredentialQuotaService,
+    CodexCredentialSelector, CredentialSelectionError, ImportCodexOAuthCredential,
+    SelectCodexCredential,
+};
+use provider_openai::transport::profile::{CodexWireProfile, CodexWireProfileState};
+use secrecy::ExposeSecret;
+use serde_json::json;
+use url::Url;
+
+use crate::support::{
+    MemoryAccountStore, MemoryCooldownPort, MemorySessionAffinity, MemorySessionExclusions,
+    TestLeaseCoordinator, account_policy, profile, secret,
+};
+
+fn create_account(store: &Arc<MemoryAccountStore>, id: &str, token: &str) {
+    block_on(store.seed_oauth_credential(ImportCodexOAuthCredential {
+        account_id: id.to_owned(),
+        name: id.to_owned(),
+        secret: secret(token),
+        verified_account: profile(&format!("chatgpt-{id}")),
+        next_refresh_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+        enabled: true,
+    }));
+}
+
+fn contract_account_scope() -> Arc<FrozenAccountScope> {
+    let provider = ProviderKind::new("openai").expect("provider");
+    let accounts = [
+        "acct_available",
+        "acct_fallback",
+        "acct_fallback_signal",
+        "acct_first",
+        "acct_missing",
+        "acct_original",
+        "acct_original_signal",
+        "acct_other",
+        "acct_primary",
+        "acct_second",
+    ]
+    .into_iter()
+    .map(|id| {
+        (
+            ProviderAccountId::new(id).expect("account"),
+            RuntimeAccount::new(provider.clone(), BTreeSet::new()),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    Arc::new(FrozenAccountScope::new(
+        Arc::new(RuntimeAccountDirectory::new(accounts)),
+        ClientRoutingScope::all_accounts(),
+    ))
+}
+
+fn attempt(excluded_accounts: BTreeSet<ProviderAccountId>) -> AttemptContext {
+    attempt_with_required(excluded_accounts, None)
+}
+
+fn attempt_with_required(
+    excluded_accounts: BTreeSet<ProviderAccountId>,
+    required_account: Option<ProviderAccountId>,
+) -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_codex_contract").expect("request id"),
+            ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(excluded_accounts, required_account, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+fn round_robin_attempt() -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_codex_round_robin").expect("request id"),
+            ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        AccountSelectionPolicy::new(
+            RotationStrategy::RoundRobin,
+            NonZeroU32::new(2).expect("concurrency"),
+            Duration::ZERO,
+        ),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+#[tokio::test]
+async fn smart_reselection_respects_native_and_required_account_boundaries() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_original", "test-original");
+    create_account(&store, "acct_primary", "test-primary");
+    store.set_scheduling("acct_original", None, AccountWeight::new(10).unwrap());
+    store.set_scheduling("acct_primary", None, AccountWeight::new(100).unwrap());
+    let original_id = ProviderAccountId::new("acct_original").unwrap();
+    let provider = ProviderKind::new("openai").unwrap();
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let key = ProviderSessionAffinityKey::try_new("smart-config-test").unwrap();
+    affinity
+        .bind(&provider, &key, &original_id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let selector =
+        selector_with_affinity(&store, Arc::new(TestLeaseCoordinator::default()), affinity);
+    let request_url = Url::parse(OFFICIAL_CODEX_BASE_URL).unwrap();
+    for enabled in [false, true] {
+        for binding in ["soft", "required", "native"] {
+            let continuation = (binding == "native").then(|| {
+                ContinuationBinding::Pinned(NativeContinuationPin::new(
+                    PreviousResponseId::new("client_response"),
+                    PreviousResponseId::new("upstream_response"),
+                    ClientApiKeyId::new("key_codex_contract").unwrap(),
+                    provider.clone(),
+                    original_id.clone(),
+                ))
+            });
+            let attempt = AttemptContext::new(
+                RequestAttemptContext::new(
+                    ModelRequestId::new("req_smart_scope").unwrap(),
+                    ClientApiKeyId::new("key_codex_contract").unwrap(),
+                ),
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(30),
+                account_policy().with_smart_scheduling(
+                    gateway_core::account::SmartSchedulingConfig::new(
+                        [1.0, 0.8, 1.0, 0.5, 1.0, 1.0],
+                        enabled,
+                    )
+                    .unwrap(),
+                ),
+                AccountAttemptContext::new(
+                    BTreeSet::new(),
+                    (binding == "required").then(|| original_id.clone()),
+                    None,
+                )
+                .with_account_scope(contract_account_scope()),
+                continuation,
+                CancellationToken::new(),
+            );
+            let selected = selector
+                .select(&SelectCodexCredential {
+                    upstream_model: "gpt-5.4",
+                    request_url: &request_url,
+                    attempt: &attempt,
+                    session_affinity_key: Some(&key),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                selected.account_id().as_str(),
+                if enabled && binding == "soft" {
+                    "acct_primary"
+                } else {
+                    "acct_original"
+                },
+                "{binding}, switchback={enabled}"
+            );
+        }
+    }
+}
+
+fn selector(
+    store: &Arc<MemoryAccountStore>,
+    leases: Arc<TestLeaseCoordinator>,
+) -> CodexCredentialSelector {
+    selector_with_affinity(store, leases, Arc::new(MemorySessionAffinity::default()))
+}
+
+fn selector_with_affinity(
+    store: &Arc<MemoryAccountStore>,
+    leases: Arc<TestLeaseCoordinator>,
+    session_affinity: Arc<MemorySessionAffinity>,
+) -> CodexCredentialSelector {
+    selector_with_runtime(
+        store,
+        leases,
+        session_affinity,
+        Arc::new(AccountFeedbackStats::default()),
+        Arc::new(MemoryCooldownPort::new()),
+    )
+}
+
+fn selector_with_runtime(
+    store: &Arc<MemoryAccountStore>,
+    leases: Arc<TestLeaseCoordinator>,
+    session_affinity: Arc<MemorySessionAffinity>,
+    account_feedback: Arc<AccountFeedbackStats>,
+    cooldowns: Arc<dyn ProviderCooldownPort>,
+) -> CodexCredentialSelector {
+    let profile = CodexWireProfileState::new(CodexWireProfile {
+        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
+        originator: "codex_cli_rs".to_owned(),
+        codex_version: "0.144.0".to_owned(),
+        desktop_version: "1.0.0".to_owned(),
+        desktop_build: "1".to_owned(),
+        os_type: "linux".to_owned(),
+        os_version: "6.8".to_owned(),
+        arch: "x86_64".to_owned(),
+        terminal: "selector-contract".to_owned(),
+        exact_user_agent: None,
+        residency: None,
+        verified_at: chrono::Utc::now(),
+    });
+    let http = reqwest::Client::builder().build().expect("HTTP client");
+    let quota = Arc::new(CodexCredentialQuotaService::new(
+        store.repository(),
+        profile,
+        http,
+        OFFICIAL_CODEX_BASE_URL.to_owned(),
+        cooldowns,
+        Arc::clone(&leases) as Arc<dyn ProviderLeasePort>,
+        crate::support::runtime_policy(),
+    ));
+    CodexCredentialSelector::new(
+        ProviderKind::new("openai").expect("provider"),
+        store.repository(),
+        leases,
+        session_affinity,
+        Arc::new(MemorySessionExclusions::default()),
+        quota,
+        account_feedback,
+        CodexCookiePolicy::official().expect("official cookie policy"),
+    )
+}
+
+fn persist_credential_state(
+    store: &MemoryAccountStore,
+    account: &ProviderAccount,
+    credential_state: CredentialState,
+) {
+    block_on(store.apply_state_change(AccountStateChange {
+        account_id: account.id().clone(),
+        expected_revision: account.revision(),
+        credential_state,
+        observed_at: SystemTime::now(),
+        error_reason: credential_state.error_reason(),
+        message: None,
+    }))
+    .expect("persist credential state");
+}
+
+fn persist_quota_exhaustion(
+    store: &MemoryAccountStore,
+    account: &ProviderAccount,
+    reset_at: Option<SystemTime>,
+) {
+    block_on(store.apply_quota_access(QuotaAccessChange {
+        account_id: account.id().clone(),
+        expected_revision: account.revision(),
+        state: QuotaState::exhausted(
+            QuotaEvidence::UsageLimitReached,
+            SystemTime::now(),
+            reset_at,
+        ),
+    }))
+    .expect("persist quota exhaustion");
+}
+
+#[test]
+fn codec_persists_tokens_as_plaintext_provider_json() {
+    let encoded = CodexCredentialCodec::encode_new(
+        &secret("literal-access-token"),
+        &profile("chatgpt-literal"),
+        Vec::new(),
+    )
+    .expect("encode plaintext credential");
+    assert_eq!(
+        encoded
+            .expose_to_provider()
+            .get("access_token")
+            .and_then(serde_json::Value::as_str),
+        Some("literal-access-token")
+    );
+    assert_eq!(
+        encoded
+            .expose_to_provider()
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str),
+        Some("rt-literal-access-token")
+    );
+    let mut keys = encoded
+        .expose_to_provider()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "access_token",
+            "cookies",
+            "installation_id",
+            "principal",
+            "refresh_token",
+            "schema_version",
+        ]
+    );
+}
+
+#[test]
+fn codec_reimport_preserves_existing_installation_id_for_the_same_principal() {
+    let existing = CodexCredentialCodec::encode_new(
+        &secret("existing-access-token"),
+        &profile("chatgpt-stable-installation"),
+        Vec::new(),
+    )
+    .expect("existing credential");
+    let incoming = CodexCredentialCodec::encode_new(
+        &secret("incoming-access-token"),
+        &profile("chatgpt-stable-installation"),
+        Vec::new(),
+    )
+    .expect("incoming credential");
+    let existing_id = CodexCredentialCodec::decode_complete(&existing)
+        .expect("existing data")
+        .installation_id()
+        .to_owned();
+
+    let preserved = CodexCredentialCodec::preserve_installation_id(&incoming, &existing)
+        .expect("preserve installation ID");
+    let preserved = CodexCredentialCodec::decode_complete(&preserved).expect("preserved data");
+
+    assert_eq!(preserved.installation_id(), existing_id);
+    assert_eq!(
+        preserved.oauth().expect("OAuth data").access_token,
+        "incoming-access-token"
+    );
+}
+
+#[test]
+fn codec_reimport_preserves_installation_id_without_principal_validation() {
+    let existing = CodexCredentialCodec::encode_new(
+        &secret("existing-access-token"),
+        &profile("chatgpt-existing-principal"),
+        Vec::new(),
+    )
+    .expect("existing credential");
+    let incoming = CodexCredentialCodec::encode_new(
+        &secret("incoming-access-token"),
+        &profile("chatgpt-incoming-principal"),
+        Vec::new(),
+    )
+    .expect("incoming credential");
+
+    let existing_id = CodexCredentialCodec::decode_complete(&existing)
+        .expect("existing data")
+        .installation_id()
+        .to_owned();
+    let preserved = CodexCredentialCodec::preserve_installation_id(&incoming, &existing)
+        .expect("preserve installation ID");
+    let preserved = CodexCredentialCodec::decode_complete(&preserved).expect("preserved data");
+
+    assert_eq!(preserved.installation_id(), existing_id);
+    assert_eq!(
+        preserved.oauth().expect("OAuth data").access_token,
+        "incoming-access-token"
+    );
+}
+
+#[test]
+fn repository_round_trips_plaintext_runtime_secret() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    let runtime = block_on(store.repository().load_runtime_credential(&account))
+        .expect("load runtime credential");
+    let oauth = runtime.authentication.oauth().expect("OAuth credential");
+    assert_eq!(oauth.access_token.expose_secret(), "at-primary");
+    assert_eq!(
+        oauth
+            .refresh_token
+            .as_ref()
+            .expect("refresh token")
+            .expose_secret(),
+        "rt-at-primary"
+    );
+}
+
+#[test]
+fn selector_uses_frozen_global_account_policy_for_lease() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select account");
+
+    assert_eq!(lease.account_id().as_str(), "acct_primary");
+    let installation_id = lease.installation_id();
+    assert_eq!(
+        uuid::Uuid::parse_str(installation_id)
+            .expect("installation UUID")
+            .get_version_num(),
+        4
+    );
+    let runtime = block_on(store.repository().load_runtime_credential(lease.account()))
+        .expect("runtime credential");
+    assert_eq!(runtime.installation_id, installation_id);
+    let requests = leases.requests.lock().expect("lease requests lock");
+    assert_eq!(
+        requests[0].provider_kind(),
+        &ProviderKind::new("openai").expect("provider")
+    );
+    assert_eq!(requests[0].account_id(), lease.account_id());
+    assert_eq!(
+        requests[0].credential_revision(),
+        lease.account().revision()
+    );
+    assert_eq!(requests[0].max_concurrent().get(), 2);
+    assert_eq!(requests[0].request_interval(), Duration::from_millis(10));
+    assert_eq!(requests[0].deadline(), attempt.deadline());
+}
+
+#[test]
+fn selector_uses_the_account_concurrency_override_for_the_redis_lease() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    store.set_scheduling(
+        "acct_primary",
+        Some(AccountConcurrencyLimit::new(7).expect("concurrency override")),
+        AccountWeight::DEFAULT,
+    );
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+
+    block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url:
+            &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect("select account");
+
+    let requests = leases.requests.lock().expect("lease requests lock");
+    assert_eq!(requests[0].max_concurrent().get(), 7);
+}
+
+#[test]
+fn selector_reloads_quota_snapshot_before_acquiring_the_only_lease() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    store.set_scheduling(
+        "acct_primary",
+        Some(AccountConcurrencyLimit::new(1).expect("single slot")),
+        AccountWeight::DEFAULT,
+    );
+    let original = store.account("acct_primary").expect("account");
+    let observed_at = SystemTime::now();
+    block_on(store.apply_quota_access(QuotaAccessChange {
+        account_id: original.id().clone(),
+        expected_revision: original.revision(),
+        state: QuotaState::allowed(observed_at),
+    }))
+    .expect("initial quota observation");
+    store.on_credential_load(Arc::new(move |store, id, count| {
+        Box::pin(async move {
+            if count == 1 {
+                let account = store.account(id.as_str()).expect("account");
+                store
+                    .apply_quota_access(QuotaAccessChange {
+                        account_id: id.clone(),
+                        expected_revision: account.revision(),
+                        state: QuotaState::allowed(observed_at + Duration::from_millis(1)),
+                    })
+                    .await?;
+            }
+            Ok(())
+        })
+    }));
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let selected = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect("a newer allowed observation must not fail selection");
+
+    assert_eq!(selected.account().revision(), original.revision());
+    assert_eq!(
+        selected.account(),
+        &store.account("acct_primary").expect("current account")
+    );
+    assert_eq!(store.credential_loads(), 2);
+    let requests = leases.requests.lock().expect("lease requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "conflicted snapshots must never consume capacity or request interval"
+    );
+    assert_eq!(requests[0].max_concurrent().get(), 1);
+    assert_eq!(requests[0].request_interval(), Duration::from_millis(10));
+}
+
+#[test]
+fn selector_uses_rotated_credentials_after_a_snapshot_conflict() {
+    use gateway_core::account::{CredentialCasOutcome, CredentialCasUpdate, ProviderAccountUpdate};
+
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-old");
+    let old_revision = store.account("acct_primary").expect("account").revision();
+    store.on_credential_load(Arc::new(|store, id, count| {
+        Box::pin(async move {
+            if count == 1 {
+                let account = store.account(id.as_str()).expect("account");
+                let update = CredentialCasUpdate::new(
+                    id.clone(),
+                    account.revision(),
+                    ProviderAccountUpdate {
+                        account_id: id.clone(),
+                        name: account.name().to_owned(),
+                        email: account.email().map(str::to_owned),
+                        plan_type: account.plan_type().map(str::to_owned),
+                    },
+                    CodexCredentialCodec::encode_new(
+                        &secret("at-rotated"),
+                        &profile("chatgpt-acct_primary"),
+                        Vec::new(),
+                    )
+                    .expect("rotated credential"),
+                    account.has_refresh_token(),
+                    account.access_token_expires_at(),
+                    account.next_refresh_at(),
+                )
+                .expect("credential update")
+                .preserving_profile();
+                assert!(matches!(
+                    store.compare_and_swap_credential(update).await?,
+                    CredentialCasOutcome::Updated(_)
+                ));
+            }
+            Ok(())
+        })
+    }));
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let selected = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect("reload rotated credentials");
+
+    assert_eq!(
+        selected.account().revision(),
+        old_revision.next().expect("next revision")
+    );
+    assert_eq!(
+        selected
+            .authentication()
+            .oauth()
+            .expect("OAuth")
+            .access_token
+            .expose_secret(),
+        "at-rotated"
+    );
+    assert_eq!(store.credential_loads(), 2);
+    let requests = leases.requests.lock().expect("lease requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].credential_revision(),
+        selected.account().revision()
+    );
+}
+
+#[test]
+fn selector_snapshot_retry_preserves_frozen_account_scope_and_model_permissions() {
+    let store = Arc::new(MemoryAccountStore::default());
+    for id in ["acct_primary", "acct_other", "acct_outside_scope"] {
+        create_account(&store, id, "at-test");
+    }
+    store.on_credential_load(Arc::new(|store, id, count| {
+        Box::pin(async move {
+            assert_eq!(id.as_str(), "acct_primary");
+            assert_eq!(count, 1);
+            store.set_enabled(id, false).await
+        })
+    }));
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = model_restricted_attempt(None, BTreeSet::new());
+    let error = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "test-luna",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect_err("retry cannot escape the frozen scope or use a denied model");
+
+    assert!(matches!(
+        error,
+        CredentialSelectionError::NoEligibleCredential
+    ));
+    assert!(leases.requests.lock().expect("lease requests").is_empty());
+}
+
+#[test]
+fn selector_does_not_retry_credential_store_unavailability() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    store.on_credential_load(Arc::new(|_, _, _| {
+        Box::pin(async {
+            Err(gateway_core::error::StoreError::new(
+                gateway_core::error::StoreErrorKind::Unavailable,
+            ))
+        })
+    }));
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let error = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect_err("unavailability is not an account snapshot conflict");
+
+    assert!(matches!(error, CredentialSelectionError::Store));
+    assert_eq!(store.credential_loads(), 1);
+    assert!(leases.requests.lock().expect("lease requests").is_empty());
+}
+
+#[test]
+fn selector_does_not_retry_invalid_credential_data() {
+    use gateway_core::account::{NewProviderAccount, PlaintextCredential};
+
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    block_on(store.delete_account(account.id())).expect("replace stored credential");
+    block_on(store.create_account(NewProviderAccount {
+        account,
+        credential: PlaintextCredential::new(serde_json::Map::new()),
+        model_access: None,
+    }))
+    .expect("persist invalid provider data");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let error = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect_err("invalid data is not an account snapshot conflict");
+
+    assert!(matches!(error, CredentialSelectionError::InvalidCredential));
+    assert_eq!(store.credential_loads(), 1);
+    assert!(leases.requests.lock().expect("lease requests").is_empty());
+}
+
+#[test]
+fn selector_round_robin_cursor_advances_across_requests() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let mut selected = Vec::new();
+
+    for _ in 0..4 {
+        let attempt = round_robin_attempt();
+        let lease = block_on(selector.select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &attempt,
+            session_affinity_key: None,
+        }))
+        .expect("select round robin account");
+        selected.push(lease.account_id().as_str().to_owned());
+    }
+
+    assert_eq!(
+        selected,
+        ["acct_first", "acct_second", "acct_first", "acct_second"]
+    );
+}
+
+#[tokio::test]
+async fn selector_should_claim_the_initial_session_account_before_upstream_send() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let provider = ProviderKind::new("openai").expect("provider");
+    let key = ProviderSessionAffinityKey::try_new("initial-claim").expect("affinity key");
+    let request_attempt = attempt(BTreeSet::new());
+
+    let selected = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                .expect("request URL"),
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select initial account");
+
+    assert_eq!(
+        affinity
+            .load(&provider, &key)
+            .await
+            .expect("load claimed affinity"),
+        Some(selected.account_id().clone())
+    );
+}
+
+#[tokio::test]
+async fn record_success_should_not_overwrite_a_newer_session_winner() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let provider = ProviderKind::new("openai").expect("provider");
+    let key = ProviderSessionAffinityKey::try_new("late-success").expect("affinity key");
+    let first = store.account("acct_first").expect("first account");
+    let second = ProviderAccountId::new("acct_second").expect("second account");
+    affinity
+        .bind(&provider, &key, &second, Duration::from_secs(60))
+        .await
+        .expect("seed newer affinity");
+
+    selector
+        .record_success(&first, Some(&key), first.id())
+        .await;
+
+    assert_eq!(
+        affinity
+            .load(&provider, &key)
+            .await
+            .expect("load preserved affinity"),
+        Some(second)
+    );
+}
+
+#[tokio::test]
+async fn selector_should_reuse_and_renew_the_account_bound_to_the_same_session() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let key = ProviderSessionAffinityKey::try_new("same-session").expect("affinity key");
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let first_attempt = attempt(BTreeSet::new());
+    let first = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &first_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select first account");
+    selector
+        .record_success(first.account(), Some(&key), first.account_id())
+        .await;
+    let first_account = first.account_id().clone();
+
+    let second_attempt = attempt(BTreeSet::new());
+    let second = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &second_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select bound account");
+
+    assert_eq!(
+        (
+            second.account_id().as_str(),
+            second.affinity_hit(),
+            second.escape_reason(),
+            second.account_switch(),
+        ),
+        (first_account.as_str(), true, None, false)
+    );
+    assert_eq!(
+        affinity
+            .load(&ProviderKind::new("openai").expect("provider"), &key)
+            .await
+            .expect("load affinity"),
+        Some(first_account)
+    );
+    assert_eq!(
+        affinity.renewal_ttls(),
+        vec![Duration::from_secs(24 * 60 * 60); 2],
+        "successful response and next selection both renew the binding"
+    );
+}
+
+#[tokio::test]
+async fn selector_should_replace_a_busy_affinity_binding_after_the_fallback_succeeds() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    leases
+        .busy_accounts
+        .lock()
+        .expect("busy account lock")
+        .insert(ProviderAccountId::new("acct_first").expect("account"));
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let provider = ProviderKind::new("openai").expect("provider");
+    let key = ProviderSessionAffinityKey::try_new("busy-session").expect("affinity key");
+    let bound = ProviderAccountId::new("acct_first").expect("bound account");
+    affinity
+        .bind(&provider, &key, &bound, Duration::from_secs(60))
+        .await
+        .expect("seed affinity");
+    let selector = selector_with_affinity(&store, leases, Arc::clone(&affinity));
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let request_attempt = attempt(BTreeSet::new());
+
+    let selected = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select fallback account");
+    selector
+        .record_success(selected.account(), Some(&key), &bound)
+        .await;
+
+    assert_eq!(
+        (
+            selected.account_id().as_str(),
+            selected.affinity_hit(),
+            selected.escape_reason(),
+            selected.account_switch(),
+        ),
+        ("acct_second", false, Some("lease_saturated"), true)
+    );
+    assert_eq!(
+        affinity
+            .load(&provider, &key)
+            .await
+            .expect("load replaced affinity"),
+        Some(ProviderAccountId::new("acct_second").expect("second account"))
+    );
+}
+
+#[tokio::test]
+async fn selector_should_prefer_session_over_weight_and_soft_health() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    store.set_scheduling(
+        "acct_second",
+        None,
+        AccountWeight::new(100).expect("weight"),
+    );
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let provider = ProviderKind::new("openai").expect("provider");
+    let key = ProviderSessionAffinityKey::try_new("unhealthy-session").expect("affinity key");
+    let bound = ProviderAccountId::new("acct_first").expect("bound account");
+    affinity
+        .bind(&provider, &key, &bound, Duration::from_secs(60))
+        .await
+        .expect("seed affinity");
+    let account_feedback = Arc::new(AccountFeedbackStats::default());
+    let selector = selector_with_runtime(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        affinity,
+        Arc::clone(&account_feedback),
+        Arc::new(MemoryCooldownPort::new()),
+    );
+    for _ in 0..4 {
+        account_feedback.report(
+            &provider,
+            &bound,
+            AccountAttemptFeedback::Failed {
+                first_output_ms: None,
+            },
+        );
+    }
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let request_attempt = attempt(BTreeSet::new());
+
+    let selected = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select bound account");
+
+    assert_eq!(
+        (
+            selected.account_id().as_str(),
+            selected.affinity_hit(),
+            selected.escape_reason(),
+            selected.account_switch(),
+        ),
+        ("acct_first", true, None, false)
+    );
+}
+
+#[tokio::test]
+async fn selector_should_escape_a_quota_exhausted_affinity_account() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let first = store.account("acct_first").expect("first account");
+    persist_quota_exhaustion(&store, &first, None);
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let provider = ProviderKind::new("openai").expect("provider");
+    let key = ProviderSessionAffinityKey::try_new("quota-session").expect("affinity key");
+    affinity
+        .bind(&provider, &key, first.id(), Duration::from_secs(60))
+        .await
+        .expect("seed affinity");
+    let selector =
+        selector_with_affinity(&store, Arc::new(TestLeaseCoordinator::default()), affinity);
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let request_attempt = attempt(BTreeSet::new());
+
+    let selected = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select fallback account");
+
+    assert_eq!(
+        (
+            selected.account_id().as_str(),
+            selected.affinity_hit(),
+            selected.escape_reason(),
+            selected.account_switch(),
+        ),
+        ("acct_second", false, Some("quota_exhausted"), true)
+    );
+}
+
+#[test]
+fn selector_honors_attempt_local_account_exclusion() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt(BTreeSet::from([
+        ProviderAccountId::new("acct_first").expect("account id")
+    ]));
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select non-excluded account");
+    assert_eq!(lease.account_id().as_str(), "acct_second");
+}
+
+#[test]
+fn selector_uses_only_the_required_account() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let required = ProviderAccountId::new("acct_second").expect("account id");
+    let attempt = attempt_with_required(BTreeSet::new(), Some(required.clone()));
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select required account");
+    assert_eq!(lease.account_id(), &required);
+}
+
+#[test]
+fn unavailable_required_account_never_falls_back() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_available", "at-available");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt_with_required(
+        BTreeSet::new(),
+        Some(ProviderAccountId::new("acct_missing").expect("account id")),
+    );
+    let error =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("missing required account must not fall back");
+    assert!(matches!(
+        error,
+        CredentialSelectionError::NoEligibleCredential
+    ));
+}
+
+#[test]
+fn selector_returns_capacity_error_when_every_redis_lease_is_busy() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    *leases.busy.lock().expect("lease busy lock") = true;
+    let selector = selector(&store, leases);
+    let attempt = attempt(BTreeSet::new());
+    let error =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("busy lease must reject selection");
+    assert!(matches!(
+        error,
+        CredentialSelectionError::CapacityUnavailable {
+            retry_after: Some(_)
+        }
+    ));
+}
+
+#[test]
+fn credential_expired_failure_marks_unified_account_expired() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt(BTreeSet::new());
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select account");
+    block_on(selector.record_failure(
+        lease.account(),
+        CodexAccountFailure::CredentialExpired,
+        None,
+    ))
+    .expect("record credential expiry");
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("account")
+            .credential_state(),
+        CredentialState::Expired
+    );
+    let account = store.account("acct_primary").expect("expired account");
+    assert_eq!(
+        account.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(account.last_error_message(), None);
+}
+
+#[test]
+fn credential_expired_failure_keeps_expired_oauth_for_bounded_refresh_recovery() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let mut expired_profile = profile("chatgpt-acct_primary");
+    expired_profile.access_token_expires_at =
+        Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    block_on(store.seed_oauth_credential(ImportCodexOAuthCredential {
+        account_id: "acct_primary".to_owned(),
+        name: "acct_primary".to_owned(),
+        secret: secret("at-primary"),
+        verified_account: expired_profile,
+        next_refresh_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+        enabled: true,
+    }));
+    let account = store.account("acct_primary").expect("account");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    block_on(selector.record_failure(
+        &account,
+        CodexAccountFailure::CredentialExpired,
+        Some("token_expired".to_owned()),
+    ))
+    .expect("record credential expiry");
+
+    let retained = store
+        .account("acct_primary")
+        .expect("account retained for refresh");
+    assert_eq!(retained.credential_state(), CredentialState::Ready);
+    assert_eq!(
+        retained.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(retained.last_error_message(), Some("token_expired"));
+}
+
+#[test]
+fn rate_limited_failure_records_runtime_cooldown_without_changing_persisted_facts() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let cooldowns = Arc::new(MemoryCooldownPort::new());
+    let selector = selector_with_runtime(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::new(MemorySessionAffinity::default()),
+        Arc::new(AccountFeedbackStats::default()),
+        Arc::clone(&cooldowns) as Arc<dyn ProviderCooldownPort>,
+    );
+    let attempt = attempt(BTreeSet::new());
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select account");
+
+    block_on(selector.record_failure(
+        lease.account(),
+        CodexAccountFailure::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+        },
+        None,
+    ))
+    .expect("record rate-limit failure");
+
+    let account = store.account("acct_primary").expect("account");
+    assert_eq!(account.credential_state(), CredentialState::Ready);
+    assert_eq!(account.quota().access(), QuotaAccessState::Unknown);
+    assert!(
+        store.quota_json("acct_primary").is_none(),
+        "429 must not synthesize quota window"
+    );
+    let cooldown = block_on(cooldowns.read(account.id())).expect("read cooldown");
+    assert!(
+        cooldown.is_some_and(|cooling| cooling.until() > SystemTime::now()),
+        "429 must record a Redis cooldown expiring in the future"
+    );
+}
+
+#[tokio::test]
+async fn usage_limit_exhaustion_marks_quota_exhausted_without_usage_probe() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    selector
+        .record_failure(
+            &account,
+            CodexAccountFailure::UsageLimitExhausted {
+                reset_at: Some(SystemTime::now() + Duration::from_secs(30)),
+            },
+            None,
+        )
+        .await
+        .expect("record usage-limit exhaustion");
+
+    let account = store.account("acct_primary").expect("persisted account");
+    assert_eq!(account.quota().access(), QuotaAccessState::Exhausted);
+    assert_eq!(
+        account.quota().evidence(),
+        Some(QuotaEvidence::UsageLimitReached)
+    );
+    assert_eq!(store.quota_reads(), 0);
+}
+
+#[test]
+fn rate_limited_failure_does_not_downgrade_persisted_quota_exhaustion() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    persist_quota_exhaustion(&store, &account, None);
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    block_on(selector.record_failure(
+        &account,
+        CodexAccountFailure::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+        },
+        None,
+    ))
+    .expect("record rate-limit failure");
+
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("persisted account")
+            .quota()
+            .access(),
+        QuotaAccessState::Exhausted
+    );
+}
+
+#[test]
+fn rate_limited_failure_does_not_consult_stale_quota_snapshot() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    let cooldowns = Arc::new(MemoryCooldownPort::new());
+    let selector = selector_with_runtime(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::new(MemorySessionAffinity::default()),
+        Arc::new(AccountFeedbackStats::default()),
+        Arc::clone(&cooldowns) as Arc<dyn ProviderCooldownPort>,
+    );
+
+    block_on(selector.record_failure(
+        &account,
+        CodexAccountFailure::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+        },
+        None,
+    ))
+    .expect("record rate-limit failure");
+
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("persisted account")
+            .credential_state(),
+        CredentialState::Ready
+    );
+    // 429 临时限流写入 Redis 冷却，不读写 quota JSON。
+    assert_eq!(store.quota_reads(), 0);
+    let cooldown = block_on(cooldowns.read(account.id())).expect("read cooldown");
+    assert!(
+        cooldown.is_some_and(|cooling| cooling.until() > SystemTime::now()),
+        "429 must record a Redis cooldown"
+    );
+}
+
+#[test]
+fn rate_limited_failure_does_not_overwrite_stale_authentication_state() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    persist_credential_state(&store, &account, CredentialState::Invalid);
+    let current = store.account("acct_primary").expect("invalid account");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    block_on(selector.record_failure(
+        &current,
+        CodexAccountFailure::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+        },
+        None,
+    ))
+    .expect("record rate-limit failure");
+
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("persisted account")
+            .credential_state(),
+        CredentialState::Invalid
+    );
+}
+
+#[test]
+fn successful_upstream_response_recovers_non_quota_terminal_states() {
+    for stale in [
+        CredentialState::Expired,
+        CredentialState::Invalid,
+        CredentialState::Banned,
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_primary", "at-primary");
+        let account = store.account("acct_primary").expect("account");
+        persist_credential_state(&store, &account, stale);
+        let current = store.account("acct_primary").expect("stale account");
+        let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+        block_on(selector.record_success(&current, None, current.id()));
+
+        assert_eq!(
+            store
+                .account("acct_primary")
+                .expect("recovered account")
+                .credential_state(),
+            CredentialState::Ready,
+            "stale state {stale:?}",
+        );
+    }
+}
+
+#[test]
+fn elapsed_quota_reset_remains_blocked_until_authoritative_recovery() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    persist_quota_exhaustion(
+        &store,
+        &account,
+        Some(SystemTime::now() - Duration::from_secs(1)),
+    );
+    let blocked = store.account("acct_primary").expect("blocked account");
+    assert!(blocked.quota().is_exhausted());
+    assert_eq!(
+        blocked
+            .status_projection(SystemTime::now(), None)
+            .status
+            .as_str(),
+        "quota_exhausted"
+    );
+}
+
+#[test]
+fn rate_limited_failures_for_distinct_accounts_do_not_conflict() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_first", "at-first");
+    create_account(&store, "acct_second", "at-second");
+    let first = store.account("acct_first").expect("first account");
+    let second = store.account("acct_second").expect("second account");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    block_on(async {
+        let (first_result, second_result) = futures::join!(
+            selector.record_failure(
+                &first,
+                CodexAccountFailure::RateLimited {
+                    retry_after: Some(Duration::from_secs(30)),
+                },
+                None,
+            ),
+            selector.record_failure(
+                &second,
+                CodexAccountFailure::RateLimited {
+                    retry_after: Some(Duration::from_secs(30)),
+                },
+                None,
+            ),
+        );
+        first_result.expect("record first account failure");
+        second_result.expect("record second account failure");
+    });
+
+    assert_eq!(
+        [
+            store
+                .account("acct_first")
+                .expect("persisted first account")
+                .credential_state(),
+            store
+                .account("acct_second")
+                .expect("persisted second account")
+                .credential_state(),
+        ],
+        [CredentialState::Ready; 2]
+    );
+}
+
+#[test]
+fn native_continuation_surfaces_the_original_accounts_quota_status_to_the_coordinator() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_original", "at-original");
+    create_account(&store, "acct_fallback", "at-fallback");
+    let strict_selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let original = store.account("acct_original").expect("original account");
+    block_on(strict_selector.record_failure(&original, CodexAccountFailure::QuotaExhausted, None))
+        .expect("mark original account exhausted");
+
+    let selector = selector_with_runtime(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::new(MemorySessionAffinity::default()),
+        Arc::new(AccountFeedbackStats::default()),
+        Arc::new(MemoryCooldownPort::new()),
+    );
+    let continuation = NativeContinuationPin::new(
+        PreviousResponseId::new("previous-response"),
+        PreviousResponseId::new("upstream-response"),
+        ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ProviderKind::new("openai").expect("provider"),
+        original.id().clone(),
+    );
+    let attempt = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_native_continuation").expect("request id"),
+            ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        Some(ContinuationBinding::Pinned(continuation)),
+        CancellationToken::new(),
+    );
+    let error =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("the selector must surface the unavailable native account");
+
+    assert!(matches!(error, CredentialSelectionError::QuotaExhausted));
+}
+
+#[test]
+fn native_continuation_surfaces_the_original_accounts_quota_signal_to_the_coordinator() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_original_signal", "at-original-signal");
+    create_account(&store, "acct_fallback_signal", "at-fallback-signal");
+    let original = store
+        .account("acct_original_signal")
+        .expect("original account");
+    let quota = json!({
+        "rate_limit": {
+            "allowed": false,
+            "limit_reached": true,
+            "primary_window": {"used_percent": 98}
+        }
+    });
+    let observed_at = SystemTime::now();
+    let outcome = block_on(store.compare_and_swap_quota(QuotaObservation {
+        plan_type: None,
+        account_id: original.id().clone(),
+        expected_revision: original.revision(),
+        quota: OpaqueProviderData::new(quota.as_object().expect("quota object").clone()),
+        observed_at,
+        state: QuotaState::exhausted(QuotaEvidence::ProviderDenied, observed_at, None),
+    }))
+    .expect("persist quota signal");
+    assert!(matches!(outcome, QuotaWriteOutcome::Updated));
+
+    let selector = selector_with_runtime(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::new(MemorySessionAffinity::default()),
+        Arc::new(AccountFeedbackStats::default()),
+        Arc::new(MemoryCooldownPort::new()),
+    );
+    let continuation = NativeContinuationPin::new(
+        PreviousResponseId::new("previous-response"),
+        PreviousResponseId::new("upstream-response"),
+        ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ProviderKind::new("openai").expect("provider"),
+        original.id().clone(),
+    );
+    let attempt = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_native_continuation_signal").expect("request id"),
+            ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        Some(ContinuationBinding::Pinned(continuation)),
+        CancellationToken::new(),
+    );
+    let error =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("the selector must surface the quota-limited native account");
+
+    assert!(matches!(error, CredentialSelectionError::QuotaExhausted));
+}
+
+#[test]
+fn identity_verification_failure_isolates_only_selected_account() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    create_account(&store, "acct_other", "at-other");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt(BTreeSet::new());
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select account");
+
+    block_on(selector.record_failure(
+        lease.account(),
+        CodexAccountFailure::IdentityVerificationRequired,
+        None,
+    ))
+    .expect("record identity verification failure");
+
+    assert_eq!(
+        store
+            .account(lease.account_id().as_str())
+            .expect("selected account")
+            .credential_state(),
+        CredentialState::Invalid
+    );
+    let other = if lease.account_id().as_str() == "acct_primary" {
+        "acct_other"
+    } else {
+        "acct_primary"
+    };
+    assert_eq!(
+        store
+            .account(other)
+            .expect("other account")
+            .credential_state(),
+        CredentialState::Ready
+    );
+}
+
+#[test]
+fn cloudflare_challenge_does_not_change_persisted_account_facts() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt(BTreeSet::new());
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select account");
+
+    block_on(selector.record_failure(
+        lease.account(),
+        CodexAccountFailure::CloudflareChallenge { retry_after: None },
+        None,
+    ))
+    .expect("record challenge");
+
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("account")
+            .credential_state(),
+        CredentialState::Ready
+    );
+    block_on(selector.record_success(lease.account(), None, lease.account_id()));
+}
+
+#[test]
+fn repeated_cloudflare_path_block_marks_only_the_affected_account_invalid() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    create_account(&store, "acct_other", "at-other");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt_with_required(
+        BTreeSet::new(),
+        Some(ProviderAccountId::new("acct_primary").expect("account id")),
+    );
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select account");
+
+    for _ in 0..3 {
+        block_on(selector.record_failure(
+            lease.account(),
+            CodexAccountFailure::CloudflarePathBlocked,
+            None,
+        ))
+        .expect("record path block");
+    }
+
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("affected account")
+            .credential_state(),
+        CredentialState::Invalid
+    );
+    assert_eq!(
+        store
+            .account("acct_other")
+            .expect("other account")
+            .credential_state(),
+        CredentialState::Ready
+    );
+}
+
+#[test]
+fn cloudflare_challenge_expires_provider_owned_cookies_at_cooldown_boundary() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let required = ProviderAccountId::new("acct_primary").expect("account id");
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let first_attempt = attempt_with_required(BTreeSet::new(), Some(required.clone()));
+    let first = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &first_attempt,
+        session_affinity_key: None,
+    }))
+    .expect("select account");
+    block_on(selector.capture_response_cookies(
+        first.account(),
+        &request_url,
+        &["cf_clearance=old; Path=/; Domain=chatgpt.com; Secure; Max-Age=3600".to_owned()],
+    ))
+    .expect("capture cookie");
+
+    let second_attempt = attempt_with_required(BTreeSet::new(), Some(required));
+    let second = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &second_attempt,
+        session_affinity_key: None,
+    }))
+    .expect("select revised account");
+    block_on(selector.record_failure(
+        second.account(),
+        CodexAccountFailure::CloudflareChallenge { retry_after: None },
+        None,
+    ))
+    .expect("record challenge");
+
+    let account = store.account("acct_primary").expect("account");
+    let data = block_on(store.repository().load_complete_data(&account)).expect("credential data");
+    assert_eq!(data.cookies().len(), 1);
+    assert!(data.cookies()[0].expires_at.is_some_and(|expires_at| {
+        let expires_at = SystemTime::from(expires_at);
+        expires_at > SystemTime::now() && expires_at <= SystemTime::now() + Duration::from_secs(120)
+    }));
+}
+
+#[test]
+fn cloudflare_path_block_deletes_provider_owned_cookies() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let required = ProviderAccountId::new("acct_primary").expect("account id");
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let first_attempt = attempt_with_required(BTreeSet::new(), Some(required.clone()));
+    let first = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &first_attempt,
+        session_affinity_key: None,
+    }))
+    .expect("select account");
+    block_on(selector.capture_response_cookies(
+        first.account(),
+        &request_url,
+        &["__cf_bm=old; Path=/; Domain=chatgpt.com; Secure; Max-Age=3600".to_owned()],
+    ))
+    .expect("capture cookie");
+
+    let second_attempt = attempt_with_required(BTreeSet::new(), Some(required));
+    let second = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &second_attempt,
+        session_affinity_key: None,
+    }))
+    .expect("select revised account");
+    block_on(selector.record_failure(
+        second.account(),
+        CodexAccountFailure::CloudflarePathBlocked,
+        None,
+    ))
+    .expect("record path block");
+
+    let account = store.account("acct_primary").expect("account");
+    let data = block_on(store.repository().load_complete_data(&account)).expect("credential data");
+    assert!(data.cookies().is_empty());
+}
+
+#[test]
+fn response_cookie_rotation_returns_a_current_account_for_later_fenced_writes() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let request_url =
+        Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+    let attempt = attempt_with_required(
+        BTreeSet::new(),
+        Some(ProviderAccountId::new("acct_primary").expect("account id")),
+    );
+    let lease = block_on(selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    }))
+    .expect("select account");
+
+    let outcome = block_on(selector.capture_response_cookies(
+        lease.account(),
+        &request_url,
+        &["cf_clearance=updated; Path=/; Domain=chatgpt.com; Secure; Max-Age=3600".to_owned()],
+    ))
+    .expect("capture response cookie");
+    let current = block_on(selector.current_account(lease.account_id())).expect("current account");
+
+    assert_eq!(outcome.credential_revision, Some(current.revision().get()));
+    assert_ne!(current.revision(), lease.account().revision());
+    block_on(selector.record_failure(&current, CodexAccountFailure::QuotaExhausted, None))
+        .expect("record failure with current revision");
+    assert_eq!(
+        store
+            .account("acct_primary")
+            .expect("updated account")
+            .quota()
+            .access(),
+        QuotaAccessState::Exhausted
+    );
+}
+
+fn queued_attempt(timeout: Duration) -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_queue_contract").unwrap(),
+            ClientApiKeyId::new("key_codex_contract").unwrap(),
+        ),
+        NonZeroU32::new(1).unwrap(),
+        SystemTime::now() + Duration::from_secs(5),
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            NonZeroU32::new(2).unwrap(),
+            Duration::ZERO,
+        )
+        .with_queue(gateway_core::concurrency::ConcurrencyQueuePolicy {
+            max_waiting: 1,
+            timeout,
+        })
+        .with_smart_scheduling(
+            gateway_core::account::SmartSchedulingConfig::new(
+                [1.0, 0.8, 1.0, 0.5, 1.0, 1.0],
+                false,
+            )
+            .unwrap(),
+        ),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+#[test]
+fn smart_queue_weight_changes_the_selected_wait_queue() {
+    use futures::FutureExt;
+    for queue_weight in [0.0, 0.2] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_primary", "test-healthy");
+        create_account(&store, "acct_other", "test-unhealthy");
+        let leases = Arc::new(TestLeaseCoordinator::default());
+        *leases.busy.lock().unwrap() = true;
+        let feedback = Arc::new(AccountFeedbackStats::default());
+        for _ in 0..4 {
+            feedback.report(
+                &ProviderKind::new("openai").unwrap(),
+                &ProviderAccountId::new("acct_other").unwrap(),
+                AccountAttemptFeedback::Failed {
+                    first_output_ms: None,
+                },
+            );
+        }
+        let selector = selector_with_runtime(
+            &store,
+            leases,
+            Arc::new(MemorySessionAffinity::default()),
+            feedback,
+            Arc::new(MemoryCooldownPort::new()),
+        );
+        let make_attempt = |required| {
+            AttemptContext::new(
+                RequestAttemptContext::new(
+                    ModelRequestId::new("req_queue_weight").unwrap(),
+                    ClientApiKeyId::new("key_codex_contract").unwrap(),
+                ),
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(5),
+                account_policy()
+                    .with_queue(gateway_core::concurrency::ConcurrencyQueuePolicy {
+                        max_waiting: 2,
+                        timeout: Duration::from_secs(2),
+                    })
+                    .with_smart_scheduling(
+                        gateway_core::account::SmartSchedulingConfig::new(
+                            [0.0, 0.0, 1.0, 0.0, 0.0, queue_weight],
+                            false,
+                        )
+                        .unwrap(),
+                    ),
+                AccountAttemptContext::new(BTreeSet::new(), required, None)
+                    .with_account_scope(contract_account_scope()),
+                None,
+                CancellationToken::new(),
+            )
+        };
+        let head_attempt = make_attempt(Some(ProviderAccountId::new("acct_primary").unwrap()));
+        let next_attempt = make_attempt(None);
+        let url = Url::parse(OFFICIAL_CODEX_BASE_URL).unwrap();
+        let head_request = SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &url,
+            attempt: &head_attempt,
+            session_affinity_key: None,
+        };
+        let next_request = SelectCodexCredential {
+            attempt: &next_attempt,
+            ..head_request
+        };
+        let mut head = Box::pin(selector.select(&head_request));
+        assert!(head.as_mut().now_or_never().is_none());
+        let mut next = Box::pin(selector.select(&next_request));
+        assert!(next.as_mut().now_or_never().is_none());
+        let mut probe = Box::pin(selector.select(&head_request));
+        match probe.as_mut().now_or_never() {
+            Some(Err(CredentialSelectionError::QueueRejected(
+                gateway_core::concurrency::QueueRejection::Full,
+            ))) => assert!(queue_weight > 0.0),
+            None => assert_eq!(queue_weight, 0.0),
+            other => panic!("unexpected queue probe: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn smart_queue_keeps_native_and_required_account_pins_when_another_account_is_free() {
+    use futures::FutureExt;
+    for native in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_original", "test-pinned");
+        create_account(&store, "acct_primary", "test-free");
+        let original = ProviderAccountId::new("acct_original").unwrap();
+        let leases = Arc::new(TestLeaseCoordinator::default());
+        leases
+            .busy_accounts
+            .lock()
+            .unwrap()
+            .insert(original.clone());
+        let selector = selector(&store, leases.clone());
+        let attempt = AttemptContext::new(
+            RequestAttemptContext::new(
+                ModelRequestId::new("req_queue_pin").unwrap(),
+                ClientApiKeyId::new("key_codex_contract").unwrap(),
+            ),
+            NonZeroU32::new(1).unwrap(),
+            SystemTime::now() + Duration::from_secs(5),
+            account_policy()
+                .with_queue(gateway_core::concurrency::ConcurrencyQueuePolicy {
+                    max_waiting: 1,
+                    timeout: Duration::from_secs(2),
+                })
+                .with_smart_scheduling(
+                    gateway_core::account::SmartSchedulingConfig::new(
+                        [1.0, 0.8, 1.0, 0.5, 10.0, 10.0],
+                        true,
+                    )
+                    .unwrap(),
+                ),
+            AccountAttemptContext::new(BTreeSet::new(), (!native).then(|| original.clone()), None)
+                .with_account_scope(contract_account_scope()),
+            native.then(|| {
+                ContinuationBinding::Pinned(NativeContinuationPin::new(
+                    PreviousResponseId::new("client_response"),
+                    PreviousResponseId::new("upstream_response"),
+                    ClientApiKeyId::new("key_codex_contract").unwrap(),
+                    ProviderKind::new("openai").unwrap(),
+                    original.clone(),
+                ))
+            }),
+            CancellationToken::new(),
+        );
+        let url = Url::parse(OFFICIAL_CODEX_BASE_URL).unwrap();
+        let request = SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &url,
+            attempt: &attempt,
+            session_affinity_key: None,
+        };
+        let mut pending = Box::pin(selector.select(&request));
+        assert!(pending.as_mut().now_or_never().is_none());
+        leases.busy_accounts.lock().unwrap().clear();
+        assert_eq!(block_on(pending).unwrap().account_id(), &original);
+        assert!(
+            leases
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.account_id() == &original)
+        );
+    }
+}
+
+#[test]
+fn account_queue_is_bounded_and_resumes_after_capacity_is_released() {
+    use futures::FutureExt;
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-queue-test");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    *leases.busy.lock().unwrap() = true;
+    let selector = selector(&store, leases.clone());
+    let attempt = queued_attempt(Duration::from_secs(2));
+    let url = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    };
+    let mut first = Box::pin(selector.select(&request));
+    assert!(first.as_mut().now_or_never().is_none());
+    let rejected = block_on(selector.select(&request)).unwrap_err();
+    assert!(matches!(
+        rejected,
+        CredentialSelectionError::QueueRejected(gateway_core::concurrency::QueueRejection::Full)
+    ));
+    *leases.busy.lock().unwrap() = false;
+    let selected = block_on(first).unwrap();
+    assert_eq!(selected.account_id().as_str(), "acct_primary");
+}
+
+#[test]
+fn account_queue_cancellation_releases_wait_capacity_and_timeout_is_local() {
+    use futures::FutureExt;
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-queue-test");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    *leases.busy.lock().unwrap() = true;
+    let selector = selector(&store, leases.clone());
+    let attempt = queued_attempt(Duration::from_millis(20));
+    let url = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    };
+    let mut cancelled = Box::pin(selector.select(&request));
+    assert!(cancelled.as_mut().now_or_never().is_none());
+    drop(cancelled);
+    let timeout = block_on(selector.select(&request)).unwrap_err();
+    assert!(matches!(
+        timeout,
+        CredentialSelectionError::QueueRejected(gateway_core::concurrency::QueueRejection::Timeout)
+    ));
+    *leases.busy.lock().unwrap() = false;
+    assert!(block_on(selector.select(&request)).is_ok());
+}
+
+fn model_restricted_attempt(
+    required: Option<ProviderAccountId>,
+    excluded: BTreeSet<ProviderAccountId>,
+) -> AttemptContext {
+    use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
+    let provider = ProviderKind::new("openai").expect("provider");
+    let scope = Arc::new(FrozenAccountScope::new(
+        Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+            (
+                ProviderAccountId::new("acct_primary").expect("plus"),
+                RuntimeAccount::new(provider.clone(), BTreeSet::new()).with_model_access(
+                    AccountModelAccess::new(
+                        AccountModelAccessMode::Allowlist,
+                        vec!["test-luna".to_owned()],
+                    )
+                    .expect("plus policy"),
+                ),
+            ),
+            (
+                ProviderAccountId::new("acct_other").expect("pro"),
+                RuntimeAccount::new(provider, BTreeSet::new()).with_model_access(
+                    AccountModelAccess::new(
+                        AccountModelAccessMode::Denylist,
+                        vec!["test-luna".to_owned()],
+                    )
+                    .expect("pro policy"),
+                ),
+            ),
+        ]))),
+        ClientRoutingScope::all_accounts(),
+    ));
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_model_access").expect("request"),
+            ClientApiKeyId::new("key_codex_contract").expect("key"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(excluded, required, None).with_account_scope(scope),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+#[test]
+fn model_access_routes_luna_and_other_models_to_separate_accounts_even_with_unknown_catalog() {
+    for (model, expected) in [("test-luna", "acct_primary"), ("gpt-5.4", "acct_other")] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_primary", "at-primary");
+        create_account(&store, "acct_other", "at-other");
+        let leases = Arc::new(TestLeaseCoordinator::default());
+        let selector = selector(&store, leases);
+        let attempt = model_restricted_attempt(None, BTreeSet::new());
+        let lease = block_on(selector.select(&SelectCodexCredential {
+            upstream_model: model,
+            request_url:
+                &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+            attempt: &attempt,
+            session_affinity_key: None,
+        }))
+        .expect("eligible account");
+        assert_eq!(lease.account_id().as_str(), expected);
+    }
+}
+
+#[test]
+fn model_access_never_escapes_to_a_forbidden_account_after_failover_or_required_binding() {
+    for (required, excluded) in [
+        (
+            None,
+            BTreeSet::from([ProviderAccountId::new("acct_other").expect("pro")]),
+        ),
+        (
+            Some(ProviderAccountId::new("acct_primary").expect("plus")),
+            BTreeSet::new(),
+        ),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_primary", "at-primary");
+        create_account(&store, "acct_other", "at-other");
+        let leases = Arc::new(TestLeaseCoordinator::default());
+        let selector = selector(&store, Arc::clone(&leases));
+        let attempt = model_restricted_attempt(required, excluded);
+        let result = block_on(selector.select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url:
+                &Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("URL"),
+            attempt: &attempt,
+            session_affinity_key: None,
+        }));
+        assert!(matches!(
+            result,
+            Err(CredentialSelectionError::NoEligibleCredential)
+        ));
+        assert!(
+            leases.requests.lock().expect("requests").is_empty(),
+            "forbidden accounts must not acquire a lease"
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_access_overrides_soft_session_affinity() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    create_account(&store, "acct_other", "at-other");
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let key = ProviderSessionAffinityKey::try_new("model-access-session").expect("key");
+    affinity
+        .bind(
+            &ProviderKind::new("openai").expect("provider"),
+            &key,
+            &ProviderAccountId::new("acct_primary").expect("account"),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("bind");
+    let selector =
+        selector_with_affinity(&store, Arc::new(TestLeaseCoordinator::default()), affinity);
+    let attempt = model_restricted_attempt(None, BTreeSet::new());
+    let lease = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                .expect("URL"),
+            attempt: &attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("select pro");
+    assert_eq!(lease.account_id().as_str(), "acct_other");
+}
+
+#[test]
+fn model_access_queue_waits_for_allowed_account_without_using_free_forbidden_account() {
+    use futures::FutureExt;
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    create_account(&store, "acct_other", "at-other");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let allowed = ProviderAccountId::new("acct_other").expect("allowed account");
+    leases.busy_accounts.lock().unwrap().insert(allowed.clone());
+    let selector = selector(&store, leases.clone());
+    let restricted = model_restricted_attempt(None, BTreeSet::new());
+    let attempt = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_model_queue").unwrap(),
+            ClientApiKeyId::new("key_codex_contract").unwrap(),
+        ),
+        NonZeroU32::new(1).unwrap(),
+        SystemTime::now() + Duration::from_secs(5),
+        account_policy().with_queue(gateway_core::concurrency::ConcurrencyQueuePolicy {
+            max_waiting: 1,
+            timeout: Duration::from_secs(2),
+        }),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(restricted.account_scope().unwrap().clone()),
+        None,
+        CancellationToken::new(),
+    );
+    let url = Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap();
+    let request = SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &url,
+        attempt: &attempt,
+        session_affinity_key: None,
+    };
+    let mut pending = Box::pin(selector.select(&request));
+    assert!(pending.as_mut().now_or_never().is_none());
+    leases.busy_accounts.lock().unwrap().clear();
+    assert_eq!(block_on(pending).unwrap().account_id(), &allowed);
+    assert!(
+        leases
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|lease| lease.account_id() == &allowed)
+    );
+}
+
+#[test]
+fn legacy_oauth_defaults_to_websocket_and_reimport_preserves_http() {
+    use gateway_core::account::PlaintextCredential;
+    use provider_openai::credential::ResponsesTransport;
+    let incoming = CodexCredentialCodec::encode_new(
+        &secret("new-token"),
+        &profile("chatgpt-transport"),
+        Vec::new(),
+    )
+    .unwrap();
+    let mut legacy = incoming.expose_to_provider().clone();
+    legacy.remove("transport");
+    let runtime = CodexCredentialCodec::decode(&PlaintextCredential::new(legacy.clone())).unwrap();
+    assert_eq!(runtime.transport, ResponsesTransport::PreferWebsocket);
+    legacy.insert("transport".to_owned(), json!("http"));
+    let existing = PlaintextCredential::new(legacy);
+    let preserved = CodexCredentialCodec::preserve_installation_id(&incoming, &existing).unwrap();
+    assert_eq!(
+        CodexCredentialCodec::decode(&preserved).unwrap().transport,
+        ResponsesTransport::Http
+    );
+}

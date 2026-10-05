@@ -138,17 +138,27 @@ fn json_value_as_string(value: &Value) -> Option<String> {
     }
 }
 
-/// 从 `response.completed` 旁路提取 response ID，供连接池记录续接能力。
+/// 从正常完成或官方中断终态旁路提取 response ID，供连接池记录续接能力。
 ///
 /// 该值不参与客户端 wire 的可交付性判断；无法读取时只是不记录连接内续接状态。
 pub fn websocket_response_completed_id(value: &Value) -> Option<String> {
-    if value.get("type").and_then(Value::as_str) != Some("response.completed") {
+    if value.get("type").and_then(Value::as_str) != Some("response.completed")
+        && !websocket_response_is_interrupted(value)
+    {
         return None;
     }
     value
         .pointer("/response/id")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+pub(crate) fn websocket_response_is_interrupted(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("response.incomplete")
+        && value
+            .pointer("/response/incomplete_details/reason")
+            .and_then(Value::as_str)
+            == Some("interrupted")
 }
 
 /// 生成 Responses WebSocket payload 审计快照。
@@ -223,6 +233,35 @@ pub fn websocket_response_create_payload_text(
     serde_json::to_string(&ResponseCreateFrame {
         body: request.body(),
     })
+}
+
+pub(crate) fn websocket_response_create_payload_len(
+    request: &CodexResponsesRequest,
+) -> Result<usize, serde_json::Error> {
+    struct ByteCount(usize);
+
+    impl std::io::Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("WebSocket payload size overflow"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = ByteCount(0);
+    serde_json::to_writer(
+        &mut count,
+        &ResponseCreateFrame {
+            body: request.body(),
+        },
+    )?;
+    Ok(count.0)
 }
 
 fn websocket_payload_keys(request: &CodexResponsesRequest) -> Vec<String> {

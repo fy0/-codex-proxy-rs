@@ -3,7 +3,7 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ExecutionService, ExecutionSession,
     StartExecution, StartProviderExecution, StartedExecution,
 };
+use gateway_core::engine::middleware::{FrozenMiddlewarePlan, MiddlewareHeader};
 use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError, ModelRequestId};
 use gateway_core::error::{
     ClientVisibleUpstreamError, ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind,
@@ -41,15 +42,24 @@ use serde_json::{Value, json};
 use gateway_api::openai::responses::{collect_execution_response, stream_execution_response};
 use tower::ServiceExt;
 
+use crate::openai::middleware::{RequestMiddleware, ResponseFrameAction};
 use crate::openai::{
     api_router, authenticated_client_for_provider, authenticated_client_with_min_versions,
 };
+
+fn responses_middleware() -> RequestMiddleware {
+    RequestMiddleware {
+        expected_operation: Some(OperationKind::Generate),
+        ..RequestMiddleware::default()
+    }
+}
 
 #[derive(Default)]
 struct Trace {
     events: Mutex<Vec<&'static str>>,
     client_statuses: Mutex<Vec<u16>>,
     cancelled: AtomicBool,
+    detached_finalizations: AtomicUsize,
 }
 
 impl Trace {
@@ -81,6 +91,10 @@ impl Trace {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn detached_finalizations(&self) -> usize {
+        self.detached_finalizations.load(Ordering::Acquire)
     }
 }
 
@@ -335,6 +349,11 @@ impl ExecutionSession for FakeSession {
         &self.response_headers
     }
 
+    fn discard_pending_delivery(&mut self) -> Result<(), EngineError> {
+        self.trace.push("discard");
+        Ok(())
+    }
+
     fn commit_downstream(
         &mut self,
         client_status_code: Option<u16>,
@@ -372,6 +391,9 @@ impl ExecutionSession for FakeSession {
 
     fn detach_finalize(mut self: Box<Self>) -> BoxFuture<'static, ()> {
         Box::pin(async move {
+            self.trace
+                .detached_finalizations
+                .fetch_add(1, Ordering::AcqRel);
             if !self.finalized {
                 let _ = self.next_event().await;
             }
@@ -499,6 +521,72 @@ async fn http_request_with_body(
         .expect("context response");
     let observed = observed.lock().expect("context capture lock").clone();
     (response, observed)
+}
+
+#[tokio::test]
+async fn http_requests_should_honor_stream_preference() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    for stream in [None, Some(false), Some(true)] {
+        let trace = Arc::new(Trace::default());
+        let streaming = stream == Some(true);
+        let session = if streaming {
+            FakeSession::streaming(
+                Arc::clone(&trace),
+                vec![
+                    NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+                    NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
+                    NextStep::FinalizeSuccess,
+                ],
+            )
+        } else {
+            FakeSession::buffered(Arc::clone(&trace), vec![started(), completed()])
+        };
+        let execution = Arc::new(SessionExecution {
+            client: authenticated_client_for_provider("sk_stream_test", "openai"),
+            session: Mutex::new(Some(Box::new(session))),
+            middleware: None,
+        });
+        let mut body = json!({"model": "model-a", "input": "hello"});
+        if let Some(stream) = stream {
+            body["stream"] = json!(stream);
+        }
+        let response = crate::openai::api_router_with_admin_and_execution(admin.clone(), execution)
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header(AUTHORIZATION, "Bearer sk_stream_test")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "stream={stream:?}");
+        assert_eq!(
+            response.headers()[CONTENT_TYPE],
+            if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+            "stream={stream:?}",
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if streaming {
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(body.contains("event: response.completed\n"));
+            assert!(body.ends_with("data: [DONE]\n\n"));
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({
+                    "id": "resp_test", "model": "public-model", "status": "completed", "output": []
+                }),
+            );
+            assert_eq!(trace.snapshot(), vec!["collect", "commit"]);
+        }
+        assert!(!trace.is_cancelled());
+    }
 }
 
 #[tokio::test]
@@ -835,6 +923,278 @@ async fn streaming_encodes_first_frame_before_commit_and_http_delivery() {
     std::mem::forget(response);
 }
 
+#[tokio::test]
+async fn streaming_dropped_unknown_initial_batch_discards_without_committing() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    let trace = Arc::new(Trace::default());
+    let dropped_raw = Bytes::from_static(
+        b"event: response.future_metadata\ndata: {\"type\":\"response.future_metadata\",\"dropped\":true}\n\n",
+    );
+    let dropped = ProviderEvent::wire(
+        ProtocolWireEvent::raw_sse("openai", dropped_raw.clone()).expect("future SSE event"),
+    );
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery_provider(
+                dropped,
+                CommitRequirement::CommitBeforeDelivery,
+            )),
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
+            NextStep::FinalizeSuccess,
+        ],
+    );
+    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
+        ResponseFrameAction::Drop,
+        ResponseFrameAction::Continue,
+        ResponseFrameAction::Continue,
+        ResponseFrameAction::Continue,
+    ]));
+
+    let response =
+        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read filtered SSE response");
+
+    assert!(!body.as_ref().starts_with(dropped_raw.as_ref()));
+    assert!(!String::from_utf8_lossy(&body).contains("\"dropped\":true"));
+    assert!(String::from_utf8_lossy(&body).contains("response.created"));
+    assert!(String::from_utf8_lossy(&body).contains("response.completed"));
+    assert!(body.as_ref().ends_with(b"data: [DONE]\n\n"));
+    assert_eq!(trace.client_statuses(), vec![200]);
+    assert_eq!(
+        trace.snapshot(),
+        vec![
+            "next_event",
+            "discard",
+            "next_event",
+            "commit",
+            "next_event",
+            "next_end"
+        ]
+    );
+    assert_eq!(trace.detached_finalizations(), 0);
+}
+
+#[tokio::test]
+async fn streaming_modified_sse_rejects_out_of_order_tool_events_without_replay() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    let trace = Arc::new(Trace::default());
+    let added = super::openai_wire_event(
+        vec![],
+        "response.output_item.added",
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "item_tool", "type": "function_call",
+                "call_id": "call_tool", "name": "lookup"
+            }
+        }),
+    );
+    let out_of_order = encode_sse_event(
+        "response.function_call_arguments.done",
+        &json!({
+            "type": "response.function_call_arguments.done",
+            "output_index": 0, "item_id": "item_tool",
+            "call_id": "call_tool", "arguments": "{}"
+        })
+        .to_string(),
+    );
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::Event(delivery_provider(
+                added,
+                CommitRequirement::AlreadyCommitted,
+            )),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
+        ResponseFrameAction::Continue,
+        ResponseFrameAction::Replace(Bytes::from(out_of_order)),
+    ]));
+
+    let response =
+        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read rejected transformed SSE");
+    tokio::task::yield_now().await;
+    let body = String::from_utf8(body.to_vec()).expect("gateway SSE is UTF-8");
+
+    assert_eq!(body.matches("event: response.created").count(), 1);
+    assert!(!body.contains("response.function_call_arguments.done"));
+    assert!(body.contains("response.failed"));
+    assert!(body.ends_with("data: [DONE]\n\n"));
+    assert!(trace.is_cancelled());
+    assert_eq!(
+        trace.snapshot(),
+        vec!["next_event", "commit", "next_event", "cancel_finalize"]
+    );
+}
+
+#[tokio::test]
+async fn streaming_modified_sse_rejects_wrong_tool_association_without_replay() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    let trace = Arc::new(Trace::default());
+    let added = super::openai_wire_event(
+        vec![],
+        "response.output_item.added",
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": "item_tool", "type": "function_call",
+                "call_id": "call_tool", "name": "lookup"
+            }
+        }),
+    );
+    let arguments = super::openai_wire_event(
+        vec![],
+        "response.function_call_arguments.delta",
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0, "item_id": "item_tool",
+            "call_id": "call_tool", "delta": "{}"
+        }),
+    );
+    let wrong_association = encode_sse_event(
+        "response.function_call_arguments.delta",
+        &json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0, "item_id": "item_tool",
+            "call_id": "call_other", "delta": "{}"
+        })
+        .to_string(),
+    );
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::Event(delivery_provider(
+                added,
+                CommitRequirement::AlreadyCommitted,
+            )),
+            NextStep::Event(delivery_provider(
+                arguments,
+                CommitRequirement::AlreadyCommitted,
+            )),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
+        ResponseFrameAction::Continue,
+        ResponseFrameAction::Continue,
+        ResponseFrameAction::Replace(Bytes::from(wrong_association)),
+    ]));
+
+    let response =
+        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read rejected transformed SSE");
+    tokio::task::yield_now().await;
+    let body = String::from_utf8(body.to_vec()).expect("gateway SSE is UTF-8");
+
+    assert!(!body.contains("call_other"));
+    assert!(body.contains("response.failed"));
+    assert_eq!(body.matches("event: response.created").count(), 1);
+    assert_eq!(
+        trace.snapshot(),
+        vec![
+            "next_event",
+            "commit",
+            "next_event",
+            "next_event",
+            "cancel_finalize"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_modified_sse_cannot_change_terminal_classification() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    let trace = Arc::new(Trace::default());
+    let incomplete = encode_sse_event(
+        "response.incomplete",
+        &json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_test", "model": "public-model",
+                "status": "incomplete", "output": []
+            }
+        })
+        .to_string(),
+    );
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+            NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
+            NextStep::FinalizeSuccess,
+        ],
+    );
+    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
+        ResponseFrameAction::Continue,
+        ResponseFrameAction::Replace(Bytes::from(incomplete)),
+    ]));
+
+    let response =
+        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read terminal-class rejection");
+    tokio::task::yield_now().await;
+    let body = String::from_utf8(body.to_vec()).expect("gateway SSE is UTF-8");
+
+    assert!(body.contains("response.failed"));
+    assert!(!body.contains("response.incomplete"));
+    assert_eq!(body.matches("event: response.created").count(), 1);
+    assert_eq!(
+        trace.snapshot(),
+        vec!["next_event", "commit", "next_event", "next_end"]
+    );
+    assert!(!trace.is_cancelled());
+}
+
+#[tokio::test]
+async fn streaming_terminal_drop_fails_before_commit() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery(
+                completed(),
+                CommitRequirement::CommitBeforeDelivery,
+            )),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let middleware =
+        Arc::new(responses_middleware().with_response_actions(vec![ResponseFrameAction::Drop]));
+
+    let response =
+        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read middleware error response");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).expect("middleware error JSON")["error"]["code"],
+        "middleware_failed"
+    );
+    assert_eq!(trace.client_statuses(), vec![502]);
+    assert!(trace.is_cancelled());
+    assert!(!trace.snapshot().contains(&"commit"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn streaming_should_keep_alive_during_silent_compaction_without_restarting_execution() {
     let trace = Arc::new(Trace::default());
@@ -922,6 +1282,7 @@ async fn dropping_stream_during_keepalive_should_cancel_and_finalize_execution()
         trace.snapshot(),
         vec!["next_event", "commit", "wait_event", "cancel_finalize"]
     );
+    assert_eq!(trace.detached_finalizations(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1396,6 +1757,7 @@ async fn streaming_success_should_emit_terminal_event_and_done_marker() {
             "next_end",
         ]
     );
+    assert_eq!(trace.detached_finalizations(), 0);
 }
 
 #[tokio::test]
@@ -1464,6 +1826,7 @@ async fn streaming_completed_event_without_finalized_execution_should_fail_close
             "cancel_finalize"
         ]
     );
+    assert_eq!(trace.detached_finalizations(), 1);
 }
 
 #[tokio::test]
@@ -1698,7 +2061,7 @@ async fn streaming_upstream_error_event_should_be_translated_to_response_failed_
                     "status": "failed",
                     "error": {
                         "type": "service_unavailable_error",
-                        "code": "server_is_overloaded",
+                        "code": "server_error",
                         "message": "Our servers are currently overloaded. Please try again later.",
                         "param": null,
                         "future_error_field": {"keep": true}
@@ -1713,6 +2076,45 @@ async fn streaming_upstream_error_event_should_be_translated_to_response_failed_
             true,
         )
     );
+}
+
+#[tokio::test]
+async fn streaming_capacity_error_after_commit_offers_client_retry() {
+    for code in ["server_is_overloaded", "slow_down"] {
+        let trace = Arc::new(Trace::default());
+        let error = ProviderError::new(
+            ProviderErrorKind::UpstreamCapacityUnavailable,
+            UpstreamSendState::Sent,
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            "busy",
+            Some(code.to_owned()),
+            Some("service_unavailable_error".to_owned()),
+        ));
+        let session = FakeSession::streaming(
+            Arc::clone(&trace),
+            vec![
+                NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+                NextStep::Error(EngineError::Provider(error)),
+            ],
+        );
+        let response = stream_execution_response(Box::new(session), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("SSE body");
+        let text = std::str::from_utf8(&body).expect("UTF-8");
+        let events = parse_sse_events(text).expect("SSE");
+        let failed = events
+            .iter()
+            .find(|event| event.event.as_deref() == Some("response.failed"))
+            .expect("failed event");
+        let failed: Value = serde_json::from_str(&failed.data).expect("JSON");
+        assert_eq!(failed["response"]["error"]["code"], "server_error");
+        assert_eq!(failed["response"]["error"]["message"], "busy");
+        assert_eq!(text.matches("event: response.failed").count(), 1);
+        assert!(text.ends_with("data: [DONE]\n\n"));
+    }
 }
 
 #[tokio::test]
@@ -1872,6 +2274,261 @@ async fn buffered_response_commits_only_after_complete_json_is_encoded() {
 }
 
 #[tokio::test]
+async fn buffered_response_collects_completed_output_items_without_rewriting_streams() {
+    let message = json!({
+        "id": "msg_test", "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "完整文本", "annotations": []}],
+        "future_item_field": {"keep": true}
+    });
+    let tool = json!({
+        "id": "fc_test", "type": "function_call", "call_id": "call_test",
+        "name": "calculate", "arguments": "{\"value\":42}", "status": "completed"
+    });
+    let terminal = json!({
+        "id": "resp_test", "status": "completed", "output": [],
+        "usage": {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
+        "future_terminal_field": {"keep": true}
+    });
+    let mut events = vec![provider_event_for_fact(started())];
+    // 完成顺序不决定输出顺序；相同完成项重传不能产生重复正文。
+    for (index, item) in [(1, &tool), (0, &message), (0, &message)] {
+        events.push(super::openai_wire_event(
+            vec![],
+            "response.output_item.done",
+            json!({"type": "response.output_item.done", "output_index": index, "item": item}),
+        ));
+    }
+    events.push(super::openai_wire_event(
+        vec![],
+        "response.completed",
+        json!({"type": "response.completed", "response": terminal}),
+    ));
+    let mut sse = super::OpenAiResponsesEncoder::new();
+    let mut websocket = super::OpenAiResponsesEncoder::new();
+    for event in &events {
+        let frames = sse.push_sse(event);
+        let messages = websocket.push_websocket(event);
+        let wire = event.wire_event().unwrap();
+        let parsed = parse_sse_events(std::str::from_utf8(&frames.concat()).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&parsed[0].data).unwrap(),
+            *wire.data()
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&messages[0]).unwrap(),
+            *wire.data()
+        );
+    }
+    assert_eq!(sse.finish().unwrap(), terminal);
+    assert_eq!(websocket.finish().unwrap(), terminal);
+
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::buffered_provider(Arc::clone(&trace), events);
+    let response = collect_execution_response(Box::new(session)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let mut expected = terminal;
+    expected["output"] = json!([message, tool]);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+    assert_eq!(trace.snapshot(), ["collect", "commit"]);
+    assert!(!trace.is_cancelled());
+}
+
+#[tokio::test]
+async fn buffered_response_keeps_authoritative_terminal_and_supports_omitted_output() {
+    let item = json!({"id": "rs_test", "type": "reasoning", "encrypted_content": "opaque"});
+    for (terminal, expected_output) in [
+        (
+            json!({"id": "resp_test", "output": [{"type": "future", "result": "terminal"}]}),
+            json!([{"type": "future", "result": "terminal"}]),
+        ),
+        (
+            json!({"id": "resp_test", "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}),
+            json!([item]),
+        ),
+    ] {
+        let trace = Arc::new(Trace::default());
+        let event_type = if terminal["status"] == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        let session = FakeSession::buffered_provider(
+            Arc::clone(&trace),
+            vec![
+                provider_event_for_fact(started()),
+                super::openai_wire_event(
+                    vec![],
+                    "response.output_item.done",
+                    json!({"output_index": 0, "item": item}),
+                ),
+                super::openai_wire_event(vec![], event_type, json!({"response": terminal})),
+            ],
+        );
+        let response = collect_execution_response(Box::new(session)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut expected = terminal;
+        expected["output"] = expected_output;
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+        assert_eq!(trace.snapshot(), ["collect", "commit"]);
+    }
+}
+
+#[tokio::test]
+async fn buffered_response_rejects_incomplete_or_conflicting_output_items_before_commit() {
+    let item =
+        json!({"id": "msg_test", "type": "message", "content": [{"text": "private-output"}]});
+    for done_items in [
+        vec![json!({"output_index": 1, "item": item})],
+        vec![json!({"output_index": u64::MAX, "item": item})],
+        vec![json!({"output_index": -1, "item": item})],
+        vec![json!({"item": item})],
+        vec![json!({"output_index": 0, "item": []})],
+        vec![
+            json!({"output_index": 0, "item": item}),
+            json!({"output_index": 0, "item": {"type": "different"}}),
+        ],
+    ] {
+        let trace = Arc::new(Trace::default());
+        let mut events = vec![provider_event_for_fact(started())];
+        events.extend(
+            done_items
+                .into_iter()
+                .map(|item| super::openai_wire_event(vec![], "response.output_item.done", item)),
+        );
+        events.push(super::openai_wire_event(
+            vec![],
+            "response.completed",
+            json!({"response": {"id": "resp_test", "output": []}}),
+        ));
+        let response = collect_execution_response(Box::new(FakeSession::buffered_provider(
+            Arc::clone(&trace),
+            events,
+        )))
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_upstream_response");
+        assert!(!String::from_utf8_lossy(&body).contains("private-output"));
+        assert!(!trace.snapshot().contains(&"commit"));
+        assert!(trace.is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn buffered_response_never_merges_items_from_a_different_wire_response() {
+    for conflicting_event in [
+        json!({"output_index": 0, "item": {"type": "message", "content": [{"text": "earlier-response"}]}}),
+        json!({"response_id": "foreign-response", "output_index": 0, "item": {"type": "message", "content": [{"text": "foreign-response"}]}}),
+    ] {
+        let trace = Arc::new(Trace::default());
+        let terminal_id = if conflicting_event.get("response_id").is_some() {
+            "resp_test"
+        } else {
+            "new-response"
+        };
+        let terminal = json!({"id": terminal_id, "status": "completed", "output": []});
+        let events = vec![
+            provider_event_for_fact(started()),
+            super::openai_wire_event(vec![], "response.output_item.done", conflicting_event),
+            super::openai_wire_event(vec![], "response.completed", json!({"response": terminal})),
+        ];
+        let response = collect_execution_response(Box::new(FakeSession::buffered_provider(
+            Arc::clone(&trace),
+            events,
+        )))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), terminal);
+        assert_eq!(trace.snapshot(), ["collect", "commit"]);
+    }
+}
+
+#[tokio::test]
+async fn buffered_response_middleware_replaces_body_and_preserves_explicit_headers() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::buffered(Arc::clone(&trace), vec![started(), completed()]);
+    let middleware = Arc::new(
+        responses_middleware()
+            .with_response_actions(vec![ResponseFrameAction::Replace(
+            Bytes::from_static(
+                b"{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[],\"future_policy_field\":true}",
+            ),
+            )])
+            .with_response_headers(vec![
+                MiddlewareHeader::new("x-policy-result", Bytes::from_static(b"replaced")),
+                MiddlewareHeader::new("authorization", Bytes::from_static(b"plugin-value")),
+            ]),
+    );
+
+    let response =
+        response_with_middleware(&admin, "openai", session, false, Some(middleware)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-policy-result"], "replaced");
+    assert_eq!(response.headers()[AUTHORIZATION], "plugin-value");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read policy JSON body");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).expect("policy response JSON"),
+        json!({
+            "id": "resp_test", "status": "completed", "output": [],
+            "future_policy_field": true
+        })
+    );
+    assert_eq!(trace.client_statuses(), vec![200]);
+    assert_eq!(trace.snapshot(), vec!["collect", "commit"]);
+}
+
+#[tokio::test]
+async fn buffered_response_middleware_rejects_missing_terminal_fields_or_duplicate_tool_identity() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
+    for replacement in [
+        json!({"id": "resp_test", "output": []}),
+        json!({"id": "resp_test", "status": "incomplete", "output": []}),
+        json!({
+            "id": "resp_test", "status": "completed", "output": [
+                {
+                    "id": "item_a", "type": "function_call", "call_id": "call_same",
+                    "name": "first", "arguments": "{}"
+                },
+                {
+                    "id": "item_b", "type": "function_call", "call_id": "call_same",
+                    "name": "second", "arguments": "{}"
+                }
+            ]
+        }),
+    ] {
+        let trace = Arc::new(Trace::default());
+        let session = FakeSession::buffered(Arc::clone(&trace), vec![started(), completed()]);
+        let middleware = Arc::new(responses_middleware().with_response_actions(vec![
+            ResponseFrameAction::Replace(Bytes::from(
+                serde_json::to_vec(&replacement).expect("replacement JSON"),
+            )),
+        ]));
+
+        let response =
+            response_with_middleware(&admin, "openai", session, false, Some(middleware)).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read middleware error response");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("middleware error JSON")["error"]["code"],
+            "middleware_failed"
+        );
+        assert_eq!(trace.client_statuses(), vec![502]);
+        assert!(!trace.snapshot().contains(&"commit"));
+        assert!(trace.is_cancelled());
+        assert_eq!(trace.snapshot(), vec!["collect", "cancel_finalize"]);
+    }
+}
+
+#[tokio::test]
 async fn buffered_response_forwards_long_ordinary_provider_header_values() {
     let trace = Arc::new(Trace::default());
     let model = format!("gpt-{}", "x".repeat(512));
@@ -1968,10 +2625,12 @@ const MODEL_REQUEST_ID: &str = "req_model_correlation";
 struct SessionExecution {
     client: AuthenticatedClient,
     session: Mutex<Option<Box<dyn ExecutionSession>>>,
+    middleware: Option<FrozenMiddlewarePlan>,
 }
 
 #[tokio::test]
 async fn chatgpt_remote_responses_should_only_skip_missing_desktop_versions() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
     for name in [
         "codex_chatgpt_android_remote",
         "codex_chatgpt_ios_remote",
@@ -2001,6 +2660,7 @@ async fn chatgpt_remote_responses_should_only_skip_missing_desktop_versions() {
                         NextStep::FinalizeSuccess,
                     ],
                 )))),
+                middleware: None,
             });
             let mut request = Request::post("/v1/responses")
                 .header(AUTHORIZATION, "Bearer sk_remote_test")
@@ -2010,18 +2670,20 @@ async fn chatgpt_remote_responses_should_only_skip_missing_desktop_versions() {
             if let Some(version) = version {
                 request = request.header("version", version);
             }
-            let response = api_router(execution.clone())
-                .await
-                .oneshot(
-                    request
-                        .body(Body::from(
-                            json!({"model": "model-a", "input": "synthetic", "stream": true})
-                                .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = crate::openai::api_router_with_admin_and_execution(
+                admin.clone(),
+                execution.clone(),
+            )
+            .oneshot(
+                request
+                    .body(Body::from(
+                        json!({"model": "model-a", "input": "synthetic", "stream": true})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
             let status = response.status();
             let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             if let Some(code) = expected_code {
@@ -2089,6 +2751,13 @@ impl ExecutionService for SessionExecution {
         true
     }
 
+    fn middleware_plan(
+        &self,
+        _: &gateway_core::engine::execution::PreparedRootExecution,
+    ) -> Option<FrozenMiddlewarePlan> {
+        self.middleware.clone()
+    }
+
     fn start(
         &self,
         request: StartExecution,
@@ -2112,16 +2781,27 @@ impl ExecutionService for SessionExecution {
 }
 
 async fn response(
+    admin: &gateway_admin::AdminServices,
     provider: &str,
     session: FakeSession,
     streaming: bool,
 ) -> axum::response::Response {
+    response_with_middleware(admin, provider, session, streaming, None).await
+}
+
+async fn response_with_middleware(
+    admin: &gateway_admin::AdminServices,
+    provider: &str,
+    session: FakeSession,
+    streaming: bool,
+    middleware: Option<Arc<RequestMiddleware>>,
+) -> axum::response::Response {
     let execution = Arc::new(SessionExecution {
         client: authenticated_client_for_provider("sk_correlation_test", provider),
         session: Mutex::new(Some(Box::new(session))),
+        middleware: middleware.map(|middleware| middleware.frozen()),
     });
-    api_router(execution)
-        .await
+    crate::openai::api_router_with_admin_and_execution(admin.clone(), execution)
         .oneshot(
             Request::post("/v1/responses")
                 .header(AUTHORIZATION, "Bearer sk_correlation_test")
@@ -2159,6 +2839,7 @@ fn failed_session(streaming: bool, error: EngineError) -> FakeSession {
 
 #[tokio::test]
 async fn response_ids_are_provider_and_client_independent() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
     let cases: &[(&[(&str, &str)], &str)] = &[
         (&[], MODEL_REQUEST_ID),
         (&[("x-request-id", "upstream-primary")], "upstream-primary"),
@@ -2202,7 +2883,7 @@ async fn response_ids_are_provider_and_client_independent() {
                     FakeSession::buffered(trace, vec![started(), completed()])
                 }
                 .with_response_headers(headers(upstream_headers));
-                let response = response(provider, session, streaming).await;
+                let response = response(&admin, provider, session, streaming).await;
                 assert_eq!(response.status(), StatusCode::OK);
                 assert_eq!(response.headers()["x-request-id"], *expected);
                 assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
@@ -2219,6 +2900,7 @@ async fn response_ids_are_provider_and_client_independent() {
 
 #[tokio::test]
 async fn failure_ids_prefer_the_actual_error_over_session_headers() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
     for provider in ["openai", "xai"] {
         for streaming in [false, true] {
             for upstream_headers in [vec![], headers(&[("x-oai-request-id", "actual-error")])] {
@@ -2241,7 +2923,7 @@ async fn failure_ids_prefer_the_actual_error_over_session_headers() {
                         );
                 let session = failed_session(streaming, EngineError::Provider(error))
                     .with_response_headers(headers(&[("x-request-id", "earlier-session")]));
-                let response = response(provider, session, streaming).await;
+                let response = response(&admin, provider, session, streaming).await;
                 assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
                 assert_eq!(response.headers()["x-request-id"], expected);
                 assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
@@ -2257,7 +2939,7 @@ async fn failure_ids_prefer_the_actual_error_over_session_headers() {
                     ("x-request-id", "earlier-session"),
                     ("x-oai-request-id", "earlier-alias"),
                 ]));
-            let response = response(provider, session, streaming).await;
+            let response = response(&admin, provider, session, streaming).await;
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
             assert_eq!(response.headers()["x-request-id"], "body-read-error");
             assert_eq!(response.headers().get_all("x-request-id").iter().count(), 1);
@@ -2269,6 +2951,7 @@ async fn failure_ids_prefer_the_actual_error_over_session_headers() {
 
 #[tokio::test]
 async fn local_execution_failure_uses_the_existing_model_id() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
     for provider in ["openai", "xai"] {
         for streaming in [false, true] {
             let session =
@@ -2277,7 +2960,7 @@ async fn local_execution_failure_uses_the_existing_model_id() {
                     ("x-oai-request-id", "opening-alias"),
                     ("x-codex-turn-state", "retained-turn-state"),
                 ]));
-            let response = response(provider, session, streaming).await;
+            let response = response(&admin, provider, session, streaming).await;
             assert_eq!(response.headers()["x-request-id"], MODEL_REQUEST_ID);
             assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
             assert!(response.headers().get("x-oai-request-id").is_none());
@@ -2291,6 +2974,7 @@ async fn local_execution_failure_uses_the_existing_model_id() {
 
 #[tokio::test]
 async fn compressed_http_request_above_default_limit_should_reach_execution_after_increase() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
     let body = json!({"model": "model-a", "input": "x".repeat(64 * 1024 * 1024)}).to_string();
     let compressed = super::request::encode_body("zstd", body.as_bytes());
     for limit in [64 * 1024 * 1024, 128 * 1024 * 1024] {
@@ -2303,8 +2987,7 @@ async fn compressed_http_request_above_default_limit_should_reach_execution_afte
                 limit,
             ),
         });
-        let response = api_router(execution)
-            .await
+        let response = crate::openai::api_router_with_admin_and_execution(admin.clone(), execution)
             .oneshot(
                 Request::post("/v1/responses")
                     .header(AUTHORIZATION, "Bearer sk_context_test")

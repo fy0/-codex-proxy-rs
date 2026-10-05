@@ -145,7 +145,7 @@ pub(crate) async fn serve_router(
     let listener = bind_listener(&format!("{host}:{port}"))
         .await
         .map_err(ServeError::Bind)?;
-    tracing::info!(target: "gateway_startup", host, port, "网关开始监听");
+    tracing::info!(target: "gateway_startup", pid = std::process::id(), host, port, "网关开始监听");
 
     let shutdown_cancellation = cancellation.clone();
     let shutdown_connections = Arc::clone(&connections);
@@ -194,31 +194,44 @@ pub(crate) async fn serve_router(
     Ok(())
 }
 
-async fn wait_for_shutdown(cancellation: &CancellationToken) {
+pub(crate) async fn wait_for_shutdown(cancellation: &CancellationToken) {
+    let interrupt = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "sigint",
+            Err(error) => {
+                tracing::warn!(target: "gateway_shutdown", %error, "中断信号监听失败");
+                "interrupt_listener_error"
+            }
+        }
+    };
     #[cfg(unix)]
-    {
+    let reason = {
         let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
         match terminate {
             Ok(mut terminate) => {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
-                    () = cancellation.cancelled() => return,
+                    reason = interrupt => reason,
+                    signal = terminate.recv() => {
+                        if signal.is_some() { "sigterm" } else { "terminate_listener_closed" }
+                    }
+                    () = cancellation.cancelled() => "internal_cancellation",
                 }
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(target: "gateway_shutdown", %error, "终止信号监听注册失败，仅监听中断与内部关闭请求");
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    () = cancellation.cancelled() => return,
+                    reason = interrupt => reason,
+                    () = cancellation.cancelled() => "internal_cancellation",
                 }
             }
         }
-    }
+    };
     #[cfg(not(unix))]
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        () = cancellation.cancelled() => return,
-    }
+    let reason = tokio::select! {
+        reason = interrupt => reason,
+        () = cancellation.cancelled() => "internal_cancellation",
+    };
+    tracing::info!(target: "gateway_shutdown", pid = std::process::id(), reason, "收到关闭请求");
     cancellation.cancel();
 }
 

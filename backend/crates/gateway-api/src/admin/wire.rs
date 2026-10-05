@@ -110,6 +110,8 @@ impl AdminErrorCode {
     pub const CONFLICT: Self = Self(40901);
     /// 登录尝试过多。
     pub const TOO_MANY_LOGIN_ATTEMPTS: Self = Self(42901);
+    /// 管理操作请求过于频繁。
+    pub const RATE_LIMITED: Self = Self(42902);
     /// 设置持久化失败。
     pub const SETTINGS_PERSIST: Self = Self(50000);
     /// 未分类内部错误。
@@ -232,6 +234,11 @@ const TOO_MANY_LOGIN_ATTEMPTS: AdminErrorSpec = AdminErrorSpec::new(
     AdminErrorCode::TOO_MANY_LOGIN_ATTEMPTS,
     "登录尝试过多，请稍后重试",
 );
+const RATE_LIMITED: AdminErrorSpec = AdminErrorSpec::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    AdminErrorCode::RATE_LIMITED,
+    "请求过于频繁，请稍后重试",
+);
 const INTERNAL: AdminErrorSpec = AdminErrorSpec::new(
     StatusCode::INTERNAL_SERVER_ERROR,
     AdminErrorCode::INTERNAL,
@@ -306,6 +313,10 @@ impl AdminError {
         Self::from_spec(TOO_MANY_LOGIN_ATTEMPTS)
     }
 
+    pub fn rate_limited() -> Self {
+        Self::from_spec(RATE_LIMITED)
+    }
+
     pub fn forbidden() -> Self {
         Self::new(StatusCode::FORBIDDEN, AdminErrorCode::FORBIDDEN, "无权访问")
     }
@@ -351,7 +362,7 @@ pub(crate) fn map_admin_service_error(error: gateway_admin::model::AdminError) -
         AdminErrorKind::Unauthorized => AdminError::session_required(),
         AdminErrorKind::NotFound => AdminError::not_found(error.message()),
         AdminErrorKind::Conflict => AdminError::conflict(error.message()),
-        AdminErrorKind::RateLimited => AdminError::too_many_login_attempts(),
+        AdminErrorKind::RateLimited => AdminError::rate_limited(),
         AdminErrorKind::BadGateway => AdminError::bad_gateway(),
         AdminErrorKind::UpstreamResultUnknown => AdminError::upstream_result_unknown(),
         AdminErrorKind::Unavailable => AdminError::service_unavailable(),
@@ -361,7 +372,8 @@ pub(crate) fn map_admin_service_error(error: gateway_admin::model::AdminError) -
     // 认证与未知内部异常仍使用固定提示，不放行底层诊断或任意 500 消息。
     if matches!(
         error.kind(),
-        AdminErrorKind::BadGateway
+        AdminErrorKind::RateLimited
+            | AdminErrorKind::BadGateway
             | AdminErrorKind::UpstreamResultUnknown
             | AdminErrorKind::Unavailable
     ) && !error.message().trim().is_empty()

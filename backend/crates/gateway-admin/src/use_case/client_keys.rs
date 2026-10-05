@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use gateway_core::policy::ClientApiKeyId;
-use gateway_core::runtime::SnapshotControl;
+use gateway_core::{
+    engine::budget::ClientBudgetStatus, policy::ClientApiKeyId, runtime::SnapshotControl,
+};
 use rand_core::{OsRng, RngCore as _};
 use uuid::Uuid;
 
@@ -13,9 +14,10 @@ use crate::{
     model::{
         AdminError, MutationContext,
         client_keys::{
-            ClientKeyCursorValue, ClientKeyListQuery, ClientKeyMutation, ClientKeyPage,
-            ClientKeySecret, ClientKeySortField, CreateClientKey, CreatedClientKey,
-            DeleteClientKey, NewClientKey, SetClientKeyEnabled, UpdateClientKey,
+            ClientKeyBudgetMutationOrigin, ClientKeyCursorValue, ClientKeyListQuery,
+            ClientKeyMutation, ClientKeyPage, ClientKeyRecord, ClientKeySecret, ClientKeySortField,
+            CreateClientKey, CreatedClientKey, DeleteClientKey, NewClientKey, ResetClientKeyBudget,
+            SetClientKeyEnabled, UpdateClientKey, UpdateClientKeyBudgetLimits,
         },
     },
     ports::store::{AdminStoreError, AdminStoreErrorKind, ClientKeyStore},
@@ -26,6 +28,7 @@ use super::{map_store_error, publish_committed};
 /// API 消费的 Client Key 管理服务。
 #[async_trait]
 pub trait ClientKeyService: Send + Sync {
+    async fn get(&self, id: &ClientApiKeyId) -> Result<ClientKeyRecord, AdminError>;
     async fn list(&self, query: ClientKeyListQuery) -> Result<ClientKeyPage, AdminError>;
     async fn reveal(&self, id: &ClientApiKeyId) -> Result<ClientKeySecret, AdminError>;
     async fn create(
@@ -48,22 +51,91 @@ pub trait ClientKeyService: Send + Sync {
         context: &MutationContext,
         command: DeleteClientKey,
     ) -> Result<ClientKeyMutation, AdminError>;
+    async fn budget(&self, id: &ClientApiKeyId) -> Result<ClientBudgetStatus, AdminError>;
+    async fn update_budget_limits(
+        &self,
+        context: &MutationContext,
+        command: UpdateClientKeyBudgetLimits,
+        origin: ClientKeyBudgetMutationOrigin,
+    ) -> Result<ClientApiKeyId, AdminError>;
+    async fn reset_budget(
+        &self,
+        context: &MutationContext,
+        command: ResetClientKeyBudget,
+        origin: ClientKeyBudgetMutationOrigin,
+    ) -> Result<ClientApiKeyId, AdminError>;
 }
 
 pub(crate) struct DefaultClientKeyService {
+    providers: crate::ports::provider::ProviderAdminRegistry,
     store: Arc<dyn ClientKeyStore>,
     snapshot: Arc<dyn SnapshotControl>,
 }
 
 impl DefaultClientKeyService {
     #[must_use]
-    pub(crate) fn new(store: Arc<dyn ClientKeyStore>, snapshot: Arc<dyn SnapshotControl>) -> Self {
-        Self { store, snapshot }
+    pub(crate) fn new(
+        store: Arc<dyn ClientKeyStore>,
+        snapshot: Arc<dyn SnapshotControl>,
+        providers: crate::ports::provider::ProviderAdminRegistry,
+    ) -> Self {
+        Self {
+            store,
+            snapshot,
+            providers,
+        }
     }
 }
 
 #[async_trait]
 impl ClientKeyService for DefaultClientKeyService {
+    async fn get(&self, id: &ClientApiKeyId) -> Result<ClientKeyRecord, AdminError> {
+        self.store
+            .get_client_key(id)
+            .await
+            .map_err(|error| map_store_error(error, "client API key"))?
+            .ok_or_else(|| AdminError::not_found("Client API Key 不存在"))
+    }
+
+    async fn budget(&self, id: &ClientApiKeyId) -> Result<ClientBudgetStatus, AdminError> {
+        self.get(id).await.map(|key| key.budget)
+    }
+
+    async fn update_budget_limits(
+        &self,
+        context: &MutationContext,
+        command: UpdateClientKeyBudgetLimits,
+        origin: ClientKeyBudgetMutationOrigin,
+    ) -> Result<ClientApiKeyId, AdminError> {
+        if command.daily_limit_usd.is_none() && command.weekly_limit_usd.is_none() {
+            return Err(AdminError::invalid("至少指定一个预算上限"));
+        }
+        let id = command.id.clone();
+        if let Some(revision) = self
+            .store
+            .update_client_key_budget_limits(command, origin, context)
+            .await
+            .map_err(|error| map_store_error(error, "client API key"))?
+        {
+            publish_committed(self.snapshot.as_ref(), revision).await?;
+        }
+        Ok(id)
+    }
+
+    async fn reset_budget(
+        &self,
+        context: &MutationContext,
+        command: ResetClientKeyBudget,
+        origin: ClientKeyBudgetMutationOrigin,
+    ) -> Result<ClientApiKeyId, AdminError> {
+        let id = command.id.clone();
+        self.store
+            .reset_client_key_budget(command, origin, context)
+            .await
+            .map_err(|error| map_store_error(error, "client API key"))?;
+        Ok(id)
+    }
+
     async fn list(&self, query: ClientKeyListQuery) -> Result<ClientKeyPage, AdminError> {
         validate_cursor(&query)?;
         self.store
@@ -85,19 +157,24 @@ impl ClientKeyService for DefaultClientKeyService {
         context: &MutationContext,
         command: CreateClientKey,
     ) -> Result<CreatedClientKey, AdminError> {
+        for (provider, profile) in &command.request_profile_overrides {
+            self.providers
+                .require(provider)
+                .and_then(|provider| provider.preview_client_profile(profile))
+                .map_err(|error| super::map_provider_error(error, "client profile"))?;
+        }
         let id = ClientApiKeyId::new(format!("key_{}", Uuid::now_v7().simple()))
             .map_err(|_| AdminError::internal("创建 Client API Key ID 失败"))?;
         let plaintext = if let Some(key) = command.custom_key {
             key.expose_for_auth().to_owned()
         } else {
-            let mut bytes = [0_u8; 32];
-            OsRng.fill_bytes(&mut bytes);
-            format!("sk_{}", URL_SAFE_NO_PAD.encode(bytes))
+            generate_key()
         };
         let (config_revision, record) = self
             .store
             .create_client_key(
                 NewClientKey {
+                    request_profile_overrides: command.request_profile_overrides,
                     id,
                     name: command.name,
                     label: command.label,
@@ -122,6 +199,14 @@ impl ClientKeyService for DefaultClientKeyService {
         context: &MutationContext,
         command: UpdateClientKey,
     ) -> Result<ClientKeyMutation, AdminError> {
+        for (provider, profile) in &command.request_profile_override_updates {
+            if let Some(profile) = profile {
+                self.providers
+                    .require(provider)
+                    .and_then(|provider| provider.preview_client_profile(profile))
+                    .map_err(|error| super::map_provider_error(error, "client profile"))?;
+            }
+        }
         let id = command.id.clone();
         let (config_revision, record) = self
             .store
@@ -213,4 +298,11 @@ fn validate_cursor(query: &ClientKeyListQuery) -> Result<(), AdminError> {
     } else {
         Err(AdminError::invalid("Client API Key 游标不合法"))
     }
+}
+
+// 原生与插件创建共用相同的密钥生成规则。
+pub(super) fn generate_key() -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!("sk_{}", URL_SAFE_NO_PAD.encode(bytes))
 }

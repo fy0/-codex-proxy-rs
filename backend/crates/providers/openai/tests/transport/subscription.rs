@@ -1,5 +1,6 @@
 use super::{CodexBackendClient, CodexRequestContext, test_wire_profile};
 use serde_json::json;
+use std::time::Duration;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path, query_param},
@@ -61,7 +62,6 @@ async fn subscription_failures_are_unknown_without_retry() {
         ResponseTemplate::new(204),
         ResponseTemplate::new(401),
         ResponseTemplate::new(403),
-        ResponseTemplate::new(404),
         ResponseTemplate::new(429),
         ResponseTemplate::new(500),
         ResponseTemplate::new(200).set_body_string("not json"),
@@ -72,6 +72,12 @@ async fn subscription_failures_are_unknown_without_retry() {
         ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(6)),
     ] {
         let server = MockServer::start().await;
+        let official_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&official_server)
+            .await;
         Mock::given(method("GET"))
             .respond_with(response)
             .expect(1)
@@ -79,6 +85,7 @@ async fn subscription_failures_are_unknown_without_retry() {
             .await;
         assert!(
             client(&server.uri())
+                .with_official_base_url(official_server.uri())
                 .fetch_subscription(
                     CodexRequestContext::auxiliary("Bearer fixture", Some("account"), "req", None),
                     "account"
@@ -145,4 +152,96 @@ async fn subscription_preserves_configured_backend_path_prefix() {
             .await
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn subscription_should_fallback_to_official_endpoint_when_custom_upstream_returns_404() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/backend-api/subscriptions"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/backend-api/subscriptions"))
+        .and(query_param("account_id", "account"))
+        .and(header("chatgpt-account-id", "account"))
+        .and(header("authorization", "Bearer fixture"))
+        .and(header("origin", official_server.uri()))
+        .and(header("referer", format!("{}/", official_server.uri())))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "active_until": "2026-10-01T00:00:00Z"
+        })))
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let test_client = client(&format!("{}/backend-api", custom_server.uri()))
+        .with_official_base_url(format!("{}/backend-api", official_server.uri()));
+
+    let result = test_client
+        .fetch_subscription(
+            CodexRequestContext::auxiliary("Bearer fixture", Some("account"), "req", None),
+            "account",
+        )
+        .await;
+
+    assert!(result.is_some());
+}
+
+#[tokio::test]
+async fn subscription_official_not_found_should_not_repeat_the_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert!(
+        client(&format!("{}/backend-api/", server.uri()))
+            .with_official_base_url(format!("{}/backend-api", server.uri()))
+            .fetch_subscription(
+                CodexRequestContext::auxiliary("Bearer fixture", Some("account"), "req", None),
+                "account",
+            )
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn subscription_fallback_should_share_the_five_second_budget() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_delay(Duration::from_secs(3)))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"active_until": "2026-10-01T00:00:00Z"}))
+                .set_delay(Duration::from_secs(3)),
+        )
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let test_client = client(&custom_server.uri()).with_official_base_url(official_server.uri());
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        test_client.fetch_subscription(
+            CodexRequestContext::auxiliary("Bearer fixture", Some("account"), "req", None),
+            "account",
+        ),
+    )
+    .await
+    .expect("the original request and fallback must share a five-second deadline");
+    assert!(result.is_none());
 }

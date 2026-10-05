@@ -27,7 +27,7 @@ use crate::transport::profile::{
 };
 use crate::transport::{CodexWebSocketPool, build_reqwest_client};
 
-pub use config::{CodexWireProfileConfig, OpenAiConfig, OpenAiConfigError};
+pub use config::{OpenAiConfig, OpenAiConfigError};
 pub use provider::{
     CodexProvider, CodexProviderConfigError, CodexProviderTransport, OFFICIAL_CODEX_BASE_PATH,
     OFFICIAL_CODEX_BASE_URL, openai_failure_affects_account_score,
@@ -62,8 +62,21 @@ pub async fn initialize(
     let session_exclusions = ports.session_exclusions();
     let account_feedback = ports.account_feedback();
     let runtime_policy = ports.runtime_policy();
+    let initial_profile = transport::profile::selection::ClientProfileSelection::default()
+        .document()
+        .map_err(|_| OpenAiInitializeError::RuntimePolicy)?;
+    let configured_profile = runtime_policy
+        .initialize_request_profile(&provider_kind, initial_profile)
+        .await
+        .map_err(|_| OpenAiInitializeError::RuntimePolicy)?;
+    transport::profile::identity::RequestProfileSelection::parse(&configured_profile)
+        .map_err(|_| OpenAiInitializeError::RuntimePolicy)?;
     let credential_state = ports.credential_state();
-    let profile = config.wire_profile_state();
+    let profile =
+        transport::profile::CodexWireProfileState::new(transport::profile::CodexWireProfile {
+            residency: config.residency,
+            ..Default::default()
+        });
     let artifact_cache =
         CodexArtifactProfileCache::new(provider_kind.clone(), ports.artifact_profiles());
     let configured_build = profile.snapshot().desktop_build.parse::<u64>().ok();
@@ -95,15 +108,30 @@ pub async fn initialize(
         verified_profile,
     ));
     let desktop_release_status = desktop_release.status();
+    let cli_release = Arc::new(
+        transport::profile::cli_release::CliReleaseService::new(
+            provider_kind.clone(),
+            profile.clone(),
+            ports.artifact_profiles(),
+        )
+        .map_err(|_| OpenAiInitializeError::DesktopRelease)?,
+    );
+    cli_release.restore().await;
+    let platform_releases = Arc::new(
+        transport::profile::platform_release::PlatformDesktopReleaseService::new(
+            provider_kind.clone(),
+            profile.clone(),
+            ports.artifact_profiles(),
+            Arc::new(
+                transport::profile::platform_release::OfficialDesktopArtifactTransport::new()
+                    .map_err(|_| OpenAiInitializeError::DesktopRelease)?,
+            ),
+        ),
+    );
+    platform_releases.restore().await;
     let repository = CodexCredentialRepository::new(Arc::clone(&accounts));
     let websocket_pool = Arc::new(CodexWebSocketPool::with_config(
         config.websocket_pool_config(),
-    ));
-    let turn_state = Arc::new(provider::TurnStateService::new(
-        Arc::clone(&accounts),
-        profile.clone(),
-        transport::endpoint_url(config.base_url(), transport::CODEX_RESPONSES_PATH),
-        Arc::clone(&websocket_pool),
     ));
     let catalog = Arc::new(CodexCredentialCatalogService::new(
         repository.clone(),
@@ -151,7 +179,7 @@ pub async fn initialize(
         )
         .map_err(OpenAiInitializeError::Provider)?
         .with_session_identity(session_identity)
-        .with_turn_state(Arc::clone(&turn_state)),
+        .with_timezone(config.timezone),
     );
     let token_client = Arc::new(
         credential::token_client::openai_token_client(
@@ -205,18 +233,20 @@ pub async fn initialize(
         websocket_pool,
         desktop_release_status,
     ));
-    let mut worker_contributions = provider::worker_contributions(
+    let worker_contributions = provider::worker_contributions(
+        config.timezone,
         refresh,
         quota,
         catalog,
         config.quota_refresh_policy(),
         config.oauth_refresh_enabled(),
-        desktop_release,
+        provider::ClientReleaseServices {
+            desktop: desktop_release,
+            cli: cli_release,
+            platforms: platform_releases,
+        },
     )
     .map_err(|_| OpenAiInitializeError::Worker)?;
-    worker_contributions.push(
-        provider::turn_state_contribution(turn_state).map_err(|_| OpenAiInitializeError::Worker)?,
-    );
 
     Ok(ProviderBundle {
         core_provider,
@@ -245,8 +275,6 @@ impl ProviderBundle {
 /// OpenAI 初始化失败的脱敏分类。
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAiInitializeError {
-    #[error(transparent)]
-    Config(OpenAiConfigError),
     #[error("OpenAI runtime policy is unavailable")]
     RuntimePolicy,
     #[error("OpenAI Provider kind is invalid")]

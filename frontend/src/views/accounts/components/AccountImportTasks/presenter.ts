@@ -1,5 +1,4 @@
 import type { AccountImportTask, AccountImportTaskItem, ImportItemStatus } from '@/api'
-import dayjs from 'dayjs'
 
 export const itemStates: Record<ImportItemStatus, { label: string, color: string, fill: string }> = {
   pending: { label: '等待中', color: 'bg-cp-fill-alter text-cp-text-secondary', fill: 'bg-cp-fill-secondary' },
@@ -18,10 +17,6 @@ export function taskLabel(task: AccountImportTask) {
   if (task.stopRequested)
     return '已停止'
   return task.counts.failed + task.counts.unknown > 0 ? '已结束 · 有待处理项' : '全部完成'
-}
-
-export function taskTime(value: string) {
-  return dayjs(value).format('MM-DD HH:mm:ss')
 }
 
 export function processed(task: AccountImportTask) {

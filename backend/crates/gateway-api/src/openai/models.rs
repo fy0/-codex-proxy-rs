@@ -6,11 +6,17 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use gateway_core::routing::{PublicModelDescriptor, PublicModelId, PublicModelProfile};
+use gateway_core::{
+    engine::execution::AuthenticatedClient,
+    routing::{PublicModelDescriptor, PublicModelId, PublicModelProfile},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::ApiState;
+use crate::{
+    ApiState,
+    openai::middleware::{self, RequestInput},
+};
 
 use super::{
     auth::{authenticate_client, client_access_error_response},
@@ -32,10 +38,26 @@ pub(crate) async fn models(
     headers: HeaderMap,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
+
+    middleware::query_response(
+        service.execution(),
+        client,
+        RequestInput::query(super::router::MODELS_PATH.to_owned(), None, &headers),
+        move |client| models_response(state, client, query),
+    )
+    .await
+}
+
+async fn models_response(
+    state: ApiState,
+    client: AuthenticatedClient,
+    query: ModelsQuery,
+) -> Response {
+    let service = state.openai();
 
     if let Some(version) = query
         .client_version
@@ -123,14 +145,33 @@ pub(crate) async fn model_detail(
     Path(model_id): Path<String>,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
+    middleware::query_response(
+        service.execution(),
+        client,
+        RequestInput::query(
+            format!("{}/{model_id}", super::router::MODELS_PATH),
+            Some(model_id.clone()),
+            &headers,
+        ),
+        move |client| async move { model_detail_response(&state, &client, model_id) },
+    )
+    .await
+}
+
+fn model_detail_response(
+    state: &ApiState,
+    client: &AuthenticatedClient,
+    model_id: String,
+) -> Response {
+    let service = state.openai();
     let Ok(public_model) = PublicModelId::new(model_id) else {
         return model_not_found_response().into_response();
     };
-    if !service.contains_public_model(&client, &public_model) {
+    if !service.contains_public_model(client, &public_model) {
         return model_not_found_response().into_response();
     }
 

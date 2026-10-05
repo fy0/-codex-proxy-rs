@@ -1,6 +1,40 @@
 //! 版本、自更新、回滚与进程重启的 UTC 语义模型。
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+/// 本次检查或安装选择的更新稳定性范围，具体版本准入由 Host 判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemUpdateChannel {
+    Stable,
+    Alpha,
+    Beta,
+    Rc,
+    #[serde(rename = "exp")]
+    Experimental,
+}
+
+impl SystemUpdateChannel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Alpha => "alpha",
+            Self::Beta => "beta",
+            Self::Rc => "rc",
+            Self::Experimental => "exp",
+        }
+    }
+}
+
+/// Host 返回的本次检查通道及当前构建允许选择的范围。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemUpdatePolicy {
+    pub channel: SystemUpdateChannel,
+    pub available_channels: Vec<SystemUpdateChannel>,
+}
 
 /// 当前运行版本及更新检查摘要。
 ///
@@ -23,6 +57,7 @@ pub struct SystemVersion {
 /// 部署模式与构建类型的展示标签归 API；其余字段均为 Host 已确认的原始事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemUpdateDetail {
+    pub policy: SystemUpdatePolicy,
     pub current_version: String,
     pub latest_version: String,
     pub has_update: bool,
@@ -71,6 +106,7 @@ pub struct SystemOperationState {
 pub struct SystemUpdateStatus {
     pub previous_version: Option<String>,
     pub current_version: Option<String>,
+    pub need_restart: bool,
     pub operation: SystemOperationState,
 }
 
@@ -103,7 +139,6 @@ pub enum SystemOperationAccepted {
         operation_id: String,
         deployment_mode: String,
         message: String,
-        need_restart: bool,
         target_version: String,
     },
     Rollback {
@@ -126,4 +161,22 @@ impl SystemOperationAccepted {
             Self::Restart { .. } => SystemOperationKind::Restart,
         }
     }
+}
+
+/// 重启前的只读确认快照；目标发行与全局配置版本一起绑定用户确认。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SystemRestartPlan {
+    pub target_version: Option<String>,
+    pub release_manifest_sha256: Option<String>,
+    pub config_revision: u64,
+    pub incompatible_plugins: Vec<SystemIncompatiblePlugin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SystemIncompatiblePlugin {
+    pub instance_id: String,
+    pub name: String,
+    pub reason: String,
 }

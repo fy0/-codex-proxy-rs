@@ -5,7 +5,6 @@ pub const INVALID_CONFIG: &str = "backup.invalid_config";
 /// Cron 表达式非法。
 pub const INVALID_CRON: &str = "backup.invalid_cron";
 /// IANA 时区非法。
-pub const INVALID_TIMEZONE: &str = "backup.invalid_timezone";
 /// 记录不存在。
 pub const RECORD_NOT_FOUND: &str = "backup.record_not_found";
 /// 已存在活跃任务，拒绝创建。

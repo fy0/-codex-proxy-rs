@@ -1,10 +1,7 @@
 <script setup lang="ts">
-import { Copy, KeyRound, Trash2 } from '@lucide/vue'
+import { BaseButton, BaseCard, BaseIconButton, BaseMotionIcon } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
+import { Copy, KeyRound, Trash2 } from '@lucide/vue'
 
 interface AdminApiKeyStatus {
   exists: boolean

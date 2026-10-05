@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures::channel::oneshot;
+use futures::{channel::oneshot, future::BoxFuture};
 
 struct CancellationState {
     cancelled: AtomicBool,
@@ -13,7 +13,10 @@ struct CancellationState {
 
 /// 可克隆的请求、任务与连接取消信号。
 #[derive(Clone)]
-pub struct CancellationToken(Arc<CancellationState>);
+pub struct CancellationToken {
+    state: Arc<CancellationState>,
+    ancestors: Arc<[Arc<CancellationState>]>,
+}
 
 impl fmt::Debug for CancellationToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -33,18 +36,36 @@ impl Default for CancellationToken {
 impl CancellationToken {
     #[must_use]
     pub fn new() -> Self {
-        Self(Arc::new(CancellationState {
-            cancelled: AtomicBool::new(false),
-            waiters: Mutex::new(Vec::new()),
-        }))
+        Self {
+            state: Arc::new(CancellationState {
+                cancelled: AtomicBool::new(false),
+                waiters: Mutex::new(Vec::new()),
+            }),
+            ancestors: Arc::from([]),
+        }
+    }
+
+    /// 创建只从父级继承取消的子 token；取消子级不会反向取消父请求。
+    #[must_use]
+    pub fn child_token(&self) -> Self {
+        let ancestors = std::iter::once(Arc::clone(&self.state))
+            .chain(self.ancestors.iter().cloned())
+            .collect::<Vec<_>>();
+        Self {
+            state: Arc::new(CancellationState {
+                cancelled: AtomicBool::new(false),
+                waiters: Mutex::new(Vec::new()),
+            }),
+            ancestors: ancestors.into(),
+        }
     }
 
     pub fn cancel(&self) {
-        if self.0.cancelled.swap(true, Ordering::AcqRel) {
+        if self.state.cancelled.swap(true, Ordering::AcqRel) {
             return;
         }
         let waiters = {
-            let mut guard = lock_unpoisoned(&self.0.waiters);
+            let mut guard = lock_unpoisoned(&self.state.waiters);
             std::mem::take(&mut *guard)
         };
         for waiter in waiters {
@@ -54,23 +75,39 @@ impl CancellationToken {
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.cancelled.load(Ordering::Acquire)
+        self.state.cancelled.load(Ordering::Acquire)
+            || self
+                .ancestors
+                .iter()
+                .any(|state| state.cancelled.load(Ordering::Acquire))
     }
 
     pub async fn cancelled(&self) {
         if self.is_cancelled() {
             return;
         }
+        let mut waiters: Vec<BoxFuture<'static, ()>> = Vec::with_capacity(1 + self.ancestors.len());
+        waiters.push(wait_for_state(Arc::clone(&self.state)));
+        waiters.extend(self.ancestors.iter().cloned().map(wait_for_state));
+        let _ = futures::future::select_all(waiters).await;
+    }
+}
+
+fn wait_for_state(state: Arc<CancellationState>) -> BoxFuture<'static, ()> {
+    Box::pin(async move {
+        if state.cancelled.load(Ordering::Acquire) {
+            return;
+        }
         let (sender, receiver) = oneshot::channel();
         {
-            let mut waiters = lock_unpoisoned(&self.0.waiters);
-            if self.is_cancelled() {
+            let mut waiters = lock_unpoisoned(&state.waiters);
+            if state.cancelled.load(Ordering::Acquire) {
                 return;
             }
             waiters.push(sender);
         }
         let _ = receiver.await;
-    }
+    })
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

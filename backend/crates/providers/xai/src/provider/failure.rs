@@ -415,6 +415,15 @@ pub(super) fn map_selection_error(error: GrokSessionSelectorError) -> ProviderEr
             "account scheduling state is temporarily unreadable".to_owned(),
             "account_selector_unavailable",
         ),
+        GrokSessionSelectorError::PolicyRejected => {
+            return provider_error(
+                ProviderErrorKind::RequestPolicyDenied,
+                UpstreamSendState::NotSent,
+            );
+        }
+        GrokSessionSelectorError::PolicyUnavailable => {
+            return provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent);
+        }
         GrokSessionSelectorError::InvalidSession => {
             return provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent);
         }

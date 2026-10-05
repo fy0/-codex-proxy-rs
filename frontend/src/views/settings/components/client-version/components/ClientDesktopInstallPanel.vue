@@ -50,7 +50,7 @@ const desktopCommands = [
             在线安装与升级
           </h3>
           <p class="mt-1.5 mb-0 text-cp-sm leading-[1.45] font-semibold text-cp-text-secondary">
-            桌面应用通常会自动更新，也可以从官方渠道重新安装。
+            桌面应用通常会自动更新，也可以从官方渠道重新安装
           </p>
         </div>
         <a

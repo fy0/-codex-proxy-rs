@@ -430,6 +430,98 @@ async fn core_adapter_should_persist_calculated_cost_exactly() {
 }
 
 #[tokio::test]
+async fn billing_snapshot_survives_later_price_changes_and_usage_detail_reads() {
+    use gateway_core::metering::{
+        CalculatedCostAmounts, CalculatedCostBreakdown, CalculatedCostRates, CurrencyCode, Decimal,
+        Money,
+    };
+    let Some(database) = TestDatabase::create("billing_snapshot").await else {
+        return;
+    };
+    seed_running_request(&database.pool, "req_billing_snapshot")
+        .await
+        .unwrap();
+    sqlx::query(
+        "update model_requests
+         set provider_kind = 'xai', upstream_model_id = 'grok-4'
+         where id = 'req_billing_snapshot'",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let money = |ticks| {
+        Money::new(
+            Decimal::from_scaled(ticks).unwrap(),
+            CurrencyCode::new("USD").unwrap(),
+        )
+    };
+    let billing = CalculatedCostBreakdown::new(
+        CalculatedCostAmounts::new(
+            money(1_000_000),
+            money(2_000_000),
+            money(3_000_000),
+            money(0),
+            money(6_000_000),
+            money(6_000_000),
+        ),
+        CalculatedCostRates::new(
+            money(10_000_000_000),
+            money(20_000_000_000),
+            money(5_000_000_000),
+            money(0),
+        ),
+        Some("default".to_owned()),
+        100,
+    )
+    .with_long_context_billing(true)
+    .with_custom_multiplier(12500)
+    .unwrap();
+    let mut finalization = successful_core_finalization("req_billing_snapshot");
+    finalization.cost = billing.calculated_cost().into_estimate();
+    ExecutionStore::finalize_model_request(
+        &PgExecutionStore::new(database.pool.clone()),
+        finalization,
+    )
+    .await
+    .unwrap();
+    let observation = admin_observability_store(&database.pool);
+    let original = observation
+        .usage_record_detail("req_billing_snapshot")
+        .await
+        .unwrap();
+    let Some(admin_observability::UsageBilling::Calculated(saved)) = &original.request.billing
+    else {
+        panic!("persisted billing breakdown must be restored without provider recalculation");
+    };
+    assert!(saved.long_context_billing_applied);
+    assert_eq!(saved.custom_multiplier_bps, 12500);
+    assert_eq!(saved.total_amount.amount, "0.00075".parse().unwrap());
+    sqlx::query("update runtime_settings set pricing_overrides_json = $1 where id = 1")
+        .bind(json!({"xai":{"grok-4":{"multiplierBps":90000,"bands":{}}}}))
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let after = observation
+        .usage_record_detail("req_billing_snapshot")
+        .await
+        .unwrap();
+    assert_eq!(original.request.billing, after.request.billing);
+    sqlx::query("update model_requests set billing_snapshot_json = billing_snapshot_json - 'longContextBillingApplied' where id = 'req_billing_snapshot'")
+        .execute(&database.pool).await.unwrap();
+    let legacy = observation
+        .usage_record_detail("req_billing_snapshot")
+        .await
+        .unwrap();
+    let Some(admin_observability::UsageBilling::Calculated(legacy)) = legacy.request.billing else {
+        panic!("legacy billing snapshot must remain readable");
+    };
+    assert!(!legacy.long_context_billing_applied);
+    assert_eq!(legacy.total_amount, saved.total_amount);
+
+    database.close().await;
+}
+
+#[tokio::test]
 async fn core_adapter_should_persist_image_result_and_new_websocket_pool() {
     let Some(database) = TestDatabase::create("execution_image_usage").await else {
         return;
@@ -541,6 +633,115 @@ fn successful_core_finalization(id: &str) -> CoreModelRequestFinalization {
         timings: CoreModelRequestTimings::default(),
         completed_at: std::time::SystemTime::now(),
     }
+}
+
+#[tokio::test]
+async fn clock_rollback_preserves_terminal_outcomes_and_errors_after_recovery() {
+    let Some(database) = TestDatabase::create("execution_clock_rollback").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    for (index, outcome) in [
+        ExecutionOutcome::Succeeded,
+        ExecutionOutcome::Failed,
+        ExecutionOutcome::Cancelled,
+        ExecutionOutcome::Incomplete,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("req_clock_rollback_{index}");
+        let request = accepted_request(&id);
+        store
+            .create_model_request(request.clone())
+            .await
+            .expect("create request before clock rollback");
+        store
+            .begin_model_request_attempt(ModelRequestAttemptStart {
+                account_selection_wait_ms: None,
+                capacity_used_slots: None,
+                capacity_total_slots: None,
+                model_request_id: id.clone(),
+                attempt_count: 1,
+                provider_kind: "openai".to_owned(),
+                provider_account_id: None,
+                provider_account_ref: Some("acct_clock_rollback".to_owned()),
+                upstream_model_id: Some("coding".to_owned()),
+                upstream_transport: "websocket".to_owned(),
+                http_version: None,
+            })
+            .await
+            .expect("record real attempt before clock rollback");
+        let mut finalization = successful_core_finalization(&id);
+        finalization.outcome = outcome;
+        finalization.timings.latency_ms = Some(125);
+        finalization.completed_at = request.started_at - StdDuration::from_millis(400);
+        if outcome != ExecutionOutcome::Succeeded {
+            finalization.error = Some(GatewayError::new(
+                GatewayErrorKind::RateLimited,
+                "synthetic upstream quota error",
+            ));
+            finalization.provider_error_code = Some("usage_limit_reached".to_owned());
+            finalization.upstream_status_code = Some(429);
+        }
+        ExecutionStore::finalize_model_request(&store, finalization)
+            .await
+            .expect("finalize despite wall clock rollback");
+        let terminal = stored_row(&database.pool, &id).await;
+        assert_eq!(terminal["completed_at"], terminal["started_at"]);
+        assert_eq!(terminal["latency_ms"], 125);
+        assert_eq!(
+            terminal["outcome"],
+            ["succeeded", "failed", "cancelled", "incomplete"][index]
+        );
+        if outcome != ExecutionOutcome::Succeeded {
+            assert_eq!(terminal["error_kind"], "rate_limited");
+            assert_eq!(terminal["provider_error_code"], "usage_limit_reached");
+            assert_eq!(terminal["error_message"], "synthetic upstream quota error");
+        }
+        assert_eq!(
+            store
+                .recover_expired(request.deadline_at)
+                .await
+                .expect("recovery leaves finalized request intact")
+                .requests,
+            0
+        );
+        assert_eq!(stored_row(&database.pool, &id).await, terminal);
+    }
+    database.close().await;
+}
+
+#[tokio::test]
+async fn zero_attempt_finalization_preserves_real_error_after_clock_rollback() {
+    let Some(database) = TestDatabase::create("zero_attempt_clock_rollback").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    let request = accepted_request("req_zero_attempt_clock_rollback");
+    store
+        .create_model_request(request.clone())
+        .await
+        .expect("create zero attempt request");
+    let mut finalization = early_failure(&request);
+    finalization.completed_at = request.started_at - StdDuration::from_millis(400);
+    ExecutionStore::finalize_model_request(&store, finalization)
+        .await
+        .expect("finalize zero attempt after clock rollback");
+    assert_eq!(
+        store
+            .recover_expired(request.deadline_at)
+            .await
+            .expect("recovery preserves real early failure")
+            .requests,
+        0
+    );
+    let terminal = stored_row(&database.pool, request.id.as_str()).await;
+    assert_eq!(terminal["outcome"], "failed");
+    assert_eq!(terminal["error_kind"], "no_available_provider");
+    assert_eq!(terminal["attempt_count"], 0);
+    assert_eq!(terminal["completed_at"], terminal["started_at"]);
+    database.close().await;
 }
 
 #[tokio::test]
@@ -1792,5 +1993,38 @@ async fn zero_attempt_failure_does_not_enter_successful_usage_or_cost_aggregates
         .await
         .expect("observations do not settle budgets");
     assert_eq!(charges, 0);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn entry_rejection_is_visible_without_a_fictitious_model_execution() {
+    let Some(database) = TestDatabase::create("entry_rejection").await else {
+        return;
+    };
+    let repository = PgExecutionStore::new(database.pool.clone());
+    repository
+        .record_entry_rejection(gateway_core::engine::EntryRejection {
+            request_id: ModelRequestId::new("req_entry_rejection").unwrap(),
+            client_key_id: ClientApiKeyId::new("key_entry").unwrap(),
+            error: GatewayError::new(GatewayErrorKind::NoAvailableProvider, "no route"),
+            latency: StdDuration::from_millis(12),
+        })
+        .await
+        .unwrap();
+    let row: (Option<String>, String, String, i64) = sqlx::query_as(
+        "select model_request_id, failure_kind, message, latency_ms from ops_events where component = 'request_entry' and operation = 'reject'"
+    ).fetch_one(&database.pool).await.unwrap();
+    assert!(row.0.is_none());
+    assert_eq!(row.1, GatewayErrorKind::NoAvailableProvider.as_str());
+    assert_eq!(
+        serde_json::from_str::<Value>(&row.2).unwrap()["requestId"],
+        "req_entry_rejection"
+    );
+    assert_eq!(row.3, 12);
+    let count: i64 = sqlx::query_scalar("select count(*) from model_requests")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
     database.close().await;
 }

@@ -1,10 +1,5 @@
 <script setup lang="ts">
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
-import BasePageHeader from '@/components/base/BasePageHeader.vue'
-import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
-import BaseTable from '@/components/base/BaseTable/index.vue'
+import { BaseCard, BaseCheckbox, BaseConfirmModal, BasePageHeader, BaseTable, BaseTablePagination } from '@codex-proxy/ui'
 import { usePageSelection } from '@/composables/usePageSelection'
 import AccountGroupActions from './components/AccountGroupActions.vue'
 import AccountGroupFilters from './components/AccountGroupFilters.vue'
@@ -27,6 +22,7 @@ const {
   editingGroup,
   pendingDeleteGroup,
   pendingDisableGroup,
+  deleteCount,
   form,
   saving,
   deleting,
@@ -110,8 +106,8 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
                     Fast 已关闭
                   </span>
                 </div>
-                <span class="truncate text-cp-xs font-emphasis text-cp-text-quaternary">
-                  {{ row.description || '未填写描述' }}
+                <span v-if="row.description" class="truncate text-cp-xs font-emphasis text-cp-text-quaternary">
+                  {{ row.description }}
                 </span>
               </div>
             </template>
@@ -187,14 +183,14 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
       @confirm="confirmBatchDelete"
     >
       <p class="m-0">
-        确定删除选中的 {{ selectedIds.size }} 个分组吗？账号本身不会被删除。
+        确定删除选中的 {{ deleteCount }} 个分组吗？账号本身不会被删除
       </p>
     </BaseConfirmModal>
 
     <BaseConfirmModal
       v-model="showDisableModal"
       title="禁用账号分组"
-      description="禁用后，使用该分组的 API 密钥将无法再使用其中的账号。"
+      description="禁用后，使用该分组的 API 密钥将无法再使用其中的账号"
       confirm-text="确认禁用"
       :loading="disabling"
       @confirm="confirmDisable"
@@ -206,7 +202,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
         将影响 {{ referencedKeyNames.length }} 个 API 密钥：{{ referencedKeyNames.join('、') }}
       </p>
       <p v-else-if="pendingDisableGroup?.clientKeyCount" class="mt-2 mb-0 text-cp-warning-text">
-        将影响 {{ pendingDisableGroup.clientKeyCount }} 个 API 密钥。
+        将影响 {{ pendingDisableGroup.clientKeyCount }} 个 API 密钥
       </p>
     </BaseConfirmModal>
 
@@ -220,7 +216,7 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
       @confirm="confirmDelete"
     >
       <p class="m-0">
-        确定删除“{{ pendingDeleteGroup?.name || '该分组' }}”吗？账号本身不会被删除。
+        确定删除“{{ pendingDeleteGroup?.name || '该分组' }}”吗？账号本身不会被删除
       </p>
     </BaseConfirmModal>
   </div>

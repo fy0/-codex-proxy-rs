@@ -5,7 +5,7 @@ import { watchDebounced } from '@vueuse/core'
 import { computed, onScopeDispose, shallowRef, watch } from 'vue'
 import { getOpsErrors } from '@/api'
 import { useStablePagedQuery } from '@/composables/useStablePagedQuery'
-import { withMinimumDuration } from '@/utils/async'
+import { withMinimumDuration } from '@/utils/operation'
 
 interface UseOpsErrorsTableOptions {
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>

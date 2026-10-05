@@ -18,7 +18,12 @@ fn app_tree_matches_frozen_terminal_manifest() {
     assert_eq!(
         rust_files(&root.join("src")),
         BTreeSet::from([
-            PathBuf::from("bootstrap.rs"),
+            PathBuf::from("bootstrap/command.rs"),
+            PathBuf::from("bootstrap/config.rs"),
+            PathBuf::from("bootstrap/mod.rs"),
+            PathBuf::from("bootstrap/plugins.rs"),
+            PathBuf::from("bootstrap/server.rs"),
+            PathBuf::from("bootstrap/startup.rs"),
             PathBuf::from("lib.rs"),
             PathBuf::from("main.rs"),
         ]),
@@ -27,7 +32,10 @@ fn app_tree_matches_frozen_terminal_manifest() {
         rust_files(&root.join("tests")),
         BTreeSet::from([
             PathBuf::from("architecture.rs"),
-            PathBuf::from("bootstrap.rs"),
+            PathBuf::from("bootstrap/command.rs"),
+            PathBuf::from("bootstrap/config.rs"),
+            PathBuf::from("bootstrap/mod.rs"),
+            PathBuf::from("bootstrap/server.rs"),
             PathBuf::from("main.rs"),
         ]),
     );

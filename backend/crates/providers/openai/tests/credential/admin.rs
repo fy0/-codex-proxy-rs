@@ -277,7 +277,7 @@ fn pat_service(server: &MockServer) -> CodexCredentialAdminService {
             client_id: "test-public-client".to_owned(),
             token_endpoint: format!("{}/oauth/token", server.uri()),
         },
-        provider_openai::OpenAiConfig::default().wire_profile_state(),
+        provider_openai::transport::profile::CodexWireProfileState::new(Default::default()),
     )
     .expect("auth client");
     CodexCredentialAdminService::new(
@@ -389,7 +389,7 @@ async fn pat_import_times_out_without_falling_back_to_document_identity() {
             client_id: "test-public-client".to_owned(),
             token_endpoint: format!("{}/oauth/token", server.uri()),
         },
-        provider_openai::OpenAiConfig::default().wire_profile_state(),
+        provider_openai::transport::profile::CodexWireProfileState::new(Default::default()),
     );
     let service = CodexCredentialAdminService::new(
         Arc::new(UnusedRefresher),
@@ -891,7 +891,7 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
     assert_eq!(data.api_key, "sk-test-only");
     assert_eq!(
         data.transport,
-        provider_openai::credential::ApiKeyTransport::Http
+        provider_openai::credential::ResponsesTransport::Http
     );
 }
 

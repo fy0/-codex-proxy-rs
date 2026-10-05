@@ -1,0 +1,33 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提问。提交前可以搜索已有讨论，并查看[部署文档](https://github.com/zyycn/codex-proxy-rs/blob/main/deploy/README.md)。
+        明确的程序故障请使用 [Issue 模板](https://github.com/zyycn/codex-proxy-rs/issues/new/choose)；不确定是不是 Bug，也可以先在这里交流。
+        请移除密钥、令牌、Cookie、代理认证和私人内容，不要上传完整配置或请求转储。解决后请标记帮助到你的答案。
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 想解决什么问题
+      description: 说明希望完成的任务、当前遇到的困难，标题尽量具体。
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本与部署方式
+      description: 涉及具体实例时，填写完整版本号或提交号，以及 Docker、二进制或源码部署方式。
+
+  - type: textarea
+    id: attempts
+    attributes:
+      label: 已尝试的方法与结果
+      description: 可以附看过的文档、相关讨论、脱敏错误片段或截图；未尝试可留空。
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 相关环境与补充信息
+      description: 按问题需要补充操作系统、客户端、反向代理或中转链路，无需提供无关信息。

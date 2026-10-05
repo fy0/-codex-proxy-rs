@@ -4,7 +4,9 @@ use axum::{
     http::{HeaderMap, header::AUTHORIZATION},
     response::{IntoResponse, Response},
 };
-use gateway_core::engine::execution::AuthenticatedClient;
+use gateway_core::engine::{
+    authentication::ClientAuthenticationRequest, execution::AuthenticatedClient,
+};
 use gateway_core::policy::{ClientVersionRejection, CodexClientKind, CodexClientVersion};
 
 use super::{
@@ -106,12 +108,12 @@ pub fn bearer_client_api_key(headers: &HeaderMap) -> Result<&str, ClientApiKeyAu
     Ok(token)
 }
 
-pub(crate) fn authenticate_client(
+pub(crate) async fn authenticate_client(
     service: &OpenAiService,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedClient, ClientAccessError> {
-    let key = bearer_client_api_key(headers)?;
-    let client = service.authenticate(key)?;
+    let request = client_authentication_request(headers)?;
+    let client = service.authenticate(request).await?;
     if let Some(identified) = identify_codex_client(headers) {
         client
             .snapshot()
@@ -119,6 +121,31 @@ pub(crate) fn authenticate_client(
             .enforce(identified.kind(), identified.version())?;
     }
     Ok(client)
+}
+
+/// 复用数据面入口认证计划，但不记录 Key 使用事实或执行推理准入。
+pub(crate) async fn verify_client(
+    service: &OpenAiService,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
+    let request = client_authentication_request(headers)?;
+    service.verify(request).await
+}
+
+fn client_authentication_request(
+    headers: &HeaderMap,
+) -> Result<ClientAuthenticationRequest, ClientApiKeyAuthError> {
+    let raw = headers
+        .get(AUTHORIZATION)
+        .ok_or(ClientApiKeyAuthError::MissingAuthorization)?
+        .to_str()
+        .map_err(|_| ClientApiKeyAuthError::MalformedAuthorization)?;
+    let request = ClientAuthenticationRequest::new(raw.to_owned())
+        .map_err(|_| ClientApiKeyAuthError::MalformedAuthorization)?;
+    Ok(match crate::middleware::current_settings() {
+        Some(settings) => request.with_settings(settings),
+        None => request,
+    })
 }
 
 pub(crate) fn client_access_error_response(error: ClientAccessError) -> Response {

@@ -1,7 +1,7 @@
 import { onScopeDispose, shallowRef } from 'vue'
 
 import { ApiError } from '@/api/request'
-import { errorMessage } from '@/utils/async'
+import { errorMessage } from '@/utils/operation'
 
 export function useRequestState(onError?: (error: unknown) => void) {
   const loading = shallowRef(false)
@@ -36,11 +36,13 @@ export function useRequestState(onError?: (error: unknown) => void) {
       loading.value = false
   }
 
-  function invalidate() {
+  function invalidate({ resetLoading = true }: { resetLoading?: boolean } = {}) {
     sequence += 1
     controller?.abort()
     controller = undefined
-    loading.value = false
+    // 弹窗退场期间只使请求失效，避免提前切换加载画面。
+    if (resetLoading)
+      loading.value = false
   }
 
   onScopeDispose(invalidate)

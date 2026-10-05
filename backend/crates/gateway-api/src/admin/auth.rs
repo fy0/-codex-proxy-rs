@@ -32,6 +32,12 @@ where
     type Rejection = AdminError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        // 仅内部 Dispatcher 写入此上下文；普通客户端 headers 无法声明插件身份。
+        if let Some(context) = parts.extensions.get::<AdminRequestContext>() {
+            return Ok(Self {
+                context: context.clone(),
+            });
+        }
         let principal = require_admin_auth(state, &parts.headers).await?;
         let request_id = admin_request_id(parts).ok_or_else(AdminError::internal)?;
         Ok(Self {

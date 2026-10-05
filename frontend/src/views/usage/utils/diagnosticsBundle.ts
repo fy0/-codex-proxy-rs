@@ -15,7 +15,6 @@ export function requestDiagnosticsBundle(
 
   return {
     schemaVersion: 2,
-    exportedAt: new Date().toISOString(),
     source: 'usage.request_diagnostics',
     exportPolicy: 'allowlisted_fields_without_payloads',
     request: {
@@ -119,12 +118,12 @@ export function requestDiagnosticsBundle(
       'client_ip_user_agent_and_api_key',
     ],
     notes: [
-      'schemaVersion 2 仅供人工排障；null 表示未知或未采集，不代表没有发生错误。',
-      '错误摘要复用列表的分类展示，不是上游错误原文；error 为 null 时请结合 attempts 的分类与状态。',
-      '时间线仅导出阶段、顺序和计时，不含事件 data；历史 sanitized 标记不作为安全依据。',
-      'attemptsComplete 不为 true 时，尝试列表不完整；没有时间线的旧记录无法补回未采集事件。',
-      '未自动采集网关版本、客户端版本、部署环境和故障发生时区，请另行补充。',
-      '关联 ID 仍可能属于内部信息，分享前请审阅；原始错误、正文和日志需另行审阅脱敏，勿直接公开。',
+      'schemaVersion 2 仅供人工排障，null 表示未知或未采集，不代表没有发生错误',
+      '错误摘要复用列表的分类展示，不是上游错误原文，error 为 null 时请结合 attempts 的分类与状态',
+      '时间线仅导出阶段、顺序和计时，不含事件 data，历史 sanitized 标记不作为安全依据',
+      'attemptsComplete 不为 true 时，尝试列表不完整，没有时间线的旧记录无法补回未采集事件',
+      '未自动采集网关版本、客户端版本、部署环境和故障发生时区，请另行补充',
+      '关联 ID 仍可能属于内部信息，分享前请审阅，原始错误、正文和日志需另行审阅脱敏，勿直接公开',
     ],
   }
 }

@@ -14,8 +14,14 @@ pub fn admin_session_actor_ref(admin_user_id: &str) -> String {
 /// 已认证的管理主体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminPrincipal {
-    Session { admin_user_id: String },
+    Session {
+        admin_user_id: String,
+    },
     ApiKey,
+    /// 安装者完整信任的插件；身份仅由内部 HTTP 分派端口签发。
+    Plugin {
+        instance_id: String,
+    },
 }
 
 /// 传给管理用例的安全请求上下文。
@@ -33,6 +39,7 @@ impl AdminRequestContext {
                 admin_user_id: admin_user_id.clone(),
             },
             AdminPrincipal::ApiKey => MutationActor::AdminApiKey,
+            AdminPrincipal::Plugin { .. } => MutationActor::System,
         };
         MutationContext {
             actor,
@@ -101,7 +108,8 @@ impl From<ClientAuthenticationError> for LoginError {
     fn from(error: ClientAuthenticationError) -> Self {
         match error {
             ClientAuthenticationError::InvalidKey => Self::InvalidCredentials,
-            ClientAuthenticationError::SnapshotUnavailable => Self::Unavailable,
+            ClientAuthenticationError::SnapshotUnavailable
+            | ClientAuthenticationError::ProviderUnavailable => Self::Unavailable,
         }
     }
 }
@@ -109,8 +117,25 @@ impl From<ClientAuthenticationError> for LoginError {
 /// 服务端已验证的身份绑定，不保存密码或原始 API Key。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSubject {
-    Admin { admin_user_id: String },
-    Key { client_key_id: ClientApiKeyId },
+    Admin {
+        admin_user_id: String,
+        credential_fingerprint: String,
+    },
+    Key {
+        client_key_id: ClientApiKeyId,
+    },
+}
+
+/// 仅已登录管理员可以修改自己的密码。
+pub struct ChangePassword {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+impl std::fmt::Debug for ChangePassword {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ChangePassword([REDACTED])")
+    }
 }
 
 /// 两种登录方式共用的固定有效期会话。

@@ -1,11 +1,11 @@
-import { reactive, shallowRef } from 'vue'
+import { toast } from '@codex-proxy/ui'
 
+import { reactive, shallowRef } from 'vue'
 import {
   deleteAdminApiKey,
   getAdminApiKeyStatus,
   regenerateAdminApiKey,
 } from '@/api'
-import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useCopyText } from '@/composables/useCopyText'
 

@@ -85,16 +85,15 @@ impl CodexBackendClient {
         &self,
         context: CodexRequestContext<'_>,
     ) -> CodexClientResult<CodexRateLimitResetCredits> {
+        let headers = self.account_request_headers(context)?;
+        let request = |base_url| {
+            self.client
+                .get(account_endpoint_url(base_url, "rate-limit-reset-credits"))
+                .headers(headers.clone())
+        };
         let response = self
-            .client
-            .get(account_endpoint_url(
-                &self.base_url,
-                "rate-limit-reset-credits",
-            ))
-            .headers(self.account_request_headers(context)?)
-            .send()
-            .await
-            .map_err(CodexClientError::HttpJson)?;
+            .send_account_request(request(&self.base_url), request(&self.official_base_url))
+            .await?;
         let body = read_reset_credits_response(response).await?;
         let wire = serde_json::from_str::<ResetCreditsWire>(&body)
             .map_err(|_| invalid_response("invalid reset-credit list response"))?;
@@ -115,27 +114,30 @@ impl CodexBackendClient {
 
     /// 消费一张 Codex Desktop 主动额度重置卡。
     ///
-    /// 此方法不做任何自动重试；请求发出后的传输失败必须由上层按不确定结果处理。
+    /// 仅自定义路由明确 404 时按原幂等键回退；传输失败由上层按不确定结果处理。
     pub async fn consume_rate_limit_reset_credit(
         &self,
         context: CodexRequestContext<'_>,
         credit_id: Option<&str>,
         redeem_request_id: Uuid,
     ) -> CodexClientResult<CodexRateLimitResetCreditsConsumeResult> {
+        let headers = self.account_request_headers(context)?;
+        let body = ConsumeRequest {
+            credit_id,
+            redeem_request_id: redeem_request_id.to_string(),
+        };
+        let request = |base_url| {
+            self.client
+                .post(account_endpoint_url(
+                    base_url,
+                    "rate-limit-reset-credits/consume",
+                ))
+                .headers(headers.clone())
+                .json(&body)
+        };
         let response = self
-            .client
-            .post(account_endpoint_url(
-                &self.base_url,
-                "rate-limit-reset-credits/consume",
-            ))
-            .headers(self.account_request_headers(context)?)
-            .json(&ConsumeRequest {
-                credit_id,
-                redeem_request_id: redeem_request_id.to_string(),
-            })
-            .send()
-            .await
-            .map_err(CodexClientError::HttpJson)?;
+            .send_account_request(request(&self.base_url), request(&self.official_base_url))
+            .await?;
         let body = read_reset_credits_response(response).await?;
         let wire = serde_json::from_str::<ConsumeResultWire>(&body)
             .map_err(|_| invalid_response("invalid reset-credit consume response"))?;

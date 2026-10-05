@@ -8,11 +8,10 @@ pub use crate::account::scope::{
     FrozenAccountScope, RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory,
 };
 pub use crate::identity::ProviderKind;
-pub use crate::upstream::UpstreamChannel;
 pub use catalog::{
-    ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
-    ProviderModelCapabilities, ProviderModelContent, ProviderModelDescriptor,
-    PublicModelDescriptor,
+    ContributedModelAlias, ProviderCatalogGeneration, ProviderCatalogPort,
+    ProviderCatalogUnavailable, ProviderModelCapabilities, ProviderModelContent,
+    ProviderModelDescriptor, PublicModelDescriptor,
 };
 pub use snapshot::RuntimeSnapshot;
 
@@ -28,8 +27,16 @@ use crate::validation::{IdentifierError, RoutingError, validate_text};
 const MAX_REQUEST_ATTEMPTS: u32 = 32;
 
 /// 客户端请求中的模型名称。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct PublicModelId(String);
+
+impl<'de> serde::Deserialize<'de> for PublicModelId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(<String as serde::Deserialize>::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 impl PublicModelId {
     pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
@@ -67,8 +74,16 @@ impl fmt::Display for PublicModelId {
 }
 
 /// Provider 实际接收的模型名称。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct UpstreamModelId(String);
+
+impl<'de> serde::Deserialize<'de> for UpstreamModelId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(<String as serde::Deserialize>::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 impl UpstreamModelId {
     pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
@@ -508,7 +523,6 @@ pub struct RoutingContext {
 pub struct ProviderCandidate {
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
-    upstream_channel: UpstreamChannel,
     emulated_features: BTreeSet<Feature>,
     account_scope: Arc<FrozenAccountScope>,
 }
@@ -522,12 +536,6 @@ impl ProviderCandidate {
     #[must_use]
     pub const fn upstream_model(&self) -> Option<&UpstreamModelId> {
         self.upstream_model.as_ref()
-    }
-
-    /// 返回冻结的上行通道；Provider 据此决定是否替换端点与协议翻译。
-    #[must_use]
-    pub const fn upstream_channel(&self) -> UpstreamChannel {
-        self.upstream_channel
     }
 
     #[must_use]
@@ -544,7 +552,7 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序。
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
-    disable_fast: bool,
+    pricing: Arc<crate::metering::PricingOverrides>,
     request_location: Option<crate::account::RequestLocation>,
     config_revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
@@ -556,8 +564,13 @@ pub struct RoutingPlan {
 
 impl RoutingPlan {
     #[must_use]
-    pub const fn disable_fast(&self) -> bool {
-        self.disable_fast
+    pub fn pricing(&self) -> Arc<crate::metering::PricingOverrides> {
+        Arc::clone(&self.pricing)
+    }
+
+    #[must_use]
+    pub fn disable_fast(&self) -> bool {
+        self.account_scope.disable_fast()
     }
 
     /// 本次请求冻结的全局位置，重试时沿用同一份配置。

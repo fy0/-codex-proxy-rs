@@ -210,12 +210,47 @@ fn openai_feedback_should_penalize_capacity_rejections_even_with_transient_retry
 
         deliver_error_with_openai_feedback(&feedback, &provider, &account, error);
 
-        assert!(
-            feedback
-                .scheduling_signals(&provider, &account)
-                .0
-                .is_some_and(|failure_rate| failure_rate > 0),
-            "capacity rejection did not affect the account score: {code}"
+        assert_eq!(
+            feedback.scheduling_signals(&provider, &account).0,
+            Some(4_000),
+            "capacity rejection should receive the stronger penalty: {code}"
+        );
+    }
+}
+
+#[test]
+fn openai_feedback_should_keep_regular_server_error_penalty() {
+    let feedback = Arc::new(AccountFeedbackStats::default());
+    let provider = ProviderKind::new("openai").expect("provider");
+    let account = ProviderAccountId::new("acct_server_error").expect("account");
+
+    deliver_error_with_openai_feedback(
+        &feedback,
+        &provider,
+        &account,
+        sent_error(ProviderErrorKind::Unavailable, Some("server_error")),
+    );
+
+    assert_eq!(
+        feedback.scheduling_signals(&provider, &account).0,
+        Some(2_000)
+    );
+}
+
+#[test]
+fn openai_feedback_should_ignore_unconfirmed_capacity_rejections() {
+    for send_state in [UpstreamSendState::NotSent, UpstreamSendState::Ambiguous] {
+        let feedback = Arc::new(AccountFeedbackStats::default());
+        let provider = ProviderKind::new("openai").expect("provider");
+        let account = ProviderAccountId::new("acct_unconfirmed").expect("account");
+        let error = ProviderError::new(ProviderErrorKind::UpstreamCapacityUnavailable, send_state)
+            .with_upstream_code(OpaqueUpstreamValue::new("server_is_overloaded"));
+
+        deliver_error_with_openai_feedback(&feedback, &provider, &account, error);
+
+        assert_eq!(
+            feedback.scheduling_signals(&provider, &account),
+            (None, None)
         );
     }
 }

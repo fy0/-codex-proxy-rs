@@ -1,12 +1,15 @@
-//! 统一账号目录与跨 Provider 动态分派。
+//! 统一账号目录与原生 Provider 分派。
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use futures::StreamExt as _;
 use gateway_core::{
-    account::{ProviderAccountId, RoutingCookie},
+    account::ProviderAccountId,
     engine::probe::{AccountProbe, AccountProbeRequest},
     routing::{ProviderKind, UpstreamModelId},
     runtime::SnapshotControl,
@@ -18,17 +21,19 @@ use crate::{
         accounts::{
             AccountConnectionTestEvent, AccountConnectionTestEventStream, AccountListQuery,
             AccountPageItem, AccountUpdateResult, AccountUsage, AccountUsageWindowQuery,
-            AccountsUpdateResult, BatchUpdateAccounts, SetAccountTurnStateOverride, UpdateAccount,
+            AccountsUpdateResult, BatchUpdateAccounts, UpdateAccount,
         },
         observability::TimeRange,
         provider_credentials::{
             AccountDirectoryItem, AccountDirectoryPage, AccountExportBundle, AccountPersonalInfo,
-            AccountRefreshResult, ConsumeProviderResetCredit, PrepareCredentialRefresh,
-            ProviderModels, ProviderProfileAvatar, ProviderQuota, ProviderQuotaRequest,
-            ProviderQuotaWindow, ProviderResetCreditResult, ProviderResetCredits,
-            QuotaLocalUsageAttribution,
+            AccountRefreshResult, AccountUsagePeriod, ConsumeProviderResetCredit,
+            PrepareCredentialRefresh, ProviderModelCatalogDocument, ProviderModels,
+            ProviderProfileAvatar, ProviderQuota, ProviderQuotaRequest, ProviderQuotaWindow,
+            ProviderResetCreditResult, ProviderResetCredits, QuotaLocalUsageAttribution,
         },
-        quota_forecast::{AccountQuotaForecastReport, account_quota_forecasts},
+        quota_forecast::{
+            AccountQuotaForecastReport, account_quota_forecasts, quota_forecast_source_window,
+        },
         quota_forecast_sampling::{QuotaForecastPoint, select_forecast_sample},
     },
     ports::{
@@ -44,115 +49,9 @@ use super::{
 
 const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 
-/// 管理员复制时拿到的路由票 pair，以及拼好的完整 Cookie 请求头。
-pub struct TurnStateCookieCopy {
-    pub pod: String,
-    pub name: String,
-    pub value: String,
-    pub cflb_name: String,
-    pub cflb_value: String,
-    pub expires_at: i64,
-    pub header: String,
-}
-
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
-    fn turn_state_probe_preview(
-        &self,
-        _config: gateway_core::account::TurnStateConfig,
-    ) -> Result<crate::model::accounts::TurnStateProbePreview, AdminError> {
-        Err(AdminError::invalid("当前服务不支持探测画像预览"))
-    }
-
-    async fn turn_state_token(
-        &self,
-        _account_id: ProviderAccountId,
-        _model: String,
-        _issued_at: i64,
-        _observation_id: Option<i64>,
-    ) -> Result<gateway_core::account::TurnStateToken, AdminError> {
-        Err(AdminError::invalid("当前服务不支持复制 state"))
-    }
-
-    async fn remove_turn_state(
-        &self,
-        _context: &MutationContext,
-        _account_id: ProviderAccountId,
-        _model: String,
-        _issued_at: i64,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        Err(AdminError::invalid("不支持移除 state"))
-    }
-
-    async fn apply_turn_state(
-        &self,
-        _context: &MutationContext,
-        _account_id: ProviderAccountId,
-        _model: String,
-        _issued_at: i64,
-        _observation_id: Option<i64>,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        Err(AdminError::invalid("当前服务不支持应用 turn state"))
-    }
-
-    async fn turn_state_cookie(
-        &self,
-        _account_id: ProviderAccountId,
-        _model: String,
-        _pod: String,
-        _observation_id: Option<i64>,
-    ) -> Result<TurnStateCookieCopy, AdminError> {
-        Err(AdminError::invalid("当前服务不支持复制路由 Cookie"))
-    }
-
-    async fn apply_turn_state_cookie(
-        &self,
-        _context: &MutationContext,
-        _account_id: ProviderAccountId,
-        _model: String,
-        _pod: String,
-        _issued_at: Option<i64>,
-        _observation_id: Option<i64>,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        Err(AdminError::invalid("当前服务不支持应用路由 Cookie"))
-    }
-
-    async fn remove_turn_state_cookie(
-        &self,
-        _context: &MutationContext,
-        _account_id: ProviderAccountId,
-        _model: String,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        Err(AdminError::invalid("当前服务不支持移除路由 Cookie"))
-    }
-
-    async fn request_turn_state_probe(
-        &self,
-        _context: &MutationContext,
-        _account_id: ProviderAccountId,
-        _model: String,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        Err(AdminError::invalid("当前服务不支持 turn state 探测"))
-    }
-
-    async fn turn_state_status(
-        &self,
-        _account_id: Option<&str>,
-    ) -> Result<Vec<gateway_core::account::TurnStateStatus>, AdminError> {
-        Ok(Vec::new())
-    }
-
-    async fn configure_turn_state(
-        &self,
-        _context: &MutationContext,
-        _account_id: ProviderAccountId,
-        _model: String,
-        _config: gateway_core::account::TurnStateConfig,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        Err(AdminError::invalid("当前服务不支持 turn state 轮换"))
-    }
-
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError>;
 
     async fn export(
@@ -177,13 +76,6 @@ pub trait AccountsService: Send + Sync {
         &self,
         context: &MutationContext,
         command: UpdateAccount,
-    ) -> Result<AccountUpdateResult, AdminError>;
-
-    /// 仅修改账号级 turn state 强制覆盖；`None` 清除覆盖，不影响调度等其他设置。
-    async fn set_turn_state_override(
-        &self,
-        context: &MutationContext,
-        command: SetAccountTurnStateOverride,
     ) -> Result<AccountUpdateResult, AdminError>;
 
     async fn lower_concurrency_limit(
@@ -252,6 +144,11 @@ pub trait AccountsService: Send + Sync {
         account_id: &ProviderAccountId,
         refresh: bool,
     ) -> Result<ProviderModels, AdminError>;
+
+    async fn model_catalog_document(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<ProviderModelCatalogDocument, AdminError>;
 
     async fn test_connection(
         &self,
@@ -323,7 +220,7 @@ impl DefaultAccountsService {
     ) -> Result<
         (
             AccountPageItem,
-            Arc<dyn crate::ports::provider::ProviderAdmin>,
+            std::sync::Arc<dyn crate::ports::provider::ProviderAdmin>,
         ),
         AdminError,
     > {
@@ -427,14 +324,25 @@ impl DefaultAccountsService {
             .await
             .map_err(|error| map_store_error(error, "rolling account usage"))?;
         let rolling_usage = rolling_usage.into_iter().next();
-        let mut quota = provider
+        let mut quota = match provider
             .quota(ProviderQuotaRequest {
                 account_id: account_id.clone(),
                 refresh: refresh_quota,
                 rolling_usage: rolling_usage.clone(),
             })
             .await
-            .map_err(|error| map_provider_error(error, "provider quota"))?;
+        {
+            Ok(quota) => quota,
+            // 凭据更新后的账号投影不要求 Provider 提供额度；显式刷新仍须支持该操作。
+            Err(error)
+                if !refresh_quota
+                    && error.kind()
+                        == crate::ports::provider::ProviderAdminErrorKind::Unsupported =>
+            {
+                empty_quota()
+            }
+            Err(error) => return Err(map_provider_error(error, "provider quota")),
+        };
         let mut stored = if refresh_quota {
             self.load_account(account_id).await?
         } else {
@@ -455,6 +363,9 @@ impl DefaultAccountsService {
                     .and_then(|(window, _)| window.local_usage.clone())
             });
         Ok(AccountDirectoryItem {
+            capacity: stored.capacity,
+            capabilities: provider
+                .account_capabilities(account_id, &stored.account.authentication_kind),
             plan_type_display: self.providers.resolve_account_plan(
                 stored.account.provider_kind.as_str(),
                 &mut stored.account.plan_type,
@@ -470,339 +381,8 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
-    fn turn_state_probe_preview(
-        &self,
-        config: gateway_core::account::TurnStateConfig,
-    ) -> Result<crate::model::accounts::TurnStateProbePreview, AdminError> {
-        if !config.is_valid() {
-            return Err(AdminError::invalid("探测画像配置不合法"));
-        }
-        self.providers
-            .require(&ProviderKind::new("openai").expect("静态 Provider ID 合法"))
-            .map_err(|error| map_provider_error(error, "turn state preview"))?
-            .turn_state_probe_preview(&config)
-            .ok_or_else(|| AdminError::invalid("当前 Provider 不支持探测画像预览"))
-    }
-
-    async fn turn_state_token(
-        &self,
-        account_id: ProviderAccountId,
-        model: String,
-        issued_at: i64,
-        observation_id: Option<i64>,
-    ) -> Result<gateway_core::account::TurnStateToken, AdminError> {
-        if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
-            return Err(AdminError::invalid("模型 ID 不合法"));
-        }
-        self.accounts
-            .turn_state_token(&account_id, &model, issued_at, observation_id)
-            .await
-            .map_err(|error| map_store_error(error, "turn state token"))?
-            .ok_or_else(|| AdminError::invalid("state 已过期、已被替换或身份不匹配，请刷新后重试"))
-    }
-
-    async fn apply_turn_state(
-        &self,
-        context: &MutationContext,
-        account_id: ProviderAccountId,
-        model: String,
-        issued_at: i64,
-        observation_id: Option<i64>,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        if model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-            || issued_at <= 0
-        {
-            return Err(AdminError::invalid("模型或签发时间不合法"));
-        }
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        if stored.account.provider_kind.as_str() != "openai"
-            || stored.account.authentication_kind != "oauth"
-            || !stored.account.enabled
-        {
-            return Err(AdminError::invalid(
-                "仅启用的 OpenAI OAuth 账号支持应用 state",
-            ));
-        }
-        let result = self
-            .accounts
-            .apply_turn_state(&account_id, &model, issued_at, observation_id, context)
-            .await
-            .map_err(|error| map_store_error(error, "turn state apply"))?;
-        provider.account_unavailable(&account_id).await;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(result)
-    }
-
-    async fn turn_state_cookie(
-        &self,
-        account_id: ProviderAccountId,
-        model: String,
-        pod: String,
-        observation_id: Option<i64>,
-    ) -> Result<TurnStateCookieCopy, AdminError> {
-        if model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-            || RoutingCookie::gateway_id_from_pod(&pod).is_none()
-        {
-            return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
-        }
-        let Some(id) = observation_id else {
-            return Err(AdminError::invalid("请从单条探测记录复制 Cookie"));
-        };
-        let routing = self
-            .accounts
-            .recorded_routing_cookie(&account_id, &model, id)
-            .await
-            .map_err(|error| map_store_error(error, "recorded routing cookie"))?
-            .ok_or_else(|| AdminError::invalid("这条探测没有保存这次请求的 Cookie"))?;
-        let mut parts = self
-            .accounts
-            .account_replay_cookies(&account_id)
-            .await
-            .map_err(|error| map_store_error(error, "account cookie copy"))?;
-        // 路由 cookie 需要 __oailb 与 __cflb 成对回放；剥离账号里可能残留的同名单值，
-        // 避免与选中的 pair 混出不属于同一响应的组合。
-        parts.retain(|(name, _)| !matches!(name.as_str(), "__oailb" | "__oai_lb" | "__cflb"));
-        if !routing.cflb_name.is_empty() && !routing.cflb_value.is_empty() {
-            parts.push((routing.cflb_name.clone(), routing.cflb_value.clone()));
-        }
-        parts.push((routing.name.clone(), routing.value.clone()));
-        let mut header = String::new();
-        for (index, (name, value)) in parts.iter().enumerate() {
-            if index > 0 {
-                header.push_str("; ");
-            }
-            header.push_str(name);
-            header.push('=');
-            header.push_str(value);
-        }
-        Ok(TurnStateCookieCopy {
-            pod: routing.pod,
-            name: routing.name,
-            value: routing.value,
-            cflb_name: routing.cflb_name,
-            cflb_value: routing.cflb_value,
-            expires_at: routing.expires_at,
-            header,
-        })
-    }
-
-    async fn apply_turn_state_cookie(
-        &self,
-        context: &MutationContext,
-        account_id: ProviderAccountId,
-        model: String,
-        _pod: String,
-        _issued_at: Option<i64>,
-        observation_id: Option<i64>,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        if model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-        {
-            return Err(AdminError::invalid("模型不合法"));
-        }
-        let Some(id) = observation_id else {
-            return Err(AdminError::invalid("请从单条探测记录固定 Cookie"));
-        };
-        let cookie = self
-            .accounts
-            .recorded_routing_cookie(&account_id, &model, id)
-            .await
-            .map_err(|error| map_store_error(error, "recorded routing cookie"))?
-            .ok_or_else(|| AdminError::invalid("这条探测没有保存这次请求的 Cookie"))?;
-        if RoutingCookie::gateway_id_from_pod(&cookie.pod).is_none() {
-            return Err(AdminError::invalid("模型或 Cookie 网关不合法"));
-        }
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        if stored.account.provider_kind.as_str() != "openai"
-            || stored.account.authentication_kind != "oauth"
-            || !stored.account.enabled
-        {
-            return Err(AdminError::invalid(
-                "仅启用的 OpenAI OAuth 账号支持应用路由 Cookie",
-            ));
-        }
-        let result = self
-            .accounts
-            .apply_turn_state_cookie(&account_id, &model, &cookie, id, context)
-            .await
-            .map_err(|error| map_store_error(error, "routing cookie apply"))?;
-        provider.account_unavailable(&account_id).await;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(result)
-    }
-
-    async fn remove_turn_state_cookie(
-        &self,
-        context: &MutationContext,
-        account_id: ProviderAccountId,
-        model: String,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        if model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-        {
-            return Err(AdminError::invalid("模型 ID 不合法"));
-        }
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        if stored.account.provider_kind.as_str() != "openai"
-            || stored.account.authentication_kind != "oauth"
-        {
-            return Err(AdminError::invalid(
-                "仅 OpenAI OAuth 账号支持移除路由 Cookie",
-            ));
-        }
-        let result = self
-            .accounts
-            .remove_turn_state_cookie(&account_id, &model, context)
-            .await
-            .map_err(|error| map_store_error(error, "routing cookie removal"))?;
-        provider.account_unavailable(&account_id).await;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(result)
-    }
-
-    async fn remove_turn_state(
-        &self,
-        context: &MutationContext,
-        account_id: ProviderAccountId,
-        model: String,
-        issued_at: i64,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        if model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-            || issued_at <= 0
-        {
-            return Err(AdminError::invalid("模型或签发时间不合法"));
-        }
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        if stored.account.provider_kind.as_str() != "openai"
-            || stored.account.authentication_kind != "oauth"
-        {
-            return Err(AdminError::invalid("仅 OpenAI OAuth 账号支持移除 state"));
-        }
-        let result = self
-            .accounts
-            .remove_turn_state(&account_id, &model, issued_at, context)
-            .await
-            .map_err(|error| map_store_error(error, "turn state removal"))?;
-        provider.account_unavailable(&account_id).await;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(result)
-    }
-
-    async fn request_turn_state_probe(
-        &self,
-        context: &MutationContext,
-        account_id: ProviderAccountId,
-        model: String,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        if model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-        {
-            return Err(AdminError::invalid("模型 ID 不合法"));
-        }
-        let (stored, _) = self.provider_for_account(&account_id).await?;
-        if stored.account.provider_kind.as_str() != "openai"
-            || stored.account.authentication_kind != "oauth"
-            || !stored.account.enabled
-        {
-            return Err(AdminError::invalid("仅启用的 OpenAI OAuth 账号支持探测"));
-        }
-        let result = self
-            .accounts
-            .request_turn_state_probe(&account_id, &model, context)
-            .await
-            .map_err(|error| map_store_error(error, "turn state probe"))?;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(result)
-    }
-
-    async fn turn_state_status(
-        &self,
-        account_id: Option<&str>,
-    ) -> Result<Vec<gateway_core::account::TurnStateStatus>, AdminError> {
-        if let Some(id) = account_id {
-            ProviderAccountId::new(id).map_err(|_| AdminError::invalid("账号 ID 不合法"))?;
-        }
-        let mut statuses = self
-            .accounts
-            .turn_state_status(account_id)
-            .await
-            .map_err(|error| map_store_error(error, "turn state status"))?;
-        let mut accounts = BTreeMap::new();
-        for status in &mut statuses {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                accounts.entry(status.account_id.clone())
-            {
-                let id = ProviderAccountId::new(status.account_id.clone())
-                    .map_err(|_| AdminError::invalid("账号 ID 不合法"))?;
-                entry.insert(self.load_account(&id).await?);
-            }
-            let account = &accounts[&status.account_id];
-            status.account_enabled = account.account.enabled;
-            status.active &= status.account_enabled;
-            use gateway_core::account::{AccountStatus, TurnStateBusinessStatus};
-            status.business_status = match account.projection.status {
-                AccountStatus::Disabled => TurnStateBusinessStatus::ManualDisabled,
-                AccountStatus::Error => TurnStateBusinessStatus::AccountError,
-                AccountStatus::QuotaExhausted => TurnStateBusinessStatus::QuotaExhausted,
-                AccountStatus::RateLimited => TurnStateBusinessStatus::RateLimited,
-                AccountStatus::Normal if !account.account.model_access.allows(&status.model) => {
-                    TurnStateBusinessStatus::ModelDenied
-                }
-                AccountStatus::Normal => status.business_status,
-            };
-        }
-        Ok(statuses)
-    }
-
-    async fn configure_turn_state(
-        &self,
-        context: &MutationContext,
-        account_id: ProviderAccountId,
-        model: String,
-        config: gateway_core::account::TurnStateConfig,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        if !config.is_valid()
-            || model.is_empty()
-            || model.len() > 256
-            || model.trim() != model
-            || model.chars().any(char::is_control)
-        {
-            return Err(AdminError::invalid("轮换配置或模型 ID 不合法"));
-        }
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        if stored.account.provider_kind.as_str() != "openai"
-            || stored.account.authentication_kind != "oauth"
-        {
-            return Err(AdminError::invalid(
-                "仅 OpenAI OAuth 账号支持 turn state 轮换",
-            ));
-        }
-        let result = self
-            .accounts
-            .configure_turn_state(&account_id, &model, config, context)
-            .await
-            .map_err(|error| map_store_error(error, "turn state configuration"))?;
-        provider.account_unavailable(&account_id).await;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(result)
-    }
-
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError> {
+        let providers = &self.providers;
         let runtime = self
             .account_runtime
             .active_rate_limits()
@@ -823,6 +403,18 @@ impl AccountsService for DefaultAccountsService {
             .iter()
             .map(|item| item.account.id.clone())
             .collect::<Vec<_>>();
+        // 只读取当前页的租约占用；观测失败不能把账号误报为空闲或拖垮目录。
+        let in_flight = if ids.is_empty() {
+            None
+        } else {
+            match self.account_runtime.account_runtime(&ids).await {
+                Ok(runtime) => runtime.in_flight,
+                Err(error) => {
+                    tracing::warn!(error = %error, "account capacity projection is unavailable");
+                    None
+                }
+            }
+        };
         let rolling_usage = self
             .accounts
             .load_account_usage(rolling_range, &ids)
@@ -838,7 +430,7 @@ impl AccountsService for DefaultAccountsService {
                 .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
             // 单个账号的 quota 投影失败（Provider 未注册或 quota 读取失败）不拖垮整页：
             // 该账号降级为空额度投影，其余账号与页面状态照常返回。
-            let provider = match self.providers.require(&account.provider_kind) {
+            let provider = match providers.require(&account.provider_kind) {
                 Ok(provider) => provider,
                 Err(error) => {
                     tracing::warn!(
@@ -879,13 +471,28 @@ impl AccountsService for DefaultAccountsService {
             .into_iter()
             .zip(quotas)
             .map(|(mut item, quota)| {
+                let id = ProviderAccountId::new(item.account.id.clone())
+                    .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
+                let capabilities = providers
+                    .require(&item.account.provider_kind)
+                    .map(|provider| {
+                        provider.account_capabilities(&id, &item.account.authentication_kind)
+                    })
+                    .unwrap_or_default();
                 let usage = api_key_usage.remove(&item.account.id).or_else(|| {
                     quota
                         .usage_window()
                         .and_then(|(window, _)| window.local_usage.clone())
                 });
-                AccountDirectoryItem {
-                    plan_type_display: self.providers.resolve_account_plan(
+                Ok(AccountDirectoryItem {
+                    capacity: crate::model::accounts::AccountCapacity {
+                        used_slots: in_flight
+                            .as_ref()
+                            .map(|counts| counts.get(&item.account.id).copied().unwrap_or(0)),
+                        ..item.capacity
+                    },
+                    capabilities,
+                    plan_type_display: providers.resolve_account_plan(
                         item.account.provider_kind.as_str(),
                         &mut item.account.plan_type,
                         Some(&quota),
@@ -894,9 +501,9 @@ impl AccountsService for DefaultAccountsService {
                     account: item.account,
                     projection: item.projection,
                     quota,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AdminError>>()?;
         Ok(AccountDirectoryPage {
             config_revision: page.config_revision,
             items,
@@ -910,6 +517,7 @@ impl AccountsService for DefaultAccountsService {
         context: &MutationContext,
         account_ids: Vec<ProviderAccountId>,
     ) -> Result<AccountExportBundle, AdminError> {
+        let providers = &self.providers;
         if account_ids.is_empty() || account_ids.len() > 200 {
             return Err(AdminError::invalid("账号导出数量必须在 1 到 200 之间"));
         }
@@ -928,12 +536,18 @@ impl AccountsService for DefaultAccountsService {
         }) {
             return Err(AdminError::invalid("账号导出列表包含重复 ID"));
         }
-        let mut documents = Vec::with_capacity(grouped.len());
-        for (provider_kind, ids) in grouped {
-            let provider = self
-                .providers
-                .require(&provider_kind)
-                .map_err(|error| map_provider_error(error, "provider account export"))?;
+        // 混选时先确认全部 Provider 已注册，拒绝路径不读取任何一组明文凭据。
+        let export_groups = grouped
+            .into_iter()
+            .map(|(provider_kind, ids)| {
+                let provider = providers
+                    .require(&provider_kind)
+                    .map_err(|error| map_provider_error(error, "provider account export"))?;
+                Ok((provider_kind, provider, ids))
+            })
+            .collect::<Result<Vec<_>, AdminError>>()?;
+        let mut documents = Vec::with_capacity(export_groups.len());
+        for (provider_kind, provider, ids) in export_groups {
             let credentials = self
                 .accounts
                 .load_credentials_for_export(&provider_kind, &ids)
@@ -993,19 +607,39 @@ impl AccountsService for DefaultAccountsService {
         context: &MutationContext,
         account_id: ProviderAccountId,
     ) -> Result<AccountRefreshResult, AdminError> {
-        let (_, provider) = self.provider_for_account(&account_id).await?;
-        let result = self
-            .accounts
-            .recover_account(&account_id, context)
-            .await
-            .map_err(|error| map_store_error(error, "provider account recovery"))?;
+        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        let config_revision = if stored.account.enabled {
+            self.accounts
+                .recover_account(&account_id, context)
+                .await
+                .map_err(|error| map_store_error(error, "provider account recovery"))?
+                .config_revision
+        } else {
+            // 停用只表示不参与调度，重新启用不能抹除已观测的额度、凭据或冷却事实。
+            self.accounts
+                .batch_update_accounts(
+                    BatchUpdateAccounts {
+                        account_ids: vec![account_id.to_string()],
+                        enabled: Some(true),
+                        concurrency_limit: None,
+                        weight: None,
+                        model_access: None,
+                        group_ids: None,
+                        outbound_proxy: None,
+                    },
+                    context,
+                )
+                .await
+                .map_err(|error| map_store_error(error, "enable provider account"))?
+                .config_revision
+        };
         provider
             .account_facts_changed(std::slice::from_ref(&account_id))
             .await;
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        publish_committed(self.snapshot.as_ref(), config_revision).await?;
         let account = self.load_directory_item(&account_id, false).await?;
         Ok(AccountRefreshResult {
-            config_revision: result.config_revision,
+            config_revision,
             account,
         })
     }
@@ -1017,35 +651,14 @@ impl AccountsService for DefaultAccountsService {
     ) -> Result<AccountUpdateResult, AdminError> {
         let account_id = ProviderAccountId::new(command.account_id.clone())
             .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        // Basis Points 通道依赖 ChatGPT OAuth 身份；其他认证或其他 Provider 没有对应上游。
-        if (command.basispoints_enabled == Some(true) || command.bps_concurrency_limit.is_some())
-            && (stored.account.provider_kind.as_str() != "openai"
-                || stored.account.authentication_kind != "oauth")
-        {
-            return Err(AdminError::invalid(
-                "Basis Points 通道仅支持 OAuth 认证的 OpenAI 账号",
-            ));
-        }
+        let (_, provider) = self.provider_for_account(&account_id).await?;
         let enabled = command.enabled;
-        // 前端每次保存都会带上该字段，只有值真正变化才需要断开池化连接。
-        let turn_state_changed = command.turn_state_override.as_deref().is_some_and(|new| {
-            new.trim()
-                != stored
-                    .account
-                    .turn_state_override
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-        });
         let result = self
             .accounts
             .update_account(command, context)
             .await
             .map_err(|error| map_store_error(error, "provider account"))?;
-        // turn-state 覆盖值变更时同样要断开该账号的池化 WS 连接：
-        // 握手级 turn-state 已固化在连接上，续接查找不区分画像会复用它。
-        if !enabled || turn_state_changed {
+        if !enabled {
             provider.account_unavailable(&account_id).await;
         }
         provider
@@ -1053,56 +666,6 @@ impl AccountsService for DefaultAccountsService {
             .await;
         publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
         Ok(result)
-    }
-
-    async fn set_turn_state_override(
-        &self,
-        context: &MutationContext,
-        command: SetAccountTurnStateOverride,
-    ) -> Result<AccountUpdateResult, AdminError> {
-        let account_id = ProviderAccountId::new(command.account_id.clone())
-            .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
-        let turn_state_changed = command.turn_state.as_deref().map(str::trim).unwrap_or("")
-            != stored
-                .account
-                .turn_state_override
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("");
-        let result = self
-            .accounts
-            .batch_update_accounts(
-                BatchUpdateAccounts {
-                    account_ids: vec![command.account_id],
-                    enabled: None,
-                    concurrency_limit: None,
-                    weight: None,
-                    model_access: None,
-                    group_ids: None,
-                    outbound_proxy: None,
-                    // 空值与显式清除统一经 nullif 落为 NULL。
-                    turn_state_override: Some(command.turn_state.unwrap_or_default()),
-                    basispoints_enabled: None,
-                    bps_concurrency_limit: None,
-                },
-                context,
-            )
-            .await
-            .map_err(|error| map_store_error(error, "provider account"))?;
-        provider
-            .account_facts_changed(std::slice::from_ref(&account_id))
-            .await;
-        // 覆盖值变化立即驱逐该账号的池化 WS 连接：握手级 turn-state 已固化，
-        // 续接查找不区分握手画像仍会复用旧连接。
-        if turn_state_changed {
-            provider.account_unavailable(&account_id).await;
-        }
-        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
-        Ok(AccountUpdateResult {
-            config_revision: result.config_revision,
-            account_id,
-        })
     }
 
     async fn lower_concurrency_limit(
@@ -1142,25 +705,12 @@ impl AccountsService for DefaultAccountsService {
         let mut providers = BTreeMap::<
             ProviderKind,
             (
-                Arc<dyn crate::ports::provider::ProviderAdmin>,
+                std::sync::Arc<dyn crate::ports::provider::ProviderAdmin>,
                 Vec<ProviderAccountId>,
             ),
         >::new();
-        // turn-state 覆盖值按账号比较，记录值真正变化的账号以便驱逐其池化连接。
-        let mut turn_state_changed_ids = Vec::new();
         for account_id in &account_ids {
             let (item, provider) = self.provider_for_account(account_id).await?;
-            if command.turn_state_override.as_deref().is_some_and(|new| {
-                new.trim()
-                    != item
-                        .account
-                        .turn_state_override
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or("")
-            }) {
-                turn_state_changed_ids.push(account_id.clone());
-            }
             providers
                 .entry(item.account.provider_kind)
                 .or_insert_with(|| (provider, Vec::new()))
@@ -1174,8 +724,8 @@ impl AccountsService for DefaultAccountsService {
             .await
             .map_err(|error| map_store_error(error, "provider accounts"))?;
         for (provider, provider_ids) in providers.values() {
-            for account_id in provider_ids {
-                if enabled == Some(false) || turn_state_changed_ids.contains(account_id) {
+            if enabled == Some(false) {
+                for account_id in provider_ids {
                     provider.account_unavailable(account_id).await;
                 }
             }
@@ -1219,7 +769,15 @@ impl AccountsService for DefaultAccountsService {
             .map_err(|error| map_provider_error(error, "forecast quota snapshot"))?;
         let now = Utc::now();
         let mut samples = Vec::new();
-        for (window, _) in quota.usage_windows() {
+        let mut selected_keys = BTreeSet::new();
+        for period in [AccountUsagePeriod::Weekly, AccountUsagePeriod::Monthly] {
+            let Some((window, _)) = quota_forecast_source_window(&quota, period) else {
+                continue;
+            };
+            // 缺少一个周期时两个结果会复用同一窗口，只查询一次历史快照。
+            if !selected_keys.insert(window.key.as_str()) {
+                continue;
+            }
             let (Some(mut query), Some(observed), Some(percent)) = (
                 quota_usage_window(account_id.as_str(), window),
                 quota.observed_at,
@@ -1269,7 +827,7 @@ impl AccountsService for DefaultAccountsService {
                     usage: point.usage,
                 });
             }
-            let mut sample = select_forecast_sample(
+            let sample = select_forecast_sample(
                 window.key.clone(),
                 query.range.start,
                 QuotaForecastPoint {
@@ -1279,13 +837,8 @@ impl AccountsService for DefaultAccountsService {
                 },
                 points,
                 history.pending_request_count,
+                interrupted,
             );
-            if interrupted
-                && sample.method
-                    == crate::model::quota_forecast_sampling::QuotaForecastMethod::Cumulative
-            {
-                sample.discontinuous = true;
-            }
             samples.push(sample);
         }
         Ok(AccountQuotaForecastReport {
@@ -1401,6 +954,17 @@ impl AccountsService for DefaultAccountsService {
             .map_err(|error| map_provider_error(error, "provider model catalog"))
     }
 
+    async fn model_catalog_document(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<ProviderModelCatalogDocument, AdminError> {
+        let (_, provider) = self.provider_for_account(account_id).await?;
+        provider
+            .model_catalog_document(account_id)
+            .await
+            .map_err(|error| map_provider_error(error, "provider model catalog document"))
+    }
+
     async fn test_connection(
         &self,
         account_id: ProviderAccountId,
@@ -1411,6 +975,7 @@ impl AccountsService for DefaultAccountsService {
         let model = upstream_model.as_str().to_owned();
         let operation = provider
             .connection_test_operation(&upstream_model, CONNECTION_TEST_INPUT)
+            .await
             .map_err(|error| map_provider_error(error, "provider connection test"))?;
         let initial = vec![
             AccountConnectionTestEvent::Started {
@@ -1426,12 +991,15 @@ impl AccountsService for DefaultAccountsService {
         let probe = Arc::clone(&self.probe);
         let terminal = futures::stream::once(async move {
             let result = probe
-                .probe(AccountProbeRequest {
-                    account_id,
-                    provider_kind: account.provider_kind,
-                    upstream_model,
-                    operation,
-                })
+                .probe(
+                    AccountProbeRequest {
+                        account_id,
+                        provider_kind: account.provider_kind,
+                        upstream_model,
+                        operation,
+                    },
+                    None,
+                )
                 .await;
             match result {
                 Ok(result) => result
@@ -1484,6 +1052,7 @@ fn map_reset_credits_error_after_refresh(
 /// 账号目录中单个账号 quota 读取失败时使用的空额度投影。
 fn empty_quota() -> ProviderQuota {
     ProviderQuota {
+        credits: None,
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,

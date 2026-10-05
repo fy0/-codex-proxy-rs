@@ -453,6 +453,11 @@ fn classify_upstream_failure(
         };
     }
 
+    // 官方 Codex 将流内 invalid_prompt 归为请求错误，不依赖 HTTP 状态码。
+    if matches!(source, UpstreamFailureSource::SseFailure) && code == "invalid_prompt" {
+        return CodexFailureCategory::InvalidRequest;
+    }
+
     if [code.as_str(), message.as_str(), body.as_str()]
         .into_iter()
         .any(is_model_unsupported)

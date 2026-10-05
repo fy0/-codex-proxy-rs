@@ -4,14 +4,15 @@ mod auth;
 mod auth_key;
 mod backup;
 mod client_keys;
+mod credentials;
 mod freeze_recovery;
 mod import_tasks;
 mod observability;
-mod openai;
+mod plugin_update;
+mod plugins;
 mod proxies;
 mod settings;
 mod system;
-mod xai;
 
 use std::{
     str::FromStr,
@@ -43,16 +44,16 @@ use gateway_admin::{
         observability::{
             DashboardDesktopRelease, DashboardObservation, DashboardWireAttribute,
             DashboardWireProfile, DashboardWireTarget, DesktopReleaseStatus, DiagnosticDimension,
-            DiagnosticObservation, OpsErrorPage, OpsErrorQuery, RequestMetricPoint, TimeRange,
+            DiagnosticsObservation, OpsErrorPage, OpsErrorQuery, RequestMetricPoint, TimeRange,
             UsageDetail, UsageFilter, UsageOverview, UsagePage, UsageQuery,
         },
         provider_credentials::{
             AuthorizationCommit, AuthorizationStarted, CompleteAuthorization, CredentialDetails,
             CredentialImportCommit, CredentialImportResult, CredentialMutationResult,
-            CredentialRotationCommit, PendingAuthorizationMutation, PrepareCredentialImport,
-            PrepareCredentialRefresh, PrepareCredentialRotation, PreparedAuthorizationCommit,
-            PreparedCredentialImport, PreparedCredentialRotation, ProviderExport,
-            ProviderExportCredentialInput, ProviderModels, ProviderQuota,
+            CredentialRotationCommit, PrepareCredentialImport, PrepareCredentialRefresh,
+            PrepareCredentialRotation, PreparedAuthorizationCommit, PreparedCredentialImport,
+            PreparedCredentialRotation, ProviderExport, ProviderExportCredentialInput,
+            ProviderModels, ProviderQuota,
         },
         settings::{AdminApiKey, AdminApiKeyMutation, ReplaceRuntimeSettings, RuntimeSettings},
         system::{SystemOperationAccepted, SystemUpdateDetail, SystemUpdateStatus, SystemVersion},
@@ -101,7 +102,10 @@ pub(super) struct AdminHarness {
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
     system: Arc<dyn SystemOperations>,
+    plugin_store: Arc<dyn gateway_admin::ports::plugins::PluginStore>,
+    plugin_inspector: Arc<dyn gateway_admin::ports::plugins::PluginPackageInspector>,
     client_key_verifier: Arc<dyn ClientKeyVerifier>,
+    service_middleware: gateway_admin::service::PlanSource,
 }
 
 impl AdminHarness {
@@ -126,7 +130,10 @@ impl AdminHarness {
             ],
             probe: Arc::new(UnavailableProbe),
             system: Arc::new(UnavailableSystem),
+            plugin_store: Arc::new(plugins::TestPluginPorts),
+            plugin_inspector: Arc::new(plugins::TestPluginPorts),
             client_key_verifier: Arc::new(UnavailableClientKeyVerifier),
+            service_middleware: Arc::new(|| None),
         }
     }
 
@@ -185,6 +192,11 @@ impl AdminHarness {
         self
     }
 
+    pub(super) fn service_middleware(mut self, source: gateway_admin::service::PlanSource) -> Self {
+        self.service_middleware = source;
+        self
+    }
+
     pub(super) fn backup(mut self, backup: BackupStorePorts) -> Self {
         self.backup = backup;
         self
@@ -215,6 +227,16 @@ impl AdminHarness {
         self
     }
 
+    pub(super) fn plugins(
+        mut self,
+        store: Arc<dyn gateway_admin::ports::plugins::PluginStore>,
+        inspector: Arc<dyn gateway_admin::ports::plugins::PluginPackageInspector>,
+    ) -> Self {
+        self.plugin_store = store;
+        self.plugin_inspector = inspector;
+        self
+    }
+
     pub(super) async fn build(self) -> AdminServices {
         self.build_bundle().await.services()
     }
@@ -241,9 +263,23 @@ impl AdminHarness {
                 self.observability,
                 self.settings,
                 self.backup,
+                self.plugin_store,
+                Arc::new(plugins::TestPluginPorts),
+                Arc::new(plugins::TestPluginPorts),
             ),
             gateway_admin::AdminRuntimePorts {
-                providers: self.providers,
+                timezone: Default::default(),
+                service_middleware: self.service_middleware,
+                plugin_preparation: Arc::new(plugins::TestPluginPorts),
+                plugin_management: Arc::new(plugins::TestPluginPorts),
+                published_snapshot: gateway_core::runtime::RuntimeSnapshotHandle::default(),
+                plugin_inspector: self.plugin_inspector,
+                plugin_distribution: Arc::new(plugins::TestPluginPorts),
+                pricing_source: Arc::new(UnavailablePricingSource),
+                providers: gateway_admin::ports::provider::ProviderAdminRegistry::new(
+                    self.providers,
+                )
+                .unwrap(),
                 snapshot: Arc::new(NoopSnapshot),
                 account_probe: self.probe,
                 proxy_probe: Arc::new(proxies::TestProxies::default()),
@@ -280,6 +316,25 @@ struct BootstrapAuthStore {
 impl AuthStore for BootstrapAuthStore {
     async fn load_password_hash(&self, _: &str) -> AdminStoreResult<Option<String>> {
         Ok(self.password_hash.lock().expect("password hash").clone())
+    }
+
+    async fn change_password(
+        &self,
+        _: &str,
+        expected_hash: &str,
+        password_hash: &str,
+        audit: gateway_admin::model::auth::AdminAuditEvent,
+    ) -> AdminStoreResult<bool> {
+        let mut stored = self.password_hash.lock().unwrap();
+        let Some(credentials) = stored
+            .as_mut()
+            .filter(|value| value.as_str() == expected_hash)
+        else {
+            return Ok(false);
+        };
+        *credentials = password_hash.to_owned();
+        let _ = audit;
+        Ok(true)
     }
 
     async fn create_password_hash_if_absent(
@@ -396,6 +451,13 @@ impl AccountGroupStore for UnavailableAccountGroupStore {
 
 #[async_trait]
 impl AccountStore for UnavailableStore {
+    async fn list_plugin_accounts(
+        &self,
+        _: gateway_admin::model::provider_credentials::PluginAccountListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::provider_credentials::PluginAccountPage> {
+        Err(unavailable("plugin accounts"))
+    }
+
     async fn list_accounts(
         &self,
         _: AccountListQuery,
@@ -442,11 +504,25 @@ impl AccountStore for UnavailableStore {
         Err(unavailable("credential"))
     }
 
+    async fn credential_details_by_id(
+        &self,
+        _: &ProviderAccountId,
+    ) -> AdminStoreResult<Option<CredentialDetails>> {
+        Err(unavailable("credential"))
+    }
+
     async fn load_credentials_for_export(
         &self,
         _: &ProviderKind,
         _: &[ProviderAccountId],
     ) -> AdminStoreResult<Vec<ProviderExportCredentialInput>> {
+        Err(unavailable("credential export"))
+    }
+
+    async fn load_credential_for_plugin(
+        &self,
+        _: &ProviderAccountId,
+    ) -> AdminStoreResult<Option<ProviderExportCredentialInput>> {
         Err(unavailable("credential export"))
     }
 
@@ -458,11 +534,21 @@ impl AccountStore for UnavailableStore {
         Err(unavailable("credential import"))
     }
 
+    async fn authorization_receipt(
+        &self,
+        _: &gateway_admin::model::provider_credentials::AuthorizationReceiptKey,
+    ) -> AdminStoreResult<
+        Option<gateway_admin::model::provider_credentials::CredentialMutationResult>,
+    > {
+        Err(unavailable("authorization receipt"))
+    }
+
     async fn commit_authorization(
         &self,
         _: AuthorizationCommit,
         _: &MutationContext,
-    ) -> AdminStoreResult<CredentialMutationResult> {
+    ) -> AdminStoreResult<gateway_admin::model::provider_credentials::AuthorizationCommitResult>
+    {
         Err(unavailable("authorization"))
     }
 
@@ -567,6 +653,24 @@ impl AccountRuntimeStore for UnavailableStore {
 
 #[async_trait]
 impl ClientKeyStore for UnavailableStore {
+    async fn update_client_key_budget_limits(
+        &self,
+        _: gateway_admin::model::client_keys::UpdateClientKeyBudgetLimits,
+        _: gateway_admin::model::client_keys::ClientKeyBudgetMutationOrigin,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Option<Revision>> {
+        Err(unavailable("client key budget limits"))
+    }
+
+    async fn reset_client_key_budget(
+        &self,
+        _: gateway_admin::model::client_keys::ResetClientKeyBudget,
+        _: gateway_admin::model::client_keys::ClientKeyBudgetMutationOrigin,
+        _: &MutationContext,
+    ) -> AdminStoreResult<()> {
+        Err(unavailable("client key budget reset"))
+    }
+
     async fn get_client_key(
         &self,
         _: &ClientApiKeyId,
@@ -667,7 +771,7 @@ impl ObservabilityStore for UnavailableStore {
         _: TimeRange,
         _: UsageFilter,
         _: DiagnosticDimension,
-    ) -> AdminStoreResult<Vec<DiagnosticObservation>> {
+    ) -> AdminStoreResult<DiagnosticsObservation> {
         Err(unavailable("usage diagnostics"))
     }
 
@@ -678,6 +782,23 @@ impl ObservabilityStore for UnavailableStore {
 
 #[async_trait]
 impl SettingsStore for UnavailableStore {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        Ok(Default::default())
+    }
+    async fn sync_pricing(
+        &self,
+        _: gateway_admin::model::pricing::PricingSyncChanges,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing sync")
+    }
+    async fn update_pricing(
+        &self,
+        _: gateway_admin::model::pricing::UpdatePricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing update")
+    }
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Err(unavailable("settings"))
     }
@@ -716,6 +837,19 @@ struct UnavailableProvider {
     calculated_billing: Option<gateway_admin::model::observability::CalculatedBillingBreakdown>,
 }
 
+struct UnavailablePricingSource;
+#[async_trait]
+impl gateway_admin::ports::pricing::PricingSource for UnavailablePricingSource {
+    async fn fetch(
+        &self,
+    ) -> Result<gateway_admin::model::pricing::PricingSyncPreview, gateway_admin::model::AdminError>
+    {
+        Err(gateway_admin::model::AdminError::internal(
+            "pricing source unavailable",
+        ))
+    }
+}
+
 impl UnavailableProvider {
     fn new(kind: &str) -> Self {
         Self {
@@ -726,6 +860,10 @@ impl UnavailableProvider {
     }
 }
 
+pub(super) fn test_provider(kind: &str) -> Arc<dyn ProviderAdmin> {
+    Arc::new(UnavailableProvider::new(kind))
+}
+
 #[async_trait]
 impl ProviderAdmin for UnavailableProvider {
     fn provider_kind(&self) -> &ProviderKind {
@@ -734,7 +872,7 @@ impl ProviderAdmin for UnavailableProvider {
 
     async fn account_unavailable(&self, _: &ProviderAccountId) {}
 
-    fn connection_test_operation(
+    async fn connection_test_operation(
         &self,
         _: &gateway_core::routing::UpstreamModelId,
         _: &str,
@@ -765,7 +903,7 @@ impl ProviderAdmin for UnavailableProvider {
 
     async fn start_authorization(
         &self,
-        _: PendingAuthorizationMutation,
+        _: gateway_admin::model::provider_credentials::PendingAuthorizationMutation,
     ) -> Result<AuthorizationStarted, ProviderAdminError> {
         Err(unsupported_provider())
     }
@@ -863,6 +1001,9 @@ pub(super) fn calculated_billing_provider() -> Arc<dyn ProviderAdmin> {
         dashboard_profile: None,
         calculated_billing: Some(
             gateway_admin::model::observability::CalculatedBillingBreakdown {
+                long_context_billing_applied: false,
+                custom_multiplier_bps: 10_000,
+                image: None,
                 input_amount: amount("0.8"),
                 output_amount: amount("0.2"),
                 cache_read_amount: amount("0"),
@@ -894,6 +1035,7 @@ impl AccountProbe for UnavailableProbe {
     fn probe(
         &self,
         _: AccountProbeRequest,
+        _: Option<Arc<gateway_core::routing::RuntimeSnapshot>>,
     ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
         Box::pin(async {
             Err(GatewayError::new(
@@ -913,7 +1055,11 @@ impl SystemOperations for UnavailableSystem {
         Err(unavailable_system())
     }
 
-    async fn update_detail(&self, _: bool) -> Result<SystemUpdateDetail, SystemOperationError> {
+    async fn update_detail(
+        &self,
+        _: bool,
+        _: Option<gateway_admin::model::system::SystemUpdateChannel>,
+    ) -> Result<SystemUpdateDetail, SystemOperationError> {
         Err(unavailable_system())
     }
 
@@ -924,6 +1070,8 @@ impl SystemOperations for UnavailableSystem {
     async fn perform_update(
         &self,
         _: Option<String>,
+        _: Option<gateway_admin::model::system::SystemUpdateChannel>,
+        _: Arc<dyn gateway_admin::ports::system::SystemUpdatePreflight>,
     ) -> Result<SystemOperationAccepted, SystemOperationError> {
         Err(unavailable_system())
     }
@@ -932,11 +1080,17 @@ impl SystemOperations for UnavailableSystem {
         Err(unavailable_system())
     }
 
-    async fn rollback(&self) -> Result<SystemOperationAccepted, SystemOperationError> {
+    async fn rollback(
+        &self,
+        _: Arc<dyn gateway_admin::ports::system::SystemUpdatePreflight>,
+    ) -> Result<SystemOperationAccepted, SystemOperationError> {
         Err(unavailable_system())
     }
 
-    async fn restart(&self) -> Result<SystemOperationAccepted, SystemOperationError> {
+    async fn restart(
+        &self,
+        _preflight: Arc<dyn gateway_admin::ports::system::SystemRestartPreflight>,
+    ) -> Result<SystemOperationAccepted, SystemOperationError> {
         Err(unavailable_system())
     }
 }
@@ -959,3 +1113,4 @@ fn unavailable_system() -> SystemOperationError {
         "unavailable in this test",
     )
 }
+mod service_contract;

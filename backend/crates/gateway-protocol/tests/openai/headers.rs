@@ -1,4 +1,6 @@
-use gateway_protocol::openai::is_transport_managed_request_header;
+use gateway_protocol::openai::{
+    is_transport_managed_request_header, response_header_is_forwardable,
+};
 
 #[test]
 fn transport_headers_should_include_hop_fields_and_compression() {
@@ -65,4 +67,28 @@ fn transport_headers_should_leave_business_extensions_to_the_protocol_owner() {
             "unexpected {name}"
         );
     }
+}
+
+#[test]
+fn response_headers_should_reject_hop_identity_and_dynamic_connection_fields() {
+    let connection_options = vec!["x-hop".to_owned()];
+    for name in [
+        "connection",
+        "x-hop",
+        "content-length",
+        "authorization",
+        "set-cookie",
+        "chatgpt-account-id",
+        "x-openai-project",
+        "sec-websocket-accept",
+    ] {
+        assert!(
+            !response_header_is_forwardable(name, &connection_options),
+            "unexpectedly exposed {name}"
+        );
+    }
+    assert!(response_header_is_forwardable(
+        "x-ratelimit-remaining-requests",
+        &connection_options
+    ));
 }

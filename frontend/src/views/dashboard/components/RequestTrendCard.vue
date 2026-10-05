@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import type { dashboardTrendView, normalizeDashboardTrendKind } from '../composables/useDashboard'
 
+import { BaseCard, BaseEmpty, BaseSegmented } from '@codex-proxy/ui'
 import { toRef } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { useRequestTrendChart } from '../composables/useRequestTrendChart'
 

@@ -1,14 +1,8 @@
 <script setup lang="ts">
+import { BaseButton, BaseCard, BaseCheckbox, BaseForm, BaseFormItem, BaseIconButton, BaseInput } from '@codex-proxy/ui'
+
 import { CircleAlert, CircleCheck, DatabaseZap, Eye, EyeOff, Save } from '@lucide/vue'
 import { computed, shallowRef } from 'vue'
-
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseForm from '@/components/base/BaseForm/index.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
 
 interface StorageForm {
   endpoint: string
@@ -104,7 +98,7 @@ function toggleSecretVisible(): void {
           </BaseInput>
         </BaseFormItem>
 
-        <BaseFormItem label="区域" description="R2 使用固定值 auto；其它服务按提供方填写">
+        <BaseFormItem label="区域" description="R2 使用固定值 auto，其它服务按提供方填写">
           <BaseInput v-model="storage.region" aria-label="区域" />
         </BaseFormItem>
 
@@ -112,8 +106,8 @@ function toggleSecretVisible(): void {
           <BaseInput v-model="storage.bucket" aria-label="存储桶" />
         </BaseFormItem>
 
-        <BaseFormItem label="Key 前缀" description="对象前缀，历史归档已保存完整旧前缀">
-          <BaseInput v-model="storage.prefix" aria-label="Key 前缀" />
+        <BaseFormItem label="对象键前缀" description="备份对象的存储路径前缀，不影响已有备份">
+          <BaseInput v-model="storage.prefix" aria-label="对象键前缀" />
         </BaseFormItem>
 
         <BaseFormItem label="Access Key ID" description="对象存储专用凭据">
@@ -161,7 +155,7 @@ function toggleSecretVisible(): void {
         </BaseFormItem>
 
         <div class="col-span-2 flex items-center gap-4 @max-[640px]:col-span-1">
-          <BaseCheckbox v-model="storage.forcePathStyle" label="强制路径风格" show-label />
+          <BaseCheckbox v-model="storage.forcePathStyle" label="强制路径式访问" show-label />
         </div>
       </BaseForm>
     </div>

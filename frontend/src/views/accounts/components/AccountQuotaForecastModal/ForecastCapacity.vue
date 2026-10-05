@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AccountQuotaForecast } from '@/api'
-import { ArrowRight, Info } from '@lucide/vue'
+import { ArrowRight } from '@lucide/vue'
 import { computed } from 'vue'
 
 const props = defineProps<{ forecast: AccountQuotaForecast }>()
@@ -25,9 +25,8 @@ const metrics = computed(() => [
   <section v-if="source" aria-label="容量预测" class="flex flex-col gap-5 rounded-cp-card bg-cp-fill-tertiary/70 p-4 [html[data-theme=light]_&]:bg-cp-fill-quaternary/70">
     <div>
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <span class="text-cp-xs text-cp-text-secondary">{{ source.label }}已用</span>
-        <span class="inline-flex items-center gap-1 rounded-cp-sm bg-cp-info-container px-2 py-1 text-cp-xs font-emphasis text-cp-info-on-container">
-          <Info class="size-3" aria-hidden="true" />
+        <span class="text-cp-xs text-cp-text-secondary">本周期已用</span>
+        <span class="inline-flex items-center rounded-cp-sm bg-cp-info-container px-2 py-1 text-cp-xs font-emphasis text-cp-info-on-container">
           {{ forecast.lowSample ? '初步估算 · 仅供参考' : '估算值 · 仅供参考' }}
         </span>
       </div>
@@ -52,8 +51,8 @@ const metrics = computed(() => [
 
     <div class="grid gap-2">
       <div class="flex justify-between text-cp-xs text-cp-text-secondary">
-        <span>已记录用量</span>
-        <span>完整{{ forecast.period === 'weekly' ? '周' : '月' }}预测</span>
+        <span>本周期已记录</span>
+        <span>{{ forecast.extrapolated ? `${forecast.targetDays}天折算容量` : '本周期预计总量' }}</span>
       </div>
       <div class="grid gap-2">
         <div v-for="metric in metrics" :key="metric.label" class="rounded-cp bg-cp-bg-container px-3 py-3">
@@ -69,15 +68,6 @@ const metrics = computed(() => [
           </div>
         </div>
       </div>
-    </div>
-
-    <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-2 text-cp-xs">
-      <span class="text-cp-text-secondary">更新时的剩余额度</span>
-      <span class="font-mono font-emphasis text-cp-text [html[data-theme=light]_&]:font-medium">
-        {{ forecast.remainingTokensDisplay }} Tokens
-        <span class="mx-1 text-cp-text-tertiary">/</span>
-        {{ forecast.remainingUsdDisplay }}
-      </span>
     </div>
   </section>
 </template>

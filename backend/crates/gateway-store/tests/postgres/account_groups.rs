@@ -89,12 +89,22 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
             .await
             .expect("create scoped client key");
     }
+    // 多分组 Key 的请求费用只计入实际承接账号所属的分组，Key 绑定的其他分组不重复计费。
     seed_group_cost_snapshot(
         &database.pool,
-        "req_historical_empty_group",
+        "req_dual_group_key",
         "acct_group_openai",
-        EMPTY_GROUP,
+        &[MIXED_GROUP, EMPTY_GROUP],
         "1.5",
+    )
+    .await;
+    // 归属跟随完成请求的账号，而不是 Client Key 绑定的分组快照。
+    seed_group_cost_snapshot(
+        &database.pool,
+        "req_account_attribution",
+        "acct_group_xai",
+        &[EMPTY_GROUP],
+        "2.25",
     )
     .await;
 
@@ -113,8 +123,11 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
         .expect("load current-page group members");
     assert_eq!(members.len(), 2);
     assert_eq!(
-        members.iter().map(|member| member.total_slots).sum::<u64>(),
-        7
+        members
+            .iter()
+            .map(|member| member.total_slots)
+            .sum::<Option<u64>>(),
+        Some(7)
     );
     assert_eq!(page.total, 2);
     let by_id = page
@@ -134,15 +147,15 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     assert_eq!(mixed.account_summary.limited, 0);
     assert_eq!(mixed.account_summary.total, 0);
     assert_eq!(mixed.capacity.used_slots, None);
-    assert_eq!(mixed.capacity.total_slots, 0);
-    assert_eq!(mixed.usage.today_usd.as_str(), "0");
-    assert_eq!(mixed.usage.retained_total_usd.as_str(), "0");
+    assert_eq!(mixed.capacity.total_slots, Some(0));
+    assert_eq!(mixed.usage.today_usd.as_str(), "3.75");
+    assert_eq!(mixed.usage.retained_total_usd.as_str(), "3.75");
     let empty = by_id.get(EMPTY_GROUP).expect("empty group");
     assert_eq!(empty.member_count, 0);
     assert!(empty.provider_counts.is_empty());
     assert_eq!(empty.client_key_count, 1);
-    assert_eq!(empty.usage.today_usd.as_str(), "1.5");
-    assert_eq!(empty.usage.retained_total_usd.as_str(), "1.5");
+    assert_eq!(empty.usage.today_usd.as_str(), "0");
+    assert_eq!(empty.usage.retained_total_usd.as_str(), "0");
 
     let all_key = keys
         .reveal_client_key(&client_key_id("key_all_accounts"))
@@ -170,6 +183,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     let (scope_revision, widened) = keys
         .update_client_key(
             UpdateClientKey {
+                request_profile_override_updates: Default::default(),
                 daily_limit_usd: None,
                 weekly_limit_usd: None,
                 id: client_key_id("key_group_one"),
@@ -195,6 +209,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     let (restricted_revision, restricted) = keys
         .update_client_key(
             UpdateClientKey {
+                request_profile_override_updates: Default::default(),
                 daily_limit_usd: None,
                 weekly_limit_usd: None,
                 id: client_key_id("key_group_one"),
@@ -267,6 +282,7 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
         )
         .await
         .expect("create statusless cost group");
+    assign_accounts(&database.pool, EMPTY_GROUP, &["acct_group_statusless"]).await;
     for (request_id, cost_amount) in [
         ("req_group_http_success", "1.5"),
         ("req_group_statusless_websocket", "2"),
@@ -276,7 +292,7 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
             &database.pool,
             request_id,
             "acct_group_statusless",
-            EMPTY_GROUP,
+            &[EMPTY_GROUP],
             cost_amount,
         )
         .await;
@@ -318,6 +334,7 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
 fn new_key(id: &str, group_ids: Vec<AccountGroupId>) -> NewClientKey {
     let marker = char::from(id.as_bytes().last().copied().unwrap_or(b'k'));
     NewClientKey {
+        request_profile_overrides: Default::default(),
         budget: Default::default(),
         id: client_key_id(id),
         name: id.to_owned(),
@@ -387,9 +404,13 @@ async fn seed_group_cost_snapshot(
     pool: &sqlx::PgPool,
     request_id: &str,
     account_id: &str,
-    historical_group_id: &str,
+    routing_group_ids: &[&str],
     cost_amount: &str,
 ) {
+    let routing_group_refs: Vec<String> = routing_group_ids
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
     sqlx::query(
         "insert into model_requests (
            id, client_api_key_ref, config_revision, protocol, operation, endpoint,
@@ -405,16 +426,16 @@ async fn seed_group_cost_snapshot(
            'sent', now(), 'succeeded', 200, 200, 10,
            'provider_reported', $4::numeric, 'USD', now() - interval '1 minute',
            now() + interval '5 minutes', now(),
-           'groups', array[$3]::text[], jsonb_build_array($3::text)
+           'groups', $3::text[], to_jsonb($3::text[])
          )",
     )
     .bind(request_id)
     .bind(account_id)
-    .bind(historical_group_id)
+    .bind(routing_group_refs)
     .bind(cost_amount)
     .execute(pool)
     .await
-    .expect("seed historical group cost snapshot");
+    .expect("seed group cost snapshot");
 }
 
 async fn current_revision(pool: &sqlx::PgPool) -> u64 {

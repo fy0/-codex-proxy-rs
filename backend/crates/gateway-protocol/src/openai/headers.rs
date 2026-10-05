@@ -27,3 +27,55 @@ pub fn is_transport_managed_request_header(name: &str) -> bool {
                 | "x-request-id"
         )
 }
+
+/// 判断上游响应头是否可由客户端 HTTP adapter 或插件读取/改写。
+///
+/// `connection_options` 来自同一响应的 `Connection` 字段，调用方应先按逗号拆分并
+/// 转成小写。此函数同时拒绝逐跳头、实体 framing、认证材料和账号身份字段；所有
+/// 响应边界共用这一份分类，避免观测、加工和最终转发出现不同的泄漏面。
+#[must_use]
+pub fn response_header_is_forwardable(name: &str, connection_options: &[String]) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    if connection_options
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case(&name))
+        || name.starts_with("sec-websocket-")
+    {
+        return false;
+    }
+
+    !matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
+            | "content-type"
+            | "content-encoding"
+            | "authorization"
+            | "x-api-key"
+            | "www-authenticate"
+            | "authentication-info"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "proxy-authentication-info"
+            | "cookie"
+            | "cookie2"
+            | "set-cookie"
+            | "set-cookie2"
+            | "chatgpt-account-id"
+            | "chatgpt-organization-id"
+            | "chatgpt-org-id"
+            | "chatgpt-project-id"
+            | "openai-organization"
+            | "openai-project"
+            | "x-openai-organization"
+            | "x-openai-project"
+            | "x-codex-installation-id"
+            | "x-codex-turn-metadata"
+    )
+}

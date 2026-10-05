@@ -1,13 +1,15 @@
 import type { rotationOptions } from '../constants'
-import type { RequestLocation } from '@/api'
-import { computed, reactive, ref, shallowRef } from 'vue'
+import type { RequestLocation, SmartSchedulingConfig } from '@/api'
+import type { ProviderRequestProfiles, ProviderRequestProfileUpdates } from '@/api/modules/client-profiles'
+import { toast } from '@codex-proxy/ui'
+import { isEqual } from 'es-toolkit'
 
+import { computed, reactive, ref, shallowRef } from 'vue'
 import { getSettings, updateSettings } from '@/api'
 import { ApiError } from '@/api/request'
-import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
-import { errorMessage } from '@/utils/async'
-import { normalizeRequestLocation, requestLocationError } from '@/utils/request-location'
+import { normalizeRequestLocation, requestLocationError } from '@/utils/data'
+import { errorMessage } from '@/utils/operation'
 
 type RotationStrategy = (typeof rotationOptions)[number]['value']
 
@@ -19,15 +21,18 @@ export function useSettingsForm() {
   const saving = saveAction.loading
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
-  const bpsMappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const savedRequestLocation = shallowRef<RequestLocation>()
+  const smartSchedulingDefaults = shallowRef<SmartSchedulingConfig>()
   const form = reactive({
-    disableFast: false,
+    configRevision: 0,
+    smartScheduling: undefined as SmartSchedulingConfig | undefined,
+    providerRequestProfiles: {} as ProviderRequestProfiles,
     requestLocationEnabled: false,
     requestLocation: { country: '', region: '', city: '', timezone: '' },
     refreshMarginSeconds: null as number | null,
     refreshConcurrency: null as number | null,
     maxConcurrentPerAccount: null as number | null,
+    openaiGuardianReservedConcurrency: null as number | null,
     requestIntervalMs: null as number | null,
     maxWaitingPerKey: null as number | null,
     maxWaitingPerAccount: null as number | null,
@@ -48,29 +53,39 @@ export function useSettingsForm() {
     accountAutoFreezeProbeEnabled: true,
     accountAutoFreezeProbeModel: '',
     accountAutoFreezeAdaptiveConcurrency: true,
+    accountWarmupEnabled: false,
+    accountWarmupScheduleTime: '08:00',
+    accountWarmupModel: '',
   })
 
   function snapshot() {
     return {
-      form: { ...form, requestLocation: { ...form.requestLocation } },
+      form: {
+        ...form,
+        smartScheduling: form.smartScheduling ? { ...form.smartScheduling } : undefined,
+        providerRequestProfiles: cloneProfiles(form.providerRequestProfiles),
+        requestLocation: { ...form.requestLocation },
+      },
       mappings: mappings.value.map(row => ({ ...row })),
-      bpsMappings: bpsMappings.value.map(row => ({ ...row })),
     }
   }
 
   const saved = shallowRef<ReturnType<typeof snapshot>>()
   const loaded = computed(() => saved.value !== undefined)
-  const hasChanges = computed(() => loaded.value && JSON.stringify(snapshot()) !== JSON.stringify(saved.value))
+  const hasChanges = computed(() => loaded.value && !isEqual(snapshot(), saved.value))
 
   function resetSettings() {
     if (!saved.value || saving.value)
       return
-    Object.assign(form, saved.value.form, { requestLocation: { ...saved.value.form.requestLocation } })
+    Object.assign(form, saved.value.form, {
+      smartScheduling: saved.value.form.smartScheduling ? { ...saved.value.form.smartScheduling } : undefined,
+      providerRequestProfiles: cloneProfiles(saved.value.form.providerRequestProfiles),
+      requestLocation: { ...saved.value.form.requestLocation },
+    })
     mappings.value = saved.value.mappings.map(row => ({ ...row }))
-    bpsMappings.value = saved.value.bpsMappings.map(row => ({ ...row }))
   }
 
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'concurrencyWaitTimeoutSeconds' | 'responsesMaxDecompressedBodyMiB' | 'accountAutoFreezeThreshold' | 'accountAutoFreezeWindowSeconds' | 'accountAutoFreezeDurationSeconds') {
+  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'openaiGuardianReservedConcurrency' | 'requestIntervalMs' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'concurrencyWaitTimeoutSeconds' | 'responsesMaxDecompressedBodyMiB' | 'accountAutoFreezeThreshold' | 'accountAutoFreezeWindowSeconds' | 'accountAutoFreezeDurationSeconds') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -87,6 +102,7 @@ export function useSettingsForm() {
   const refreshMarginSecondsValue = numericModel('refreshMarginSeconds')
   const refreshConcurrencyValue = numericModel('refreshConcurrency')
   const maxConcurrentPerAccountValue = numericModel('maxConcurrentPerAccount')
+  const openaiGuardianReservedConcurrencyValue = numericModel('openaiGuardianReservedConcurrency')
   const requestIntervalMsValue = numericModel('requestIntervalMs')
   const maxWaitingPerKeyValue = numericModel('maxWaitingPerKey')
   const maxWaitingPerAccountValue = numericModel('maxWaitingPerAccount')
@@ -105,21 +121,25 @@ export function useSettingsForm() {
   }
 
   function applySettings(data: Awaited<ReturnType<typeof getSettings>>) {
+    form.configRevision = data.configRevision
     savedRequestLocation.value = { ...data.requestLocation }
-    form.disableFast = data.disableFast
     form.requestLocationEnabled = data.requestLocationEnabled
     form.requestLocation = { ...data.requestLocation }
     form.refreshMarginSeconds = data.refreshMarginSeconds
     form.refreshConcurrency = data.refreshConcurrency
     form.maxConcurrentPerAccount = data.maxConcurrentPerAccount
+    form.openaiGuardianReservedConcurrency = data.openaiGuardianReservedConcurrency
     form.requestIntervalMs = data.requestIntervalMs
     form.maxWaitingPerKey = data.maxWaitingPerKey
     form.maxWaitingPerAccount = data.maxWaitingPerAccount
     form.concurrencyWaitTimeoutSeconds = data.concurrencyWaitTimeoutSeconds
     form.responsesMaxDecompressedBodyMiB = data.responsesMaxDecompressedBodyBytes / MIB
 
+    form.smartScheduling = { ...data.smartScheduling }
+    smartSchedulingDefaults.value = { ...data.smartSchedulingDefaults }
     form.rotationStrategy = data.rotationStrategy
     form.minCodexDesktopVersion = data.minCodexDesktopVersion ?? ''
+    form.providerRequestProfiles = cloneProfiles(data.providerRequestProfiles)
     form.minCodexCliVersion = data.minCodexCliVersion ?? ''
     form.usageRetentionDays = data.usageRetentionDays
     form.opsEventRetentionDays = data.opsEventRetentionDays
@@ -131,11 +151,10 @@ export function useSettingsForm() {
     form.accountAutoFreezeProbeEnabled = data.accountAutoFreezeProbeEnabled
     form.accountAutoFreezeProbeModel = data.accountAutoFreezeProbeModel ?? ''
     form.accountAutoFreezeAdaptiveConcurrency = data.accountAutoFreezeAdaptiveConcurrency
+    form.accountWarmupEnabled = data.accountWarmupEnabled
+    form.accountWarmupScheduleTime = data.accountWarmupScheduleTime ?? '08:00'
+    form.accountWarmupModel = data.accountWarmupModel ?? ''
     mappings.value = Object.entries(data.modelMappings || {}).map(([requestedModel, upstreamModel]) => ({
-      requestedModel,
-      upstreamModel: String(upstreamModel),
-    }))
-    bpsMappings.value = Object.entries(data.bpsModelMappings || {}).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
       upstreamModel: String(upstreamModel),
     }))
@@ -174,27 +193,9 @@ export function useSettingsForm() {
     mappings.value = rows
   }
 
-  function addBpsMapping() {
-    bpsMappings.value = [...bpsMappings.value, { requestedModel: '', upstreamModel: '' }]
-  }
-
-  function updateBpsMapping(index: number, key: 'requestedModel' | 'upstreamModel', value: string) {
-    const rows = [...bpsMappings.value]
-    if (!rows[index])
-      return
-    rows[index] = { ...rows[index], [key]: value }
-    bpsMappings.value = rows
-  }
-
-  function removeBpsMapping(index: number) {
-    const rows = [...bpsMappings.value]
-    rows.splice(index, 1)
-    bpsMappings.value = rows
-  }
-
-  function rowsPayload(rows: Array<{ requestedModel: string, upstreamModel: string }>) {
+  function mappingPayload() {
     const entries: Record<string, string> = {}
-    for (const row of rows) {
+    for (const row of mappings.value) {
       const requested = row.requestedModel.trim()
       const upstream = row.upstreamModel.trim()
       if (!requested || !upstream)
@@ -207,11 +208,23 @@ export function useSettingsForm() {
   }
 
   async function saveSettings() {
-    if (saving.value || loading.value || !savedRequestLocation.value)
+    const smartScheduling = form.smartScheduling
+    if (!smartScheduling)
       return
-    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, maxWaitingPerKey, maxWaitingPerAccount, concurrencyWaitTimeoutSeconds, responsesMaxDecompressedBodyMiB, accountAutoFreezeThreshold, accountAutoFreezeWindowSeconds, accountAutoFreezeDurationSeconds } = form
-    if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy || maxWaitingPerKey === null || maxWaitingPerAccount === null || concurrencyWaitTimeoutSeconds === null) {
-      toast.warning('请完整填写运行参数和调度策略')
+    const savedSettings = saved.value
+    if (saving.value || loading.value || !savedRequestLocation.value || !savedSettings)
+      return
+    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, openaiGuardianReservedConcurrency, requestIntervalMs, rotationStrategy, maxWaitingPerKey, maxWaitingPerAccount, concurrencyWaitTimeoutSeconds, responsesMaxDecompressedBodyMiB, accountAutoFreezeThreshold, accountAutoFreezeWindowSeconds, accountAutoFreezeDurationSeconds } = form
+    if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || openaiGuardianReservedConcurrency === null || requestIntervalMs === null || !rotationStrategy || maxWaitingPerKey === null || maxWaitingPerAccount === null || concurrencyWaitTimeoutSeconds === null) {
+      toast.warning('请完整填写并发、队列、凭据刷新参数和调度策略')
+      return
+    }
+    if (!Number.isInteger(maxConcurrentPerAccount) || maxConcurrentPerAccount < 0 || maxConcurrentPerAccount > 4294967295) {
+      toast.warning('默认账号并发上限应为 0～4294967295 的整数，0 表示不限制')
+      return
+    }
+    if (!Number.isInteger(openaiGuardianReservedConcurrency) || openaiGuardianReservedConcurrency < 0 || openaiGuardianReservedConcurrency > 4294967295) {
+      toast.warning('自动审批预留并发应为 0～4294967295 的整数，0 表示关闭')
       return
     }
     if (responsesMaxDecompressedBodyMiB === null || !Number.isInteger(responsesMaxDecompressedBodyMiB) || responsesMaxDecompressedBodyMiB < 1
@@ -221,7 +234,7 @@ export function useSettingsForm() {
     }
     if (![maxWaitingPerKey, maxWaitingPerAccount].every(value => Number.isInteger(value) && value >= 0 && value <= 1000)
       || !Number.isInteger(concurrencyWaitTimeoutSeconds) || concurrencyWaitTimeoutSeconds < 1 || concurrencyWaitTimeoutSeconds > 120) {
-      toast.warning('最大排队数应为 0～1000 的整数，最长排队时间应为 1～120 秒的整数')
+      toast.warning('队列容量应为 0～1000 的整数，排队超时应为 1～120 秒的整数')
       return
     }
     if (minCodexDesktopVersionError.value || minCodexCliVersionError.value) {
@@ -238,13 +251,13 @@ export function useSettingsForm() {
       return
     }
     if (accountAutoFreezeThreshold === null || accountAutoFreezeWindowSeconds === null || accountAutoFreezeDurationSeconds === null) {
-      toast.warning('请完整填写账号自动冻结参数')
+      toast.warning('请完整填写过载保护参数')
       return
     }
     if (!Number.isInteger(accountAutoFreezeThreshold) || accountAutoFreezeThreshold < 2 || accountAutoFreezeThreshold > 1000
       || !Number.isInteger(accountAutoFreezeWindowSeconds) || accountAutoFreezeWindowSeconds < 60 || accountAutoFreezeWindowSeconds > 3600
       || !Number.isInteger(accountAutoFreezeDurationSeconds) || accountAutoFreezeDurationSeconds < 300 || accountAutoFreezeDurationSeconds > 604800) {
-      toast.warning('自动冻结阈值应为 2～1000，统计窗口为 60～3600 秒，冻结时长为 300～604800 秒')
+      toast.warning('失败次数阈值应为 2～1000，统计窗口为 60～3600 秒，冷却时长为 300～604800 秒')
       return
     }
     const probeModel = form.accountAutoFreezeProbeModel.trim()
@@ -252,22 +265,42 @@ export function useSettingsForm() {
       toast.warning('探测模型名称不能超过 128 个字符')
       return
     }
+    const scheduleTime = form.accountWarmupScheduleTime.trim()
+    const timeRegex = /^(?:[01]\d|2[0-3]):[0-5]\d(?:,(?:[01]\d|2[0-3]):[0-5]\d)*$/
+    if (!scheduleTime || !timeRegex.test(scheduleTime)) {
+      toast.warning('预激活时间格式无效，请输入 HH:MM 格式（如 08:00 或 08:00,13:00）')
+      return
+    }
+    const warmupModel = form.accountWarmupModel.trim()
+    if (form.accountWarmupEnabled && !warmupModel) {
+      toast.warning('启用预激活时请选择模型')
+      return
+    }
+    if (warmupModel.length > 128) {
+      toast.warning('预激活模型名称不能超过 128 个字符')
+      return
+    }
     await saveAction.run(async () => {
       const result = await updateSettings({
-        disableFast: form.disableFast,
+        configRevision: savedSettings.form.configRevision,
+        providerRequestProfiles: requestProfileUpdates(
+          savedSettings.form.providerRequestProfiles,
+          form.providerRequestProfiles,
+        ),
         requestLocationEnabled: form.requestLocationEnabled,
         requestLocation,
-        modelMappings: rowsPayload(mappings.value),
-        bpsModelMappings: rowsPayload(bpsMappings.value),
+        modelMappings: mappingPayload(),
         refreshMarginSeconds,
         refreshConcurrency,
         maxConcurrentPerAccount,
+        openaiGuardianReservedConcurrency,
         requestIntervalMs,
         maxWaitingPerKey,
         maxWaitingPerAccount,
         concurrencyWaitTimeoutSeconds,
         responsesMaxDecompressedBodyBytes: responsesMaxDecompressedBodyMiB * MIB,
         rotationStrategy,
+        smartScheduling: { ...smartScheduling },
         minCodexDesktopVersion: form.minCodexDesktopVersion.trim() || null,
         minCodexCliVersion: form.minCodexCliVersion.trim() || null,
         usageRetentionDays: form.usageRetentionDays,
@@ -280,12 +313,15 @@ export function useSettingsForm() {
         accountAutoFreezeProbeEnabled: form.accountAutoFreezeProbeEnabled,
         accountAutoFreezeProbeModel: probeModel || null,
         accountAutoFreezeAdaptiveConcurrency: form.accountAutoFreezeAdaptiveConcurrency,
+        accountWarmupEnabled: form.accountWarmupEnabled,
+        accountWarmupScheduleTime: scheduleTime,
+        accountWarmupModel: warmupModel || null,
       })
       applySettings(result)
       toast.success('设置已保存')
     }, {
       onError: (cause) => {
-        if (cause instanceof ApiError)
+        if (cause instanceof ApiError && cause.status !== 409)
           void loadSettings(true)
       },
     })
@@ -298,17 +334,15 @@ export function useSettingsForm() {
     resetSettings,
     error,
     form,
+    smartSchedulingDefaults,
     mappings,
     addMapping,
     updateMapping,
     removeMapping,
-    bpsMappings,
-    addBpsMapping,
-    updateBpsMapping,
-    removeBpsMapping,
     refreshMarginSecondsValue,
     refreshConcurrencyValue,
     maxConcurrentPerAccountValue,
+    openaiGuardianReservedConcurrencyValue,
     requestIntervalMsValue,
     maxWaitingPerKeyValue,
     maxWaitingPerAccountValue,
@@ -322,6 +356,24 @@ export function useSettingsForm() {
     saveSettings,
     loadSettings,
   }
+}
+
+function cloneProfiles(value: ProviderRequestProfiles): ProviderRequestProfiles {
+  return JSON.parse(JSON.stringify(value)) as ProviderRequestProfiles
+}
+
+function requestProfileUpdates(
+  previous: ProviderRequestProfiles,
+  current: ProviderRequestProfiles,
+): ProviderRequestProfileUpdates {
+  const updates: ProviderRequestProfileUpdates = {}
+  const clonedCurrent = cloneProfiles(current)
+  for (const provider of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+    if (isEqual(previous[provider], current[provider]))
+      continue
+    updates[provider] = clonedCurrent[provider] ?? null
+  }
+  return updates
 }
 
 function isSemver(value: string): boolean {

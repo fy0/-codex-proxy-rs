@@ -24,7 +24,7 @@ fn point(minute: i64, percent: f64, tokens: u64) -> QuotaForecastPoint {
 }
 
 fn select(points: Vec<QuotaForecastPoint>, current: QuotaForecastPoint) -> QuotaForecastSample {
-    select_forecast_sample("week".to_owned(), time(0), current, points, 2)
+    select_forecast_sample("week".to_owned(), time(0), current, points, 2, false)
 }
 
 #[test]
@@ -55,6 +55,7 @@ fn recent_blocks_and_tail_replace_old_workload_without_averaging_individual_rati
     assert_eq!(sample.baseline_percent, 10.0);
     assert_eq!(sample.sampled_percent, 17.0);
     assert_eq!(sample.usage.tokens, 700);
+    assert_eq!(sample.cycle_usage.tokens, 900);
     assert_eq!(sample.block_count, 3);
 }
 
@@ -77,6 +78,7 @@ fn large_percentage_reversal_restarts_sampling_without_crossing_old_consumption(
     );
     assert_eq!(sample.baseline_percent, 1.0);
     assert_eq!(sample.usage.tokens, 70);
+    assert_eq!(sample.cycle_usage.tokens, 70);
     assert_eq!(sample.sampled_percent, 7.0);
     assert!(!sample.discontinuous);
     let waiting = select(
@@ -121,4 +123,42 @@ fn counter_regressions_fail_closed_and_future_points_are_not_used() {
     let future = select(vec![point(10, 1.0, 1)], point(2, 20.0, 500));
     assert_eq!(future.method, QuotaForecastMethod::Cumulative);
     assert_eq!(future.observation_count, 0);
+}
+
+#[test]
+fn exhausted_history_is_retained_to_detect_a_reset_with_an_unchanged_deadline() {
+    let sample = select(
+        vec![point(1, 100.0, 10_000), point(2, 0.0, 10_000)],
+        point(3, 10.0, 10_100),
+    );
+    assert_eq!(sample.cycle_usage.tokens, 100);
+    assert_eq!(sample.usage.tokens, 100);
+    assert_eq!(sample.sampled_percent, 10.0);
+    assert!(!sample.discontinuous);
+}
+
+#[test]
+fn changed_window_restarts_cycle_totals_at_first_matching_observation() {
+    let sample = select_forecast_sample(
+        "week".to_owned(),
+        time(0),
+        point(4, 12.0, 10_120),
+        vec![point(2, 0.0, 10_000), point(3, 5.0, 10_050)],
+        0,
+        true,
+    );
+    assert_eq!(sample.cycle_usage.tokens, 120);
+    assert!((sample.cycle_usage.usd - 0.12).abs() < 1e-10);
+    assert_eq!(sample.usage.tokens, 120);
+    assert!(!sample.discontinuous);
+    let waiting = select_forecast_sample(
+        "week".to_owned(),
+        time(0),
+        point(4, 2.0, 10_020),
+        vec![],
+        0,
+        true,
+    );
+    assert_eq!(waiting.cycle_usage.tokens, 0);
+    assert!(waiting.discontinuous);
 }

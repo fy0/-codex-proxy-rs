@@ -4,8 +4,16 @@ use crate::validation::{IdentifierError, validate_text};
 use std::fmt;
 
 /// 编译进二进制的 Provider adapter slug。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct ProviderKind(String);
+
+impl<'de> serde::Deserialize<'de> for ProviderKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(<String as serde::Deserialize>::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 impl ProviderKind {
     /// 校验 Provider slug。

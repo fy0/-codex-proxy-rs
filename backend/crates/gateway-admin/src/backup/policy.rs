@@ -21,20 +21,23 @@ pub struct BackupSchedule {
 }
 
 impl BackupSchedule {
-    /// 解析并校验 5 段 Cron 与 IANA 时区。
+    /// 按部署时区解析并校验 5 段 Cron。
     ///
     /// # Errors
     ///
-    /// Cron 非法或时区不是 IANA 名称时返回 [`BackupError`]。
-    pub fn parse(cron_expression: &str, schedule_timezone: &str) -> Result<Self, BackupError> {
+    /// Cron 非法时返回 [`BackupError`]。
+    pub fn parse(
+        cron_expression: &str,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> Result<Self, BackupError> {
         let expression = format!("0 {cron_expression}");
         let schedule = Schedule::from_str(&expression).map_err(|_| {
             BackupError::new(code::INVALID_CRON, "Cron 表达式必须是 5 段格式".to_owned())
         })?;
-        let timezone = schedule_timezone.parse::<Tz>().map_err(|_| {
-            BackupError::new(code::INVALID_TIMEZONE, "时区必须是 IANA 名称".to_owned())
-        })?;
-        Ok(Self { schedule, timezone })
+        Ok(Self {
+            schedule,
+            timezone: timezone.iana(),
+        })
     }
 
     /// 返回最接近 `at`（含 `at` 所在分钟）的最近一次触发时间。
@@ -49,9 +52,7 @@ impl BackupSchedule {
         // 检查窗口内是否存在触发；不存在则直接返回 None。
         let low_instant = instant(low_min, self.timezone)?;
         if self
-            .schedule
-            .after(&low_instant)
-            .next()
+            .next_after(low_instant.to_utc())
             .is_none_or(|firing| firing.timestamp() > high_min * 60 + 59)
         {
             return None;
@@ -79,19 +80,21 @@ impl BackupSchedule {
     /// 返回第一个严格晚于 `at` 的触发时间。
     #[must_use]
     pub fn next_after(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let local = at.with_timezone(&self.timezone);
-        self.schedule
-            .after(&local)
-            .next()
-            .map(|firing| firing.with_timezone(&Utc))
+        let local = at.with_timezone(&self.timezone).naive_local().and_utc();
+        self.schedule.after(&local).find_map(|firing| {
+            let instant = self
+                .timezone
+                .from_local_datetime(&firing.naive_utc())
+                .earliest()?
+                .to_utc();
+            (instant > at).then_some(instant)
+        })
     }
 
     /// `after(u 分钟)` 返回的第一个触发时间（分钟索引），用于二分搜索。
     fn firing_after(&self, minute_index: i64) -> Option<i64> {
-        let instant = instant(minute_index, self.timezone)?;
-        self.schedule
-            .after(&instant)
-            .next()
+        let instant = instant(minute_index, self.timezone)?.to_utc();
+        self.next_after(instant)
             .map(|firing| firing.timestamp().div_euclid(60))
     }
 }

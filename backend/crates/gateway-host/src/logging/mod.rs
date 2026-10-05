@@ -48,7 +48,10 @@ pub enum LogError {
 }
 
 /// 初始化日志；文件按完整日期留存，不以分片数量淘汰窗口内记录。
-pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> {
+pub fn initialize_logging(
+    config: &LoggingConfig,
+    timezone: gateway_core::time::DeploymentTimeZone,
+) -> Result<LogGuard, LogError> {
     let directive = env::var("RUST_LOG").unwrap_or_else(|_| config.level.clone());
     let file_filter = application_file_filter(&directive)?;
     let recovery_file_filter = oauth_recovery_file_filter();
@@ -70,6 +73,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let file_writer = if config.file.enabled {
         let (writer, guard) = create_file_writer(
             config,
+            timezone,
             config.file.retention_days,
             APPLICATION_LOG_FILE_PREFIX,
             "gateway-log-application-file",
@@ -83,6 +87,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let recovery_file_writer = if config.oauth_recovery {
         let (writer, guard) = create_file_writer(
             config,
+            timezone,
             config.file.retention_days,
             OAUTH_RECOVERY_LOG_FILE_PREFIX,
             "gateway-log-oauth-recovery-file",
@@ -96,6 +101,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let request_dump_file_writer = if config.request_dump {
         let (writer, guard) = create_file_writer(
             config,
+            timezone,
             config.request_dump_retention_days,
             REQUEST_DUMP_LOG_FILE_PREFIX,
             "gateway-log-request-dump-file",
@@ -110,6 +116,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let stdout_layer = stdout_writer.map(|writer| {
         tracing_subscriber::fmt::layer()
             .compact()
+            .with_timer(DeploymentClock(timezone))
             .with_writer(writer)
             .with_target(false)
             .with_ansi(false)
@@ -118,6 +125,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let file_layer = file_writer.map(|writer| {
         tracing_subscriber::fmt::layer()
             .json()
+            .with_timer(DeploymentClock(timezone))
             .with_writer(writer)
             .with_target(true)
             .with_file(true)
@@ -131,6 +139,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let recovery_file_layer = recovery_file_writer.map(|writer| {
         tracing_subscriber::fmt::layer()
             .json()
+            .with_timer(DeploymentClock(timezone))
             .with_writer(writer)
             .with_target(true)
             .with_file(true)
@@ -144,6 +153,7 @@ pub fn initialize_logging(config: &LoggingConfig) -> Result<LogGuard, LogError> 
     let request_dump_file_layer = request_dump_file_writer.map(|writer| {
         tracing_subscriber::fmt::layer()
             .json()
+            .with_timer(DeploymentClock(timezone))
             .with_writer(writer)
             .with_target(true)
             .with_file(true)
@@ -197,7 +207,7 @@ fn stdout_filter_directive(directive: &str, persistent_log_enabled: bool) -> Str
     if !persistent_log_enabled {
         format!("{directive},{OAUTH_RECOVERY_LOG_TARGET}=off,{REQUEST_DUMP_LOG_TARGET}=off")
     } else {
-        "off,gateway_startup=info".to_owned()
+        "off,gateway_startup=info,gateway_shutdown=info".to_owned()
     }
 }
 
@@ -209,6 +219,7 @@ impl LogGuard {
 
 fn create_file_writer(
     config: &LoggingConfig,
+    timezone: gateway_core::time::DeploymentTimeZone,
     retention_days: usize,
     prefix: &'static str,
     thread_name: &'static str,
@@ -225,6 +236,19 @@ fn create_file_writer(
         maximum_bytes,
         retention_days,
         Arc::clone(&health),
+        timezone,
     )?;
     Ok(FileLogSink::spawn(writer, thread_name, health)?)
+}
+
+#[derive(Clone, Copy)]
+struct DeploymentClock(gateway_core::time::DeploymentTimeZone);
+
+impl tracing_subscriber::fmt::time::FormatTime for DeploymentClock {
+    fn format_time(
+        &self,
+        writer: &mut tracing_subscriber::fmt::format::Writer<'_>,
+    ) -> std::fmt::Result {
+        write!(writer, "{}", self.0.local(chrono::Utc::now()).to_rfc3339())
+    }
 }

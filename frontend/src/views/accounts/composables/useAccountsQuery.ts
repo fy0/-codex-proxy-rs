@@ -1,4 +1,4 @@
-import type { BaseTableSort } from '@/components/base/BaseTable/columns'
+import type { BaseTableSort } from '@codex-proxy/ui'
 import { watchDebounced } from '@vueuse/core'
 
 import { computed, onMounted, shallowRef, watch } from 'vue'

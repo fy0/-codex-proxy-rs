@@ -256,7 +256,8 @@ fn decoder_should_bill_the_sent_model_independently_of_the_response_model() {
         ("gpt-5.6-sol", Some("gpt-6-astra"), Some(6_875_000)),
         ("gpt-5.6-sol", Some("gpt-5.6-sol"), Some(6_875_000)),
         ("gpt-5.6-sol", None, Some(6_875_000)),
-        ("gpt-6-sol", Some("gpt-5.6-sol"), None),
+        ("gpt-6-sol", Some("gpt-5.6-sol"), Some(2_550_000)),
+        ("gpt-6-luna", Some("gpt-6-astra"), Some(127_500)),
     ] {
         let created =
             json!({"type":"response.created","response":{"id":"resp_model_cost","model":returned}});
@@ -398,7 +399,7 @@ fn decoder_should_use_non_reasoning_preview_web_search_price() {
 #[test]
 fn gpt_6_decoders_should_use_reasoning_preview_web_search_price() {
     let tools = vec![json!({ "type": "web_search_preview" })];
-    for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+    for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
         let created = json!({
             "type":"response.created",
             "response":{"id":"resp_preview_search_cost","model":model}

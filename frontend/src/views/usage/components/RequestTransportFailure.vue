@@ -109,7 +109,7 @@ const diagnosis = computed(() => {
       </div>
     </dl>
     <p v-if="!diagnosis.reason" class="mt-3 mb-0 text-cp-xs leading-relaxed text-cp-text-secondary">
-      这条记录未保存底层错误分类；需用请求 ID 检索留存的服务器日志。
+      这条记录未保存底层错误分类，需用请求 ID 检索留存的服务器日志
     </p>
   </aside>
 </template>

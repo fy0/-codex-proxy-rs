@@ -1,3 +1,4 @@
+// @env node
 import type { ESLint, Rule } from 'eslint'
 import antfu from '@antfu/eslint-config'
 
@@ -64,7 +65,7 @@ const templateStylePlugin = {
 export default antfu(
   {
     type: 'app',
-    ignores: ['dist', 'coverage', 'pnpm-workspace.yaml'],
+    ignores: ['**/dist/**', '**/coverage/**', '**/pnpm-workspace.yaml'],
     formatters: {
       css: true,
       html: true,

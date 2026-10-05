@@ -1,0 +1,27 @@
+[package]
+name = "codex-proxy-plugin-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cpr-plugin"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+flate2 = "1.1.9"
+gateway-plugin-sdk = { path = "../../crates/gateway-plugin/sdk" }
+hex = "0.4.3"
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+tar = "0.4.44"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

@@ -16,14 +16,20 @@ export * from './modules/backups'
 // Dashboard 聚合
 export * from './modules/dashboard'
 
+// 插件管理
+export * from './modules/plugin-extensions'
+export * from './modules/plugins'
+
+// 模型定价
+export * from './modules/pricing'
+
 export * from './modules/proxies'
+
 // 设置管理
 export * from './modules/settings'
 
 // 系统更新
 export * from './modules/system'
-
-export * from './modules/turn-state'
 
 // 使用记录
 export * from './modules/usage'

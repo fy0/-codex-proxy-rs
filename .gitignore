@@ -6,9 +6,8 @@
 # Frontend
 /frontend/node_modules/
 /frontend/dist/
-/frontend/.vite/
-/.pnpm-store/
 /frontend/.pnpm-store/
+/frontend/.pnpm-cache/
 *.tsbuildinfo
 
 # Release artifacts
@@ -20,6 +19,9 @@
 
 # Local configuration and secrets
 /deploy/config.yaml
+.env
+.env.*
+!.env.example
 
 # Editors and operating systems
 /.idea/

@@ -4,9 +4,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-mod cookie_lock;
+mod admin_adapter;
+mod authorization;
 mod quota_forecast;
-mod turn_state;
+mod timestamps;
 
 use chrono::{TimeDelta, Utc};
 use gateway_admin::{
@@ -20,8 +21,8 @@ use gateway_admin::{
         observability::TimeRange,
         provider_credentials::{
             AuthorizationCommit, AuthorizationCredentialCommit, AuthorizationMutationTarget,
-            AuthorizationOwnerBinding, PendingAuthorizationMutation, PreparedCredentialCreate,
-            ProviderDocument,
+            AuthorizationOwnerBinding, PendingAuthorizationMutation, PluginAccountListQuery,
+            PreparedCredentialCreate, ProviderDocument,
         },
     },
     ports::store::AccountStore,
@@ -113,11 +114,16 @@ async fn refresh_candidates_should_filter_order_and_bound_in_one_query() {
     disabled.has_refresh_token = true;
     disabled.access_token_expires_at = Some(now);
     disabled.enabled = false;
+    let mut expired = account("acct_refresh_expired", "user-expired");
+    expired.enabled = false;
+    expired.has_refresh_token = true;
+    expired.access_token_expires_at = Some(now - TimeDelta::hours(4));
+    expired.credential_state = CredentialState::Expired;
     let mut other_provider = account("acct_refresh_other", "user-other");
     other_provider.provider_kind = "xai".to_owned();
     other_provider.has_refresh_token = true;
     other_provider.access_token_expires_at = Some(now);
-    for candidate in [forced, due, retry_later, disabled, other_provider] {
+    for candidate in [forced, due, retry_later, disabled, expired, other_provider] {
         repository
             .insert_provider_account(candidate)
             .await
@@ -147,7 +153,7 @@ async fn refresh_candidates_should_filter_order_and_bound_in_one_query() {
             .iter()
             .map(|candidate| candidate.account.id().as_str())
             .collect::<Vec<_>>(),
-        vec!["acct_refresh_forced", "acct_refresh_due"]
+        vec!["acct_refresh_forced", "acct_refresh_disabled"]
     );
     assert!(candidates.iter().all(|candidate| {
         candidate.credential.expose_to_provider()["access_token"] == "initial-secret"
@@ -951,7 +957,7 @@ async fn terminal_admin_usage_chunks_large_selections_and_preserves_exact_costs(
     assert_eq!(usage[0].total_tokens, Some(18));
     assert_eq!(usage[0].costs[0].currency, "USD");
     assert_eq!(usage[0].costs[0].amount.as_str(), "1.2345678901");
-    assert_eq!(usage[0].request_buckets.len(), 2);
+    assert_eq!(usage[0].request_buckets.len(), 24);
     assert_eq!(
         usage[0]
             .request_buckets
@@ -1178,9 +1184,6 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
         .update_account(
             UpdateAccount {
                 notes: None,
-                turn_state_override: None,
-                basispoints_enabled: None,
-                bps_concurrency_limit: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
                 account_id: "acct_terminal_mutation".to_owned(),
@@ -1234,7 +1237,6 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
                     "concurrency_limit".to_owned(),
                     "weight".to_owned(),
                     "groups".to_owned(),
-                    "bps_concurrency_limit".to_owned(),
                 ],
             ),
             ("delete".to_owned(), 3, Vec::new()),
@@ -1263,9 +1265,6 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
     };
     let command = UpdateAccount {
         notes: None,
-        turn_state_override: None,
-        basispoints_enabled: None,
-        bps_concurrency_limit: None,
         model_access: Default::default(),
         account_id: "acct_proxy".to_owned(),
         enabled: true,
@@ -1339,9 +1338,6 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     let command = UpdateAccount {
         account_id: "acct_notes".to_owned(),
         notes: Some("  团队备用\n下月续费  ".to_owned()),
-        turn_state_override: None,
-        basispoints_enabled: None,
-        bps_concurrency_limit: None,
         enabled: true,
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
@@ -1381,9 +1377,6 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
-                turn_state_override: None,
-                basispoints_enabled: None,
-                bps_concurrency_limit: None,
                 account_ids: vec!["acct_notes".to_owned()],
                 enabled: Some(false),
                 concurrency_limit: Some(None),
@@ -1494,9 +1487,6 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
             UpdateAccount {
                 account_id: "acct_notes".to_owned(),
                 notes: Some("备".repeat(501)),
-                turn_state_override: None,
-                basispoints_enabled: None,
-                bps_concurrency_limit: None,
                 enabled: false,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
@@ -1537,7 +1527,7 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
 }
 
 #[tokio::test]
-async fn account_recovery_resets_status_facts_without_changing_credentials_or_scheduling() {
+async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
     const GROUP_ID: &str = "grp_00000000000000000000000000000070";
     let Some(database) = TestDatabase::create("provider_account_recovery").await else {
         return;
@@ -1612,6 +1602,57 @@ async fn account_recovery_resets_status_facts_without_changing_credentials_or_sc
     .await
     .expect("load account before recovery");
     let store = admin_account_store(&database.pool);
+    let facts_query = "select to_jsonb(a) - 'enabled' - 'updated_at'
+                       from provider_accounts a where id = 'acct_recovery'";
+    let before_enable: serde_json::Value = sqlx::query_scalar(facts_query)
+        .fetch_one(&database.pool)
+        .await
+        .expect("load disabled account facts");
+
+    let enabled = store
+        .batch_update_accounts(
+            BatchUpdateAccounts {
+                account_ids: vec!["acct_recovery".to_owned()],
+                enabled: Some(true),
+                concurrency_limit: None,
+                weight: None,
+                model_access: None,
+                group_ids: None,
+                outbound_proxy: None,
+            },
+            &MutationContext {
+                actor: MutationActor::System,
+                request_id: "request_account_enable".to_owned(),
+            },
+        )
+        .await
+        .expect("enable account scheduling");
+
+    assert_eq!(enabled.config_revision.get(), 2);
+    assert!(
+        repository
+            .load_provider_account("acct_recovery")
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .enabled
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(facts_query)
+            .fetch_one(&database.pool)
+            .await
+            .expect("load enabled account facts"),
+        before_enable
+    );
+    assert_eq!(
+        account_group_ids(&database.pool, "acct_recovery").await,
+        [GROUP_ID]
+    );
+    assert_eq!(
+        audit_count(&database.pool, "request_account_enable").await,
+        1
+    );
 
     let result = store
         .recover_account(
@@ -1624,7 +1665,7 @@ async fn account_recovery_resets_status_facts_without_changing_credentials_or_sc
         .await
         .expect("recover account");
 
-    assert_eq!(result.config_revision.get(), 2);
+    assert_eq!(result.config_revision.get(), 3);
     let current = sqlx::query_as::<_, RecoveredAccountRow>(
         "select enabled, credential_state, quota_access_state, quota_evidence,
                 last_error_message, provider_quota_json, concurrency_limit, weight,
@@ -1696,9 +1737,6 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
         .batch_update_accounts(
             BatchUpdateAccounts {
                 model_access: Default::default(),
-                turn_state_override: None,
-                basispoints_enabled: None,
-                bps_concurrency_limit: None,
                 outbound_proxy: None,
                 account_ids: account_ids.clone(),
                 enabled: Some(false),
@@ -1736,9 +1774,6 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
         .batch_update_accounts(
             BatchUpdateAccounts {
                 model_access: Default::default(),
-                turn_state_override: None,
-                basispoints_enabled: None,
-                bps_concurrency_limit: None,
                 outbound_proxy: None,
                 account_ids: account_ids.clone(),
                 enabled: Some(true),
@@ -1933,6 +1968,12 @@ async fn authorization_create_returns_existing_account_id_when_identity_is_upser
     let result = admin_account_store(&database.pool)
         .commit_authorization(
             AuthorizationCommit {
+                key: gateway_admin::model::provider_credentials::AuthorizationReceiptKey::new(
+                    provider_kind.clone(),
+                    "authorization-upsert",
+                    &context,
+                )
+                .unwrap(),
                 settings: Some(gateway_admin::model::accounts::AccountImportSettings {
                     notes: Some("  OAuth 新建备注  ".to_owned()),
                     model_access: Default::default(),
@@ -1948,33 +1989,37 @@ async fn authorization_create_returns_existing_account_id_when_identity_is_upser
                     },
                     AuthorizationOwnerBinding::from_context(&context),
                 ),
-                credential: AuthorizationCredentialCommit::Create(PreparedCredentialCreate {
-                    model_access: Default::default(),
-                    outbound_proxy: None,
-                    account_id: ProviderAccountId::new("acct_authorization_candidate")
-                        .expect("candidate account ID"),
-                    provider_kind,
-                    name: "authorized account".to_owned(),
-                    email: Some("authorized@example.invalid".to_owned()),
-                    upstream_user_id: Some("user-authorization-upsert".to_owned()),
-                    upstream_account_id: None,
-                    plan_type: Some("free".to_owned()),
-                    authentication_kind: "oauth".to_owned(),
-                    provider_material: ProviderDocument::new(OpaqueProviderData::new(
-                        provider_material,
-                    )),
-                    has_refresh_token: true,
-                    access_token_expires_at: Some(Utc::now() + TimeDelta::hours(1)),
-                    next_refresh_at: None,
-                    enabled: true,
-                    credential_state: CredentialState::Ready,
-                    credential_observed_at: Utc::now(),
-                }),
+                credential: AuthorizationCredentialCommit::Create(Box::new(
+                    PreparedCredentialCreate {
+                        model_access: Default::default(),
+                        outbound_proxy: None,
+                        account_id: ProviderAccountId::new("acct_authorization_candidate")
+                            .expect("candidate account ID"),
+                        provider_kind,
+                        name: "authorized account".to_owned(),
+                        email: Some("authorized@example.invalid".to_owned()),
+                        upstream_user_id: Some("user-authorization-upsert".to_owned()),
+                        upstream_account_id: None,
+                        plan_type: Some("free".to_owned()),
+                        authentication_kind: "oauth".to_owned(),
+                        provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                            provider_material,
+                        )),
+                        has_refresh_token: true,
+                        access_token_expires_at: Some(Utc::now() + TimeDelta::hours(1)),
+                        next_refresh_at: None,
+                        enabled: true,
+                        credential_state: CredentialState::Ready,
+                        credential_observed_at: Utc::now(),
+                    },
+                )),
             },
             &context,
         )
         .await
         .expect("authorize existing identity");
+
+    let result = result.result;
 
     assert_eq!(
         (
@@ -2017,6 +2062,8 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
     let saved = proxies
         .create(
             NewProxy {
+                auto_location: false,
+                test: None,
                 location: None,
                 name: "OAuth".to_owned(),
                 proxy: original.clone(),
@@ -2027,6 +2074,7 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
         .unwrap()
         .record;
     let success = ProxyTestResult {
+        location: Default::default(),
         success: true,
         latency_ms: 1,
         exit_ip: Some("203.0.113.5".parse().unwrap()),
@@ -2042,6 +2090,8 @@ async fn authorization_import_rejects_a_saved_proxy_changed_during_oauth() {
     let edited = proxies
         .update(
             UpdateProxy {
+                auto_location: None,
+                test: None,
                 location: None,
                 id: saved.id.clone(),
                 revision: saved.revision,
@@ -2132,7 +2182,6 @@ async fn core_refresh_cas_updates_profile_and_credential_under_one_revision() {
             next_refresh_at: None,
             enabled: true,
             concurrency_limit: None,
-            bps_concurrency_limit: None,
             weight: gateway_core::account::AccountWeight::DEFAULT,
             credential_state: CredentialState::Ready,
             credential_observed_at: Utc::now(),
@@ -2460,9 +2509,6 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
     let revision = repository
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
             notes: None,
-            turn_state_override: None,
-            basispoints_enabled: None,
-            bps_concurrency_limit: None,
             model_access: Default::default(),
             outbound_proxy: None,
             account_ids: vec!["acct_admin_a".to_owned()],
@@ -2532,9 +2578,6 @@ async fn credential_rotation_and_settings_share_one_transaction() {
     let settings = UpdateAccount {
         account_id: ACCOUNT_ID.to_owned(),
         notes: Some("统一保存".to_owned()),
-        turn_state_override: None,
-        basispoints_enabled: None,
-        bps_concurrency_limit: None,
         enabled: false,
         concurrency_limit: Some(AccountConcurrencyLimit::new(3).unwrap()),
         weight: AccountWeight::new(7).unwrap(),
@@ -2897,7 +2940,83 @@ async fn xai_resettable_usage_limit_state_is_persisted() {
 }
 
 #[tokio::test]
-async fn disabled_account_preserves_user_state_during_refresh_writes() {
+async fn core_refresh_cas_updates_credentials_after_scheduling_is_disabled() {
+    let Some(database) = TestDatabase::create("disabled_core_refresh").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let account_id = ProviderAccountId::new("acct_disabled_core_refresh").unwrap();
+    repository
+        .insert_provider_account(account(account_id.as_str(), "user-disabled-core-refresh"))
+        .await
+        .unwrap();
+    let revision = CredentialRevision::new(1).unwrap();
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: account_id.clone(),
+            expected_revision: revision,
+            credential_state: CredentialState::Ready,
+            observed_at: SystemTime::now(),
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: Some("previous refresh failure".to_owned()),
+        })
+        .await
+        .unwrap();
+    let quota = QuotaState::exhausted(QuotaEvidence::UsageLimitReached, SystemTime::now(), None);
+    repository
+        .apply_quota_access(QuotaAccessChange {
+            account_id: account_id.clone(),
+            expected_revision: revision,
+            state: quota,
+        })
+        .await
+        .unwrap();
+    let refreshed = CredentialCasUpdate::new(
+        account_id.clone(),
+        revision,
+        ProviderAccountUpdate {
+            account_id: account_id.clone(),
+            name: "unused profile".to_owned(),
+            email: None,
+            plan_type: None,
+        },
+        plaintext_credential("refreshed-secret"),
+        true,
+        Some(SystemTime::now() + Duration::from_secs(3_600)),
+        None,
+    )
+    .unwrap()
+    .preserving_profile()
+    .with_account_state(CredentialState::Ready, SystemTime::now(), None, None);
+    // 模拟刷新在途时停用调度；提交新凭据不能重新启用账号，也不能丢弃刷新结果。
+    repository.set_enabled(&account_id, false).await.unwrap();
+    assert!(matches!(
+        repository
+            .compare_and_swap_credential(refreshed)
+            .await
+            .unwrap(),
+        CredentialCasOutcome::Updated(_)
+    ));
+    let current = repository
+        .load_current_credential(&account_id)
+        .await
+        .unwrap();
+    assert!(!current.account.enabled());
+    assert_eq!(current.account.name(), account_id.as_str());
+    assert_eq!(current.account.credential_state(), CredentialState::Ready);
+    assert_eq!(current.account.last_error_reason(), None);
+    assert_eq!(current.account.last_error_message(), None);
+    assert!(current.account.quota().is_exhausted());
+    assert_eq!(
+        current.credential.expose_to_provider()["access_token"],
+        "refreshed-secret"
+    );
+    assert_eq!(current.account.revision().get(), 2);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn disabled_account_updates_credentials_without_enabling_scheduling() {
     let Some(database) = TestDatabase::create("provider_account_disabled_refresh").await else {
         return;
     };
@@ -2908,7 +3027,7 @@ async fn disabled_account_preserves_user_state_during_refresh_writes() {
     let account_id = ProviderAccountId::new("acct_disabled_refresh").expect("account ID");
     let mut disabled = account(account_id.as_str(), "user-disabled-refresh");
     disabled.enabled = false;
-    disabled.credential_state = CredentialState::Expired;
+    disabled.credential_state = CredentialState::Ready;
     repository
         .import_provider_accounts(ImportProviderAccounts {
             settings: None,
@@ -2926,15 +3045,28 @@ async fn disabled_account_preserves_user_state_during_refresh_writes() {
 
     repository
         .apply_state_change(AccountStateChange {
-            message: None,
+            message: Some("refresh token expired".to_owned()),
             account_id: account_id.clone(),
             expected_revision: CredentialRevision::new(1).expect("credential revision"),
-            credential_state: CredentialState::Ready,
+            credential_state: CredentialState::Expired,
             observed_at: SystemTime::now(),
-            error_reason: None,
+            error_reason: Some(AccountErrorReason::CredentialExpired),
         })
         .await
-        .expect("disabled state write is a no-op");
+        .expect("record rejected credential while scheduling is disabled");
+    let rejected = repository
+        .load_current_credential(&account_id)
+        .await
+        .unwrap();
+    assert!(!rejected.account.enabled());
+    assert_eq!(
+        rejected.account.credential_state(),
+        CredentialState::Expired
+    );
+    assert_eq!(
+        rejected.account.last_error_message(),
+        Some("refresh token expired")
+    );
     repository
         .rotate_provider_account(RotateProviderAccount {
             settings: None,
@@ -2960,7 +3092,7 @@ async fn disabled_account_preserves_user_state_during_refresh_writes() {
     .await
     .expect("load disabled account after refresh writes");
     assert!(!current.0);
-    assert_eq!(current.1, "expired");
+    assert_eq!(current.1, "ready");
     assert_eq!(current.2["access_token"], "disabled-refreshed-secret");
     assert_eq!(current.3, 2);
 
@@ -2985,7 +3117,6 @@ pub(super) fn account(id: &str, upstream_user_id: &str) -> NewProviderAccount {
         next_refresh_at: None,
         enabled: true,
         concurrency_limit: None,
-        bps_concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
         credential_state: CredentialState::Ready,
         credential_observed_at: Utc::now(),
@@ -2995,6 +3126,7 @@ pub(super) fn account(id: &str, upstream_user_id: &str) -> NewProviderAccount {
 fn credential_update(account_id: &str, revision: u64, marker: &str) -> ProviderCredentialUpdate {
     ProviderCredentialUpdate {
         preserve_profile: false,
+        preserve_credential_state: false,
         account_id: account_id.to_owned(),
         expected_revision: Revision::new(revision).expect("credential revision"),
         provider_credentials_json: credential_json(marker),
@@ -3172,9 +3304,6 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
         .update_account(
             UpdateAccount {
                 notes: None,
-                turn_state_override: None,
-                basispoints_enabled: None,
-                bps_concurrency_limit: None,
                 model_access: Default::default(),
                 account_id: id.as_str().to_owned(),
                 enabled: true,
@@ -3363,9 +3492,6 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     .expect("policy");
     let store = admin_account_store(&database.pool);
     let command = BatchUpdateAccounts {
-        turn_state_override: None,
-        basispoints_enabled: None,
-        bps_concurrency_limit: None,
         account_ids: vec![input.id.clone()],
         enabled: None,
         concurrency_limit: None,
@@ -3431,7 +3557,8 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
 }
 
 #[tokio::test]
-async fn adaptive_concurrency_uses_latest_locked_settings_without_overwriting_admin_fields() {
+async fn adaptive_concurrency_handles_unlimited_and_latest_locked_settings_without_overwriting_admin_fields()
+ {
     let Some(database) = TestDatabase::create("adaptive_concurrency").await else {
         return;
     };
@@ -3452,6 +3579,9 @@ async fn adaptive_concurrency_uses_latest_locked_settings_without_overwriting_ad
         (true, Some(2), 10, Some(2), false),
         (true, None, 2, None, false),
         (true, None, 10, Some(3), true),
+        (true, None, 0, Some(3), true),
+        (true, Some(2), 0, Some(2), false),
+        (false, None, 0, None, false),
     ] {
         let mut admin = database.pool.begin().await.expect("admin transaction");
         sqlx::query("update runtime_settings set max_concurrent_per_account = $1 where id = 1")
@@ -3506,6 +3636,66 @@ async fn adaptive_concurrency_uses_latest_locked_settings_without_overwriting_ad
     .fetch_all(&database.pool)
     .await
     .expect("audit");
-    assert_eq!(audited_fields, vec![vec!["concurrency_limit".to_owned()]]);
+    assert_eq!(
+        audited_fields,
+        vec![vec!["concurrency_limit".to_owned()]; 2]
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn connection_configuration_update_preserves_credential_health() {
+    let Some(database) = TestDatabase::create("connection_configuration_health").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    const ID: &str = "acct_transport_health";
+    repository
+        .insert_provider_account(account(ID, "transport-health-user"))
+        .await
+        .unwrap();
+    sqlx::query("update provider_accounts set credential_state = 'expired', last_error_reason = 'credential_expired', last_error_message = 'test expiration' where id = $1")
+        .bind(ID).execute(&database.pool).await.unwrap();
+    let before: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(a) from provider_accounts a where id = $1")
+            .bind(ID)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let mut credential = credential_update(ID, 1, "same-secret");
+    credential.preserve_credential_state = true;
+    credential.preserve_profile = true;
+    repository
+        .rotate_provider_account(RotateProviderAccount {
+            scope: ProviderAccountAdminScope {
+                provider_kind: "openai".to_owned(),
+            },
+            profile: profile(ID, "must not replace name"),
+            replacement_identity: None,
+            credential,
+            settings: None,
+            audit: audit("audit_transport_health", "rotate", ID),
+        })
+        .await
+        .unwrap();
+    let after: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(a) from provider_accounts a where id = $1")
+            .bind(ID)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    for field in [
+        "name",
+        "credential_state",
+        "credential_observed_at",
+        "last_error_reason",
+        "last_error_message",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "configuration update changed {field}"
+        );
+    }
+    assert_eq!(after["credential_revision"], 2);
     database.close().await;
 }

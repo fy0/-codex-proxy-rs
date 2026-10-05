@@ -1,0 +1,29 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这里适合交流尚在探索的想法、方案取舍和使用场景，不要求先给出完整实现。
+        已有明确场景与预期行为时，可以直接提交[功能建议 Issue](https://github.com/zyycn/codex-proxy-rs/issues/new?template=feature-request.yml)，无需先开讨论。
+        请先搜索相关讨论，每个主题围绕一个问题展开。
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: 使用场景与当前不便
+      description: 希望完成什么任务，目前的做法有什么不足？
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: 想法与希望讨论的方向
+      description: 可以说明期望体验、考虑过的替代方法，以及还不确定的地方。
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考资料
+      description: 可附相关 Issue、讨论或其他项目的具体行为；示例和截图请先脱敏。

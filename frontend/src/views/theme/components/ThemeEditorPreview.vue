@@ -1,9 +1,9 @@
 <script setup lang="ts">
+import type { ThemeName } from '@codex-proxy/ui/theme'
 import type { CSSProperties } from 'vue'
 import type { ThemeEditorPreview } from '../composables/useThemeEditor'
-import type { ThemeName } from '@/theme'
 
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import { BaseSegmented } from '@codex-proxy/ui'
 
 import ThemeComponentPreview from './ThemeComponentPreview.vue'
 import ThemeDashboardPreview from './ThemeDashboardPreview.vue'

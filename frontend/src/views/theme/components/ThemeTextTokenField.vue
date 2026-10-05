@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { RotateCcw } from '@lucide/vue'
+import { BaseIconButton, BaseInput } from '@codex-proxy/ui'
 
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
+import { RotateCcw } from '@lucide/vue'
 
 defineProps<{
   label: string

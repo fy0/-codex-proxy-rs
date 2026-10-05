@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import type { EChartsOption, LineSeriesOption } from 'echarts'
 import type { KeyUsageTrendPoint } from '@/api/modules/key-usage'
+import { BaseCard, BaseEmpty } from '@codex-proxy/ui'
 import { computed } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { chartTooltipStyle } from '@/components/charts/tooltip'
 import { useChartPalette } from '@/composables/useChartPalette'
-import { formatCompactNumber, formatInteger } from '@/utils/number'
-import { keyUsageTime, money } from '../utils/format'
+import { formatCompactNumber, formatInteger } from '@/utils/format'
+import { money } from '../utils/format'
 import { keyUsageTokenMetrics, keyUsageTokenValue } from '../utils/metrics'
 
 const props = defineProps<{ points: KeyUsageTrendPoint[] }>()
@@ -37,10 +37,11 @@ const option = computed<EChartsOption>(() => {
     xAxis: {
       type: 'category',
       boundaryGap: false,
-      data: props.points.map(point => keyUsageTime(point.time).slice(5, 16)),
+      data: props.points.map(point => point.time),
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { color: colors.textMuted, fontSize: 10, hideOverlap: true, formatter: value => props.points[0]?.bucketSeconds === 86400 ? value.slice(0, 5) : value },
+      axisLabel: { color: colors.textMuted, fontSize: 10, hideOverlap: true, formatter: (_value: string, index: number) => props.points[index]?.label ?? '' },
+      axisPointer: { label: { formatter: ({ value }) => props.points.find(point => point.time === value)?.label ?? '' } },
     },
     yAxis: [
       { type: 'value', min: 0, axisLabel: { color: colors.textMuted, fontSize: 10, formatter: (value: number) => formatCompactNumber(value) }, splitLine: { lineStyle: { color: colors.grid, type: 'dashed' } } },
@@ -67,8 +68,11 @@ const option = computed<EChartsOption>(() => {
 <template>
   <BaseCard title="使用趋势" description="用量随时间的变化">
     <BaseChart v-if="points.some(point => point.requests > 0)" :option="option" :height="285" />
-    <div v-else class="grid h-71 place-items-center text-cp-sm text-cp-text-tertiary">
-      所选时间内暂无请求
-    </div>
+    <BaseEmpty
+      v-else
+      title="所选时间内暂无请求"
+      surface="none"
+      class="h-71 place-content-center"
+    />
   </BaseCard>
 </template>

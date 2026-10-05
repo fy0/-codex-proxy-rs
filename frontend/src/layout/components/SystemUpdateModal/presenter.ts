@@ -5,10 +5,11 @@ interface SystemUpdatePresentationInput {
   version: SystemVersion | null
   updateInfo: SystemUpdateDetail | null
   loading: boolean
+  checking: boolean
   restarting: boolean
   updating: boolean
   updateError: string
-  updateSuccess: boolean
+  needRestart: boolean
   hasUpdate: boolean
   updateStreaming: boolean
   updateStreamError: string
@@ -43,9 +44,9 @@ export function resolveSystemUpdateLogClasses(level: string) {
 }
 
 function resolveStatus(input: SystemUpdatePresentationInput) {
-  if (input.restarting || input.updating) {
+  if (input.restarting || input.updating || input.checking || input.loading) {
     return {
-      label: input.restarting ? '重启中' : '更新中',
+      label: input.restarting ? '重启中' : input.updating ? '更新中' : '检查中',
       icon: RefreshCw,
       badge: 'bg-cp-info-container text-cp-info-on-container',
       iconClass: 'text-cp-info',
@@ -59,9 +60,9 @@ function resolveStatus(input: SystemUpdatePresentationInput) {
       iconClass: 'text-cp-error',
     }
   }
-  if (input.updateSuccess || input.hasUpdate || input.updateInfo) {
+  if (input.needRestart || input.hasUpdate || input.updateInfo) {
     return {
-      label: input.updateSuccess ? '已更新' : input.hasUpdate ? '有新版本' : '已是最新',
+      label: input.needRestart ? '待重启' : input.hasUpdate ? '有可用更新' : '无可用更新',
       icon: input.hasUpdate ? ArrowUpCircle : CheckCircle2,
       badge: 'bg-cp-success-container text-cp-success-on-container',
       iconClass: 'text-cp-success',
@@ -80,12 +81,12 @@ function resolveSummaryItems(input: SystemUpdatePresentationInput) {
     {
       key: 'current',
       label: '当前版本',
-      value: input.loading ? '...' : versionLabel(input.version?.version),
-      title: input.version?.version,
+      value: input.loading ? '...' : versionLabel(input.updateInfo?.currentVersion ?? input.version?.version),
+      title: input.updateInfo?.currentVersion ?? input.version?.version,
     },
     {
       key: 'latest',
-      label: '最新版本',
+      label: '通道最新',
       value: versionLabel(input.updateInfo?.latestVersion),
       title: input.updateInfo?.latestVersion,
       releaseUrl: input.updateInfo?.releaseUrl,

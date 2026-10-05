@@ -4,16 +4,16 @@
 # 版本严格一致。升级数据库版本时只需同步修改这里与 deploy/compose.yaml。
 ARG POSTGRES_IMAGE=postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
 
-FROM node:26-bookworm-slim@sha256:2d49d876e96237d76de412761cf05dbfe5aee325cc4406a4d41d5824c5bb8beb AS frontend-builder
+FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS frontend-builder
 
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
-RUN npm install --global pnpm@11.7.0 \
+RUN npm install --global "$(node -p 'require("./package.json").packageManager')" \
     && pnpm install --frozen-lockfile
 COPY frontend ./
 RUN pnpm build
 
-FROM rust:1.98-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS backend-builder
+FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS backend-builder
 
 WORKDIR /app/backend
 ARG TARGETARCH
@@ -40,16 +40,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # 备份客户端来源：与 compose 服务端同一固定镜像，版本一致。
 FROM ${POSTGRES_IMAGE} AS pg-client
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime-base
+# 迁移程序必须先通过隔离 PostgreSQL 18 的转换、回滚及备份恢复测试。
+FROM pg-client AS migration-tests
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-psycopg2 python3-yaml \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/upstream-migration /opt/upstream-migration
+COPY backend/migrations /opt/upstream-migration/official
+RUN sh /opt/upstream-migration/test-container.sh
 
-ENV TZ=Asia/Shanghai
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime-base
+
+ENV TZ=UTC
 
 # 运行时基础只从 Debian 官方源补 libpq（pg_dump 的动态依赖；ABI 兼容，无需引入第三方
 # APT 源）。pg_dump/pg_restore 二进制由 pg-client stage COPY，构建期不依赖运行时安装。
 # 更新基础镜像已有的系统包，使固定 digest 的镜像也能获取 Debian 安全更新。
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tzdata libpq5 \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tzdata libpq5 python3 python3-psycopg2 python3-yaml \
     && install -d /usr/lib/postgresql/18/bin \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
     && printf '%s\n' "${TZ}" > /etc/timezone \
@@ -73,6 +82,11 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 
+COPY deploy/upstream-migration /app/deploy/upstream-migration
+COPY backend/migrations /app/deploy/upstream-migration/official
+COPY --from=migration-tests /opt/migration-tests-passed /app/deploy/upstream-migration/tests-passed
+ENV PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["python3", "/app/deploy/upstream-migration/migrate.py"]
 CMD ["/app/bin/codex-proxy-rs"]
 
 FROM runtime-base AS runtime
@@ -88,5 +102,9 @@ ARG CPR_PREBUILT_DIR=dist/docker
 
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/linux-${TARGETARCH}/codex-proxy-rs /app/bin/codex-proxy-rs
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/web/dist ./web/dist
-RUN chmod +x /app/bin/codex-proxy-rs
+COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/linux-${TARGETARCH}/plugins/official /app/bin/plugins/official
+RUN chmod +x /app/bin/codex-proxy-rs \
+    && find /app/bin/plugins/official -type f -exec chmod 0444 '{}' + \
+    && chmod 0555 /app/bin/plugins/official \
+    && chmod 0755 /app/bin/plugins
 USER cpr

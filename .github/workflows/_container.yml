@@ -1,4 +1,4 @@
-name: Reusable Container
+name: Container
 
 on:
   workflow_call:
@@ -11,26 +11,13 @@ on:
 permissions:
   contents: read
   security-events: write
-  packages: write
 
 jobs:
   container:
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            platform: linux/amd64
-            arch: amd64
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            arch: arm64
     env:
-      CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}-${{ matrix.arch }}
-      # fork 仓库名可能不是合法镜像名（如前导 `-`），GHCR 名称固定用仓库 owner + 项目名。
-      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/codex-proxy-rs
+      CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}
       TRIVY_QUIET: 'true'
       TRIVY_SKIP_VERSION_CHECK: 'true'
     steps:
@@ -41,106 +28,65 @@ jobs:
 
       - name: Setup Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Cache Cargo mounts
+      - name: Restore Cargo snapshot
         id: cargo-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/container-cargo
-          key: container-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/Cargo.lock', 'backend/**/Cargo.toml', 'deploy/Dockerfile') }}-${{ inputs.ref }}
+          # 同一平台和依赖复用快照，源码变化由 Cargo 指纹判定是否重编译
+          key: container-cargo-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml', 'backend/**/Cargo.toml', 'backend/.cargo/config.toml', 'deploy/Dockerfile', '.github/actions/cargo-cache/Dockerfile') }}
           restore-keys: |
-            container-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/Cargo.lock', 'backend/**/Cargo.toml', 'deploy/Dockerfile') }}-
-            container-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+            container-cargo-v3-${{ runner.os }}-${{ runner.arch }}-
+            container-cargo-v2-${{ runner.os }}-${{ runner.arch }}-
 
-      # The GHA layer exporter does not persist RUN --mount=type=cache contents.
-      # Extraction runs before actions/cache saves its directories in post steps.
       - name: Restore Cargo mounts to BuildKit
-        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
+        id: cargo-restore
+        uses: ./.github/actions/cargo-cache
         with:
+          operation: restore
           builder: ${{ steps.buildx.outputs.name }}
-          scratch-dir: ${{ runner.temp }}/container-cache-dance
-          cache-map: |
-            {
-              "${{ runner.temp }}/container-cargo/registry": "/usr/local/cargo/registry",
-              "${{ runner.temp }}/container-cargo/git": "/usr/local/cargo/git",
-              "${{ runner.temp }}/container-cargo/target": "/app/backend/target"
-            }
-          skip-extraction: ${{ steps.cargo-cache.outputs.cache-hit }}
-
-      # PR 上 GITHUB_TOKEN 没有 packages:write，只在 push 到默认分支时推 GHCR。
-      - name: Login to GHCR
-        if: github.event_name == 'push'
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          path: ${{ runner.temp }}/container-cargo
+          architecture: amd64
 
       - name: Build runtime image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile
           target: runtime
-          platforms: ${{ matrix.platform }}
           load: true
-          tags: |
-            ${{ env.CPR_IMAGE }}
-            ${{ env.GHCR_IMAGE }}:sha-${{ inputs.ref }}-${{ matrix.arch }}
+          tags: ${{ env.CPR_IMAGE }}
           no-cache-filters: |
             runtime-base
             runtime
-          cache-from: type=gha,scope=runtime-ci-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=runtime-ci-${{ matrix.arch }}
+          cache-from: type=gha,scope=runtime-ci
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=runtime-ci' || '' }}
 
       - name: Verify runtime image
         uses: ./.github/actions/verify-container
         with:
           image: ${{ env.CPR_IMAGE }}
-          platform: ${{ matrix.platform }}
-          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          platform: linux/amd64
+          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-amd64
 
-      - name: Push image to GHCR
-        if: github.event_name == 'push'
-        shell: bash
-        run: docker push "${GHCR_IMAGE}:sha-${{ inputs.ref }}-${{ matrix.arch }}"
-
-      # 镜像 tar 无条件归档为制品，GHCR 推送失败时也有可用镜像。
-      - name: Export image archive
-        id: archive
-        if: always()
-        shell: bash
-        run: |
-          if docker image inspect "${CPR_IMAGE}" >/dev/null 2>&1; then
-            docker save "${CPR_IMAGE}" | gzip > "${RUNNER_TEMP}/codex-proxy-rs-image-${{ matrix.arch }}.tar.gz"
-            echo "saved=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "saved=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload image artifact
-        if: always() && steps.archive.outputs.saved == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      # 构建层命中时 mount 仍可能为空，只有实际检查过内容的快照才允许保存。
+      - name: Export Cargo snapshot
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          (steps.cargo-cache.outputs.cache-hit != 'true' || steps.cargo-restore.outputs.usable != 'true')
+        id: cargo-snapshot
+        uses: ./.github/actions/cargo-cache
         with:
-          name: container-image-${{ inputs.ref }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/codex-proxy-rs-image-${{ matrix.arch }}.tar.gz
-          if-no-files-found: error
-          retention-days: 14
+          operation: snapshot
+          builder: ${{ steps.buildx.outputs.name }}
+          path: ${{ runner.temp }}/container-cargo
+          architecture: amd64
 
-  # 把分架构 digest 合成一个多架构 tag，docker pull 时按客户端架构自动选层。
-  manifest:
-    needs: container
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/codex-proxy-rs
-    steps:
-      - name: Login to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Create multi-arch manifest
-        shell: bash
-        run: |
-          docker buildx imagetools create \
-            -t "${GHCR_IMAGE}:sha-${{ inputs.ref }}" \
-            -t "${GHCR_IMAGE}:edge" \
-            "${GHCR_IMAGE}:sha-${{ inputs.ref }}-amd64" \
-            "${GHCR_IMAGE}:sha-${{ inputs.ref }}-arm64"
+      - name: Save Cargo snapshot
+        if: steps.cargo-snapshot.outputs.usable == 'true' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/container-cargo
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

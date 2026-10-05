@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -6,15 +7,11 @@ use futures::future::BoxFuture;
 use gateway_core::engine::ModelRequestId;
 use gateway_core::engine::admission::{
     ClientAdmissionDecision, ClientAdmissionError, ClientAdmissionPort, ClientAdmissionRecovery,
-    ClientAdmissionRequest, ClientAdmissionRestoreResult,
-};
-use gateway_core::engine::execution::{
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
+    ClientAdmissionRejection, ClientAdmissionRequest, ClientAdmissionRestoreResult,
 };
 use gateway_core::lifecycle::CancellationToken;
-use gateway_core::policy::ClientApiKeyId;
-use gateway_core::routing::ProviderKind;
-use gateway_store::redis::{BufferedClientAdmissionPort, BufferedProviderCircuitPort};
+use gateway_core::policy::{ClientApiKeyId, RateLimits};
+use gateway_store::redis::BufferedClientAdmissionPort;
 
 #[derive(Default)]
 struct RecordingCoordination {
@@ -72,32 +69,67 @@ impl ClientAdmissionPort for RecordingCoordination {
     }
 }
 
-impl ProviderCircuitPort for RecordingCoordination {
-    fn decision<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        Box::pin(async { Ok(ProviderCircuitDecision::Allow) })
+struct CapacityCoordination {
+    active: Mutex<BTreeSet<String>>,
+    maximum: usize,
+}
+
+impl CapacityCoordination {
+    fn new(maximum: usize) -> Self {
+        Self {
+            active: Mutex::new(BTreeSet::new()),
+            maximum,
+        }
     }
 
-    fn observe_failure<'a>(
-        &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
+    fn active(&self) -> usize {
+        self.active.lock().expect("active admission lock").len()
+    }
+}
+
+impl ClientAdmissionPort for CapacityCoordination {
+    fn abandon(&self, _: &ClientApiKeyId, request: &ModelRequestId) {
+        self.active
+            .lock()
+            .expect("active admission lock")
+            .remove(request.as_str());
+    }
+
+    fn admit(
+        &self,
+        request: ClientAdmissionRequest,
+    ) -> BoxFuture<'_, Result<ClientAdmissionDecision, ClientAdmissionError>> {
         Box::pin(async move {
-            self.record("circuit_failure");
-            Ok(())
+            let mut active = self.active.lock().expect("active admission lock");
+            if active.len() >= self.maximum {
+                return Ok(ClientAdmissionDecision::Rejected(
+                    ClientAdmissionRejection::ConcurrencyLimited,
+                ));
+            }
+            active.insert(request.model_request_id.as_str().to_owned());
+            Ok(ClientAdmissionDecision::Granted)
         })
     }
 
-    fn observe_success<'a>(
+    fn release<'a>(
         &'a self,
-        _: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
+        _: &'a ClientApiKeyId,
+        request: &'a ModelRequestId,
+    ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
         Box::pin(async move {
-            self.record("circuit_success");
-            Ok(())
+            Ok(self
+                .active
+                .lock()
+                .expect("active admission lock")
+                .remove(request.as_str()))
         })
+    }
+
+    fn restore(
+        &self,
+        _: ClientAdmissionRecovery,
+    ) -> BoxFuture<'_, Result<ClientAdmissionRestoreResult, ClientAdmissionError>> {
+        Box::pin(async { Ok(ClientAdmissionRestoreResult::default()) })
     }
 }
 
@@ -108,13 +140,8 @@ async fn full_recoverable_coordination_queues_should_drop_writes_without_waiting
         inner.clone(),
         NonZeroUsize::new(1).expect("capacity"),
     );
-    let (circuits, _circuit_writer) = BufferedProviderCircuitPort::with_capacity(
-        inner.clone(),
-        NonZeroUsize::new(1).expect("capacity"),
-    );
     let client = ClientApiKeyId::new("key_buffer_test").expect("client key");
     let request = ModelRequestId::new("req_buffer_test").expect("request ID");
-    let provider = ProviderKind::new("openai").expect("provider");
 
     tokio::time::timeout(Duration::from_millis(50), async {
         admissions
@@ -125,14 +152,6 @@ async fn full_recoverable_coordination_queues_should_drop_writes_without_waiting
             .release(&client, &request)
             .await
             .expect("full admission queue remains fail-open");
-        circuits
-            .observe_success(&provider)
-            .await
-            .expect("first circuit enqueue");
-        circuits
-            .observe_failure(&provider)
-            .await
-            .expect("full circuit queue remains fail-open");
     })
     .await
     .expect("coordination enqueue must never wait for Redis");
@@ -147,29 +166,20 @@ async fn redis_coordination_writers_should_flush_each_side_effect() {
         inner.clone(),
         NonZeroUsize::new(8).expect("capacity"),
     );
-    let (circuits, circuit_writer) = BufferedProviderCircuitPort::with_capacity(
-        inner.clone(),
-        NonZeroUsize::new(8).expect("capacity"),
-    );
     let client = ClientApiKeyId::new("key_writer_test").expect("client key");
     let request = ModelRequestId::new("req_writer_test").expect("request ID");
-    let provider = ProviderKind::new("openai").expect("provider");
     admissions
         .release(&client, &request)
         .await
         .expect("enqueue admission release");
-    circuits
-        .observe_success(&provider)
-        .await
-        .expect("enqueue circuit feedback");
     let cancellation = CancellationToken::new();
-    let tasks = [
-        spawn_writer(Arc::new(admission_writer), cancellation.clone()),
-        spawn_writer(Arc::new(circuit_writer), cancellation.clone()),
-    ];
+    let tasks = [spawn_writer(
+        Arc::new(admission_writer),
+        cancellation.clone(),
+    )];
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if inner.operations().len() == 2 {
+            if inner.operations().len() == 1 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -186,7 +196,76 @@ async fn redis_coordination_writers_should_flush_each_side_effect() {
 
     let mut operations = inner.operations();
     operations.sort_unstable();
-    assert_eq!(operations, ["admission", "circuit_success"]);
+    assert_eq!(operations, ["admission"]);
+}
+
+#[tokio::test]
+async fn awaited_buffered_release_should_not_publish_capacity_before_writer_runs() {
+    let inner = Arc::new(CapacityCoordination::new(8));
+    let (admissions, admission_writer) = BufferedClientAdmissionPort::with_capacity(
+        inner.clone(),
+        NonZeroUsize::new(8).expect("capacity"),
+    );
+    let client = ClientApiKeyId::new("key_capacity_handoff").expect("client key");
+    let request = |index| ClientAdmissionRequest {
+        model_request_id: ModelRequestId::new(format!("req_capacity_handoff_{index}"))
+            .expect("request ID"),
+        client_api_key_id: client.clone(),
+        lease_ttl: Duration::from_secs(60),
+        allow_concurrency_acquire: true,
+        limits: RateLimits {
+            max_concurrency: 8,
+            requests_per_minute: 0,
+        },
+    };
+
+    let mut granted = Vec::new();
+    for index in 0..8 {
+        let request = request(index);
+        assert_eq!(
+            admissions.admit(request.clone()).await.expect("admit"),
+            ClientAdmissionDecision::Granted
+        );
+        granted.push(request.model_request_id);
+    }
+    assert_eq!(inner.active(), 8);
+
+    assert!(
+        admissions
+            .release(&client, &granted[0])
+            .await
+            .expect("enqueue release")
+    );
+    assert_eq!(inner.active(), 8, "await only confirms queue admission");
+    let replacement = request(8);
+    assert_eq!(
+        admissions
+            .admit(replacement.clone())
+            .await
+            .expect("admit before writer"),
+        ClientAdmissionDecision::Rejected(ClientAdmissionRejection::ConcurrencyLimited)
+    );
+
+    let cancellation = CancellationToken::new();
+    let task = spawn_writer(Arc::new(admission_writer), cancellation.clone());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while inner.active() == 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("writer should publish released capacity");
+    assert_eq!(
+        admissions
+            .admit(replacement)
+            .await
+            .expect("admit after writer"),
+        ClientAdmissionDecision::Granted
+    );
+    cancellation.cancel();
+    task.await
+        .expect("admission writer task")
+        .expect("admission writer cancellation");
 }
 
 fn spawn_writer<T>(

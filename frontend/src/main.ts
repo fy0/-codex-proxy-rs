@@ -8,6 +8,7 @@ import { pinia } from './stores'
 import { useThemeStore } from './stores/modules/theme'
 import '@fontsource-variable/inter'
 import '@fontsource-variable/jetbrains-mono'
+import '@codex-proxy/ui/styles.css'
 
 import './styles/index.css'
 

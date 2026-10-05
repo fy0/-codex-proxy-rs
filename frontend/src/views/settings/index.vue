@@ -1,36 +1,48 @@
 <script setup lang="ts">
+import { BaseButton, BaseIconButton, BasePageHeader, BaseSegmented, BaseSelect } from '@codex-proxy/ui'
+
 import { Save, Undo2 } from '@lucide/vue'
-import { computed, onMounted } from 'vue'
+import { computed, reactive, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BasePageHeader from '@/components/base/BasePageHeader.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
-
 import AccountAutoFreezeCard from './components/AccountAutoFreezeCard.vue'
-import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
+import AccountWarmupCard from './components/AccountWarmupCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
-import ClientVersionSettings from './components/client-version/index.vue'
-import FastPolicyCard from './components/FastPolicyCard.vue'
+import ClientProfileCard from './components/ClientProfileCard.vue'
+import ConcurrencyPolicyCard from './components/ConcurrencyPolicyCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
-import RequestQueueCard from './components/RequestQueueCard.vue'
-import ResponseBodyLimitCard from './components/ResponseBodyLimitCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
-import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
+import SettingsAccessSection from './components/SettingsAccessSection.vue'
 import TokenRefreshCard from './components/TokenRefreshCard.vue'
-import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
+import PricingSection from './pricing/index.vue'
 
 const route = useRoute()
 const router = useRouter()
-const section = computed(() => route.name === 'settings-backup' ? 'backup' : 'runtime')
+const sectionOptions = [
+  { label: '网关调度', value: 'runtime' },
+  { label: '上游配置', value: 'upstream' },
+  { label: '模型定价', value: 'pricing' },
+  { label: '安全与访问', value: 'access' },
+  { label: '数据备份', value: 'backup' },
+]
+const section = computed(() => {
+  switch (route.name) {
+    case 'settings-upstream': return 'upstream'
+    case 'settings-access': return 'access'
+    case 'settings-pricing': return 'pricing'
+    case 'settings-backup': return 'backup'
+    default: return 'runtime'
+  }
+})
+const isBasicSection = computed(() => section.value !== 'pricing' && section.value !== 'backup')
+const visited = reactive(new Set<string>())
+const settingsVisited = shallowRef(false)
 
 function switchSection(value: string): void {
-  void router.push(value === 'backup' ? '/settings/backup' : '/settings')
+  void router.push(value === 'runtime' ? '/settings' : `/settings/${value}`)
 }
 
 const {
@@ -40,17 +52,15 @@ const {
   resetSettings,
   error,
   form,
+  smartSchedulingDefaults,
   mappings,
   addMapping,
   updateMapping,
   removeMapping,
-  bpsMappings,
-  addBpsMapping,
-  updateBpsMapping,
-  removeBpsMapping,
   refreshMarginSecondsValue,
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
+  openaiGuardianReservedConcurrencyValue,
   requestIntervalMsValue,
   maxWaitingPerKeyValue,
   maxWaitingPerAccountValue,
@@ -66,57 +76,51 @@ const {
   loadSettings,
 } = useSettingsForm()
 
-const {
-  loading: adminKeyLoading,
-  regenerating: adminKeyRegenerating,
-  deleting: adminKeyDeleting,
-  showDeleteModal: showDeleteAdminKeyModal,
-  generatedKey: generatedAdminApiKey,
-  status: adminApiKeyStatus,
-  regenerate: handleRegenerateAdminApiKey,
-  remove: handleDeleteAdminApiKey,
-  copyGeneratedKey: copyAdminApiKey,
-  loadStatus: loadAdminApiKeyStatus,
-} = useAdminApiKey()
+const disabled = computed(() => saving.value || loading.value || !!error.value)
 
-onMounted(() => {
-  void loadSettings()
-  void loadAdminApiKeyStatus()
-})
+watch(section, (value) => {
+  visited.add(value)
+  if (isBasicSection.value && !settingsVisited.value) {
+    settingsVisited.value = true
+    void loadSettings()
+  }
+}, { immediate: true })
 </script>
 
 <template>
-  <div class="w-full">
-    <BasePageHeader title="系统设置" description="管理运行参数、管理员凭据与备份配置" />
+  <div class="w-full" :class="section === 'pricing' ? 'flex h-[calc(100dvh-2rem)] flex-none! flex-col min-[961px]:h-[calc(100dvh-3rem)]' : undefined">
+    <BasePageHeader title="系统设置" description="管理网关调度、上游配置、模型定价、安全访问与数据备份" />
 
-    <div class="mt-4 flex min-h-cp-control flex-wrap items-center justify-between gap-3">
+    <div class="mt-4 flex min-h-cp-control shrink-0 flex-wrap items-center justify-between gap-3">
       <BaseSegmented
         :model-value="section"
         label="设置分区"
-        class="bg-(--cp-input-bg)!"
-        :options="[
-          { label: '运行设置', value: 'runtime' },
-          { label: '备份', value: 'backup' },
-        ]"
+        class="hidden! bg-(--cp-input-bg)! sm:inline-grid!"
+        :options="sectionOptions"
         @update:model-value="switchSection"
       />
-      <div v-if="section === 'runtime'" class="flex items-center justify-end gap-2">
+      <BaseSelect
+        :model-value="section"
+        aria-label="设置分区"
+        class="w-full sm:hidden"
+        :options="sectionOptions"
+        @update:model-value="switchSection"
+      />
+      <div v-if="isBasicSection || hasChanges" class="ml-auto flex items-center justify-end gap-2">
         <span v-if="hasChanges" class="mr-1 size-1.5 shrink-0 rounded-full bg-cp-warning" aria-hidden="true" />
-        <BaseIconButton v-if="hasChanges" label="撤销更改" variant="filled" :disabled="saving || loading" @click="resetSettings">
+        <BaseIconButton v-if="hasChanges" label="撤销全部基础设置更改" variant="secondary" :disabled="saving || loading" @click="resetSettings">
           <Undo2 class="size-4" />
         </BaseIconButton>
         <BaseButton variant="primary" :loading="saving" :disabled="loading || !hasChanges || !!error" @click="saveSettings">
           <template #icon>
             <Save class="size-4" />
           </template>
-          {{ saving ? '保存中...' : '保存' }}
+          {{ saving ? '保存中...' : '保存基础设置' }}
         </BaseButton>
-        <span class="sr-only" role="status">{{ hasChanges ? '有未保存更改' : '' }}</span>
       </div>
     </div>
 
-    <!-- 切换页签只隐藏内容，保留运行设置和备份配置的未保存草稿。 -->
-    <div v-show="section === 'runtime'" class="mt-5 grid w-full gap-5">
+    <div v-if="settingsVisited" v-show="isBasicSection" class="mt-5 grid w-full gap-5">
       <div v-if="error" role="alert" class="flex flex-wrap items-center justify-between gap-3 rounded-cp-card bg-cp-error-container p-5 text-cp-error-on-container">
         <p class="m-0 text-cp">
           设置加载失败：{{ error }}
@@ -125,88 +129,72 @@ onMounted(() => {
           重新加载
         </BaseButton>
       </div>
-      <div v-else-if="loading" role="status" class="rounded-cp-card bg-cp-bg-container p-6 text-cp text-cp-text-secondary shadow-cp-card">
-        正在加载设置…
-      </div>
 
-      <AdminApiKeyCard
-        :status="adminApiKeyStatus"
-        :loading="adminKeyLoading"
-        :regenerating="adminKeyRegenerating"
-        :deleting="adminKeyDeleting"
-        :generated-key="generatedAdminApiKey"
-        @regenerate="handleRegenerateAdminApiKey"
-        @request-delete="showDeleteAdminKeyModal = true"
-        @copy="copyAdminApiKey"
+      <SettingsAccessSection
+        v-if="visited.has('access')"
+        v-show="section === 'access'"
+        v-model:min-codex-desktop-version="form.minCodexDesktopVersion"
+        v-model:min-codex-cli-version="form.minCodexCliVersion"
+        v-model:responses-max-decompressed-body-mi-b="responsesMaxDecompressedBodyMiBValue"
+        :disabled="disabled"
+        :loading="loading"
+        :desktop-error="minCodexDesktopVersionError"
+        :cli-error="minCodexCliVersionError"
       />
 
-      <fieldset :disabled="saving || loading || !!error" class="m-0 grid min-w-0 gap-5 border-0 p-0" aria-label="运行设置">
-        <RuntimeSettingsCard
-          v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
-          v-model:request-interval-ms="requestIntervalMsValue"
-        />
-        <TokenRefreshCard v-model:refresh-margin-seconds="refreshMarginSecondsValue" v-model:refresh-concurrency="refreshConcurrencyValue" />
-        <ResponseBodyLimitCard v-model="responsesMaxDecompressedBodyMiBValue" />
-        <RequestQueueCard
-          v-model:max-waiting-per-key="maxWaitingPerKeyValue"
-          v-model:max-waiting-per-account="maxWaitingPerAccountValue"
-          v-model:concurrency-wait-timeout-seconds="concurrencyWaitTimeoutSecondsValue"
-        />
-        <FastPolicyCard v-model="form.disableFast" :disabled="saving || loading || !!error" />
+      <fieldset v-show="section !== 'access'" :disabled="disabled" class="m-0 grid min-w-0 gap-5 border-0 p-0" aria-label="基础设置">
+        <template v-if="section === 'runtime'">
+          <RotationStrategyCard
+            v-model="form.rotationStrategy"
+            v-model:smart-scheduling="form.smartScheduling"
+            :smart-defaults="smartSchedulingDefaults"
+            :disabled="disabled"
+            :options="rotationOptions"
+          />
+          <ConcurrencyPolicyCard
+            v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
+            v-model:request-interval-ms="requestIntervalMsValue"
+            v-model:max-waiting-per-key="maxWaitingPerKeyValue"
+            v-model:max-waiting-per-account="maxWaitingPerAccountValue"
+            v-model:concurrency-wait-timeout-seconds="concurrencyWaitTimeoutSecondsValue"
+            v-model:openai-guardian-reserved-concurrency="openaiGuardianReservedConcurrencyValue"
+          />
+          <AccountAutoFreezeCard
+            v-model:enabled="form.accountAutoFreezeEnabled"
+            v-model:threshold="accountAutoFreezeThresholdValue"
+            v-model:window-seconds="accountAutoFreezeWindowSecondsValue"
+            v-model:duration-seconds="accountAutoFreezeDurationSecondsValue"
+            v-model:probe-enabled="form.accountAutoFreezeProbeEnabled"
+            v-model:probe-model="form.accountAutoFreezeProbeModel"
+            v-model:adaptive-concurrency="form.accountAutoFreezeAdaptiveConcurrency"
+          />
+          <AccountWarmupCard
+            v-model:enabled="form.accountWarmupEnabled"
+            v-model:schedule-time="form.accountWarmupScheduleTime"
+            v-model:model="form.accountWarmupModel"
+          />
+        </template>
 
-        <RequestLocationCard v-model="form.requestLocation" v-model:enabled="form.requestLocationEnabled" :disabled="saving || loading || !!error" />
-        <AccountAutoFreezeCard
-          v-model:enabled="form.accountAutoFreezeEnabled"
-          v-model:threshold="accountAutoFreezeThresholdValue"
-          v-model:window-seconds="accountAutoFreezeWindowSecondsValue"
-          v-model:duration-seconds="accountAutoFreezeDurationSecondsValue"
-          v-model:probe-enabled="form.accountAutoFreezeProbeEnabled"
-          v-model:probe-model="form.accountAutoFreezeProbeModel"
-          v-model:adaptive-concurrency="form.accountAutoFreezeAdaptiveConcurrency"
-        />
-
-        <ClientVersionSettings
-          v-model:min-codex-desktop-version="form.minCodexDesktopVersion"
-          v-model:min-codex-cli-version="form.minCodexCliVersion"
-          :loading="loading"
-          :desktop-error="minCodexDesktopVersionError"
-          :cli-error="minCodexCliVersionError"
-        />
-
-        <ModelAliasesCard
-          :mappings="mappings"
-          :loading="loading"
-          @add-mapping="addMapping"
-          @update-mapping="updateMapping"
-          @remove-mapping="removeMapping"
-        />
-        <ModelAliasesCard
-          title="Basis Points 模型别名"
-          description="仅列出的请求模型走 Basis Points 通道（需账号开启 Basis Points），映射值为 BPS 上游模型"
-          :mappings="bpsMappings"
-          :loading="loading"
-          @add-mapping="addBpsMapping"
-          @update-mapping="updateBpsMapping"
-          @remove-mapping="removeBpsMapping"
-        />
-        <RotationStrategyCard v-model="form.rotationStrategy" :options="rotationOptions" />
+        <div v-if="visited.has('upstream')" v-show="section === 'upstream'" class="grid min-w-0 gap-5">
+          <TokenRefreshCard v-model:refresh-margin-seconds="refreshMarginSecondsValue" v-model:refresh-concurrency="refreshConcurrencyValue" />
+          <ClientProfileCard
+            v-model="form.providerRequestProfiles"
+            :active="section === 'upstream'"
+            :disabled="disabled"
+          />
+          <RequestLocationCard v-model="form.requestLocation" v-model:enabled="form.requestLocationEnabled" :disabled="disabled" />
+          <ModelAliasesCard
+            :mappings="mappings"
+            :loading="loading"
+            @add-mapping="addMapping"
+            @update-mapping="updateMapping"
+            @remove-mapping="removeMapping"
+          />
+        </div>
       </fieldset>
     </div>
 
-    <SettingsBackupSection v-show="section === 'backup'" class="mt-5" :active="section === 'backup'" />
-
-    <BaseConfirmModal
-      v-model="showDeleteAdminKeyModal"
-      title="删除管理员 API Key"
-      description="删除后外部系统将无法继续使用该 Key 调用管理接口"
-      destructive
-      confirm-text="确认删除"
-      :loading="adminKeyDeleting"
-      @confirm="handleDeleteAdminApiKey"
-    >
-      <p class="m-0">
-        确定要删除当前管理员 API Key 吗？此操作会立即生效
-      </p>
-    </BaseConfirmModal>
+    <SettingsBackupSection v-if="visited.has('backup')" v-show="section === 'backup'" class="mt-5" :active="section === 'backup'" />
+    <PricingSection v-if="visited.has('pricing')" v-show="section === 'pricing'" class="mt-5 min-h-0 flex-1" />
   </div>
 </template>

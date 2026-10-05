@@ -2,15 +2,11 @@
 import type { UsageTimeRangeParams } from '../composables/useUsageTimeRange'
 import type { OpsError } from '@/api'
 
+import { BaseIconButton, BaseInput, BaseTable, BaseTableColumnSettings, BaseTablePagination, useTableColumns } from '@codex-proxy/ui'
 import { Eye, RefreshCw, Search } from '@lucide/vue'
 import { shallowRef, toRef } from 'vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseTableColumnSettings from '@/components/base/BaseTable/BaseTableColumnSettings.vue'
-import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
-import BaseTable from '@/components/base/BaseTable/index.vue'
-import { useTableColumns } from '@/components/base/BaseTable/useTableColumns'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
+import AccountPlanBadge from '@/views/accounts/components/AccountPlanBadge.vue'
 import { useOpsErrorsTable } from '../composables/useOpsErrorsTable'
 import { opsErrorColumns } from '../constants'
 import { opsErrorSummary } from '../utils/opsErrorPresentation'
@@ -44,7 +40,7 @@ const {
 
 const selectedRecord = shallowRef<OpsError | null>(null)
 const detailOpen = shallowRef(false)
-const { visibleColumns, columnOptions, setColumnVisible, resetColumns } = useTableColumns(opsErrorColumns, 'ops-errors')
+const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(opsErrorColumns, 'ops-errors')
 
 const upstreamSendStateLabels: Record<string, string> = {
   sent: '已发送',
@@ -55,6 +51,10 @@ const upstreamSendStateLabels: Record<string, string> = {
 function showDetail(record: OpsError) {
   selectedRecord.value = record
   detailOpen.value = true
+}
+
+function handleRefresh() {
+  void refresh()
 }
 
 function accountText(record: OpsError) {
@@ -108,6 +108,7 @@ function upstreamSendStateText(value: string | null | undefined) {
         <BaseTableColumnSettings
           :options="columnOptions"
           @change="setColumnVisible"
+          @reorder="setColumnOrder"
           @reset="resetColumns"
         />
         <BaseIconButton
@@ -116,7 +117,7 @@ function upstreamSendStateText(value: string | null | undefined) {
           label="刷新错误明细"
           :loading="refreshing"
           :disabled="loading || refreshing"
-          @click="refresh"
+          @click="handleRefresh"
         >
           <template #loading>
             <RefreshCw class="size-4.5 animate-spin motion-reduce:animate-none" />
@@ -128,7 +129,7 @@ function upstreamSendStateText(value: string | null | undefined) {
 
     <div class="flex min-h-0 min-w-0 flex-col">
       <p v-if="error && !loading" role="alert" class="text-cp-sm text-cp-error-text">
-        {{ error }}。请刷新重试。
+        {{ error }}，请刷新重试
       </p>
       <BaseTable
         v-else
@@ -138,11 +139,28 @@ function upstreamSendStateText(value: string | null | undefined) {
         :loading="loading"
         empty-text="当前时段没有错误"
       >
+        <template #clientApiKeyName="{ displayValue }">
+          <span
+            class="block max-w-full truncate font-mono text-cp-sm font-bold text-cp-text"
+            :title="String(displayValue)"
+          >
+            {{ displayValue }}
+          </span>
+        </template>
         <template #provider="{ row }">
           <ProviderIconGroup
             :provider="String(row.provider || '')"
             :authentication-kind="row.authenticationKind"
           />
+        </template>
+        <template #accountPlanType="{ row }">
+          <AccountPlanBadge
+            v-if="row.accountPlanType"
+            :plan-type="row.accountPlanType"
+            :plan-type-display="row.accountPlanTypeDisplay || row.accountPlanType"
+            size="sm"
+          />
+          <span v-else class="text-cp-text-quaternary">—</span>
         </template>
         <template #message="{ row }">
           <div class="min-w-0 py-0.5" :title="row.message || opsErrorSummary(row)">

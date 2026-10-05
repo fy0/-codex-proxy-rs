@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import type { KeyUsageMetrics } from '@/api/modules/key-usage'
+import { BaseCard, BaseMotionIcon } from '@codex-proxy/ui'
 import { Gauge, Zap } from '@lucide/vue'
 import { computed } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
-import { formatCompactNumber, formatInteger } from '@/utils/number'
+import { formatCompactNumber, formatInteger } from '@/utils/format'
 import AnimatedMetricValue from '@/views/dashboard/components/AnimatedMetricValue.vue'
 import { money } from '../utils/format'
 import { keyUsageTokenMetrics, keyUsageTokenValue } from '../utils/metrics'

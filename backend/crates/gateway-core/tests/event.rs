@@ -89,6 +89,16 @@ fn protocol_wire_event_should_preserve_raw_json_body_without_parsing_it() {
 }
 
 #[test]
+fn protocol_wire_event_should_preserve_raw_http_body_without_json_encoding() {
+    let raw = Bytes::from_static(b"\0opaque-http-body\xff");
+    let wire =
+        ProtocolWireEvent::raw_http_body("provider-http", raw.clone()).expect("raw HTTP event");
+
+    assert_eq!(wire.raw_http_body_bytes(), Some(&raw));
+    assert_eq!(wire.into_raw_http_body(), Some(raw));
+}
+
+#[test]
 fn validator_should_accept_started_content_delta_completed_sequence() {
     let mut validator = EventSequenceValidator::new();
     let events = [

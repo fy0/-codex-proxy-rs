@@ -2,7 +2,6 @@
 import type { AccountQuotaWindow } from '../../constants'
 
 import { computed } from 'vue'
-import { useUiClock } from '@/composables/useUiClock'
 import AccountRequestTimeline from '../AccountUsageWindow/AccountRequestTimeline.vue'
 import {
   quotaWindowLocalUsageDisplay,
@@ -15,7 +14,6 @@ const props = defineProps<{
   windows: AccountQuotaWindow[]
 }>()
 
-const now = useUiClock()
 const grouped = computed(() => props.windows.length > 1 && Boolean(props.label))
 const items = computed(() => props.windows.map((window) => {
   const presentation = quotaWindowPresentation(window, '4px')
@@ -23,7 +21,6 @@ const items = computed(() => props.windows.map((window) => {
     window,
     variant: 'detail',
     showLocalValue: true,
-    now: now.value.getTime(),
   })
 
   return {

@@ -2,9 +2,8 @@
 import type { EChartsOption } from 'echarts'
 import type { MetricCardView, MetricTone } from '../composables/useDashboard'
 
+import { BaseCard, BaseMotionIcon } from '@codex-proxy/ui'
 import { computed } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
 
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { useThemeColor } from '@/composables/useThemeColor'

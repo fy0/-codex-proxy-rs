@@ -12,7 +12,8 @@ const OFFICIAL_ARTIFACT_HOST: &str = "persistent.oaistatic.com";
 const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
 const CENTRAL_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
 const LOCAL_SIGNATURE: &[u8; 4] = b"PK\x03\x04";
-const CORE_PATH_SUFFIX: &[u8] = b"/Contents/Resources/codex";
+// Core 位于独立的 CodexCLI.app 中，bin/codex 仅为启动脚本。
+const CORE_PATH_SUFFIX: &[u8] = b"/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
 const CORE_VERSION_ANCHOR: &[u8] = b"codex-mcp-client/";
 const MAX_EOCD_SEARCH_BYTES: u64 = 65_535 + 22;
 const MAX_CENTRAL_DIRECTORY_BYTES: u64 = 16 * 1024 * 1024;

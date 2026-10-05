@@ -7,13 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CODEX_AUTHENTICATION_KIND_API_KEY: &str = "api_key";
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApiKeyTransport {
-    #[default]
-    Http,
-    PreferWebsocket,
-}
+use super::types::ResponsesTransport;
 
 /// 可在管理端展示的上游设置，不包含密钥。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +15,7 @@ pub enum ApiKeyTransport {
 pub struct ApiKeyConfiguration {
     pub base_url: String,
     #[serde(default)]
-    pub transport: ApiKeyTransport,
+    pub transport: ResponsesTransport,
 }
 
 impl ApiKeyConfiguration {
@@ -40,7 +34,7 @@ pub struct ApiKeyCredentialData {
     pub api_key: String,
     pub base_url: String,
     #[serde(default)]
-    pub transport: ApiKeyTransport,
+    pub transport: ResponsesTransport,
 }
 
 impl ApiKeyCredentialData {

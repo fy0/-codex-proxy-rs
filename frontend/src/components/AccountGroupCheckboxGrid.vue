@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { AccountGroup } from '@/api'
 
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
+import { BaseCheckbox } from '@codex-proxy/ui'
 
 withDefaults(
   defineProps<{
@@ -47,6 +47,6 @@ function updateGroup(groupId: string, selected: boolean) {
     </div>
   </div>
   <p v-else class="m-0 rounded-cp bg-cp-fill-quaternary px-3.5 py-3 text-cp-sm font-emphasis text-cp-text-secondary">
-    {{ loading ? '正在加载分组...' : '暂无分组，请先在分组管理中创建。' }}
+    {{ loading ? '正在加载分组...' : '暂无分组，请先在分组管理中创建' }}
   </p>
 </template>

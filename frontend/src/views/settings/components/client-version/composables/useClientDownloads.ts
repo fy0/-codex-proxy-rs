@@ -2,7 +2,7 @@ import type { CodexDesktopWindowsDownloads } from '@/api'
 import { shallowRef } from 'vue'
 
 import { getCodexDesktopWindowsDownloads } from '@/api'
-import { errorMessage } from '@/utils/async'
+import { errorMessage } from '@/utils/operation'
 
 export function useClientDownloads() {
   const open = shallowRef(false)

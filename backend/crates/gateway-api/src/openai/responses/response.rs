@@ -1,5 +1,7 @@
 //! Provider OpenAI Responses wire 到客户端 transport 的透明转发边界。
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use gateway_core::event::{GatewayEvent, ProtocolWireEvent, ProviderEvent};
 use gateway_protocol::openai::sse::{
@@ -8,6 +10,7 @@ use gateway_protocol::openai::sse::{
 use serde_json::Value;
 
 use super::error::ResponseEncodeError;
+use crate::openai::error::capacity_error_for_client;
 
 const OPENAI_PROTOCOL: &str = "openai";
 
@@ -15,7 +18,7 @@ const OPENAI_PROTOCOL: &str = "openai";
 ///
 /// OpenAI Provider 与 xAI adapter 都必须交付 OpenAI wire。wire 是客户端交付
 /// 与终态判断的事实来源；canonical facts 只在 wire 暂未携带 ID 时提供旁路观测，
-/// 不得反过来拒绝或改写上游事件。
+/// 不得反过来拒绝或改写上游事件；客户端错误兼容投影只发生在编码出口。
 #[derive(Debug, Default)]
 pub struct OpenAiResponsesEncoder {
     response_id: Option<String>,
@@ -43,13 +46,15 @@ impl OpenAiResponsesEncoder {
             return Vec::new();
         };
         self.observe_wire(wire);
+        let projected = client_failure_payload(wire);
+        let data = projected.as_ref().unwrap_or_else(|| wire.data());
         // 当前 Codex 不消费 Responses `error` event，会在 EOF 时丢失失败原因。
         // 在客户端 SSE 边界统一投影成它能识别的 `response.failed`。
-        if wire.event_type() == Some("error")
+        if effective_event_type(wire) == Some("error")
             && let Some(data) = response_failed_sse_data_from_error_event(
                 self.response_snapshot.as_ref(),
                 self.response_id.as_deref(),
-                wire.data(),
+                data,
             )
         {
             return vec![Bytes::from(encode_sse_event_with_metadata(
@@ -59,12 +64,14 @@ impl OpenAiResponsesEncoder {
                 wire.sse_retry(),
             ))];
         }
-        if let Some(raw_sse_frame) = wire.raw_sse_frame() {
+        if projected.is_none()
+            && let Some(raw_sse_frame) = wire.raw_sse_frame()
+        {
             return vec![raw_sse_frame.clone()];
         }
         vec![Bytes::from(encode_sse_event_with_metadata(
-            wire.event_type().unwrap_or_default(),
-            &wire.data().to_string(),
+            effective_event_type(wire).unwrap_or_default(),
+            &data.to_string(),
             wire.sse_id(),
             wire.sse_retry(),
         ))]
@@ -77,22 +84,24 @@ impl OpenAiResponsesEncoder {
             return Vec::new();
         };
         self.observe_wire(wire);
+        let projected = client_failure_payload(wire);
+        let data = projected.as_ref().unwrap_or_else(|| wire.data());
         // WS 客户端只对它无法消费的裸 `error` 帧做投影：codex 的 WS 端点
         // 会静默忽略缺少 status 且不含内置可重试错误码的 `error` 帧，客户
         // 端只能空等到 idle 超时。投影成 `response.failed`（消息 JSON 自带
-        // type 字段），codex 将其映射为可重试错误并立即重试。可消费形状
-        // （带非 2xx status 或特殊错误码）原样透传，保持业务语义。
-        if wire.event_type() == Some("error")
-            && !ws_client_consumable_error(wire.data())
+        // type 字段），让 codex 按错误码处理。可消费形状（带非 2xx status
+        // 或特殊错误码）保留 envelope，容量码已由共享客户端投影处理。
+        if effective_event_type(wire) == Some("error")
+            && !ws_client_consumable_error(data)
             && let Some(data) = response_failed_sse_data_from_error_event(
                 self.response_snapshot.as_ref(),
                 self.response_id.as_deref(),
-                wire.data(),
+                data,
             )
         {
             return vec![data.to_string()];
         }
-        vec![wire.data().to_string()]
+        vec![data.to_string()]
     }
 
     /// 返回是否已经看到客户端可见的 wire 终态。
@@ -134,17 +143,10 @@ impl OpenAiResponsesEncoder {
     }
 
     fn observe_wire(&mut self, wire: &ProtocolWireEvent) {
-        if let Some(response_id) = wire
-            .data()
-            .pointer("/response/id")
-            .or_else(|| wire.data().get("response_id"))
-            .and_then(Value::as_str)
-        {
+        if let Some(response_id) = wire_response_id(wire) {
             self.response_id = Some(response_id.to_owned());
         }
-        let effective_type = wire
-            .event_type()
-            .or_else(|| wire.data().get("type").and_then(Value::as_str));
+        let effective_type = effective_event_type(wire);
         if matches!(
             effective_type,
             Some("response.created" | "response.in_progress" | "response.queued")
@@ -166,10 +168,92 @@ impl OpenAiResponsesEncoder {
     }
 }
 
+/// 仅在非流式出口聚合同一响应的完成项，不让流式转发常驻保存输出内容。
+pub(super) fn collect_response(events: &[ProviderEvent]) -> Result<Value, ResponseEncodeError> {
+    let mut encoder = OpenAiResponsesEncoder::new();
+    let mut response_id = None;
+    let mut items = BTreeMap::new();
+    let mut invalid_items = false;
+    for wire in events.iter().filter_map(openai_wire) {
+        if let Some(id) = wire_response_id(wire) {
+            if response_id.is_some_and(|previous| previous != id) {
+                items.clear();
+                invalid_items = false;
+            }
+            response_id = Some(id);
+        }
+        if !encoder.is_completed()
+            && effective_event_type(wire) == Some("response.output_item.done")
+        {
+            match (
+                wire.data().get("output_index").and_then(Value::as_u64),
+                wire.data().get("item").filter(|item| item.is_object()),
+            ) {
+                (Some(index), Some(item)) => {
+                    if let Some(previous) = items.insert(index, item) {
+                        invalid_items |= previous != item;
+                    }
+                }
+                _ => invalid_items = true,
+            }
+        }
+        encoder.observe_wire(wire);
+    }
+    let mut response = encoder.finish()?;
+    let Some(object) = response.as_object_mut() else {
+        return Ok(response);
+    };
+    // Codex 可只在 output_item.done 交付内容，终态仅保留身份和 usage。
+    // 有内容的终态仍是完整快照，不与 earlier done 或 canonical 增量拼接。
+    if object
+        .get("output")
+        .is_some_and(|output| !output.as_array().is_some_and(Vec::is_empty))
+        || (items.is_empty() && !invalid_items)
+    {
+        return Ok(response);
+    }
+    if invalid_items
+        || items
+            .keys()
+            .enumerate()
+            .any(|(expected, actual)| expected as u64 != *actual)
+    {
+        return Err(ResponseEncodeError::InvalidOutputItems);
+    }
+    object.insert(
+        "output".to_owned(),
+        Value::Array(items.into_values().cloned().collect()),
+    );
+    Ok(response)
+}
+
+fn wire_response_id(wire: &ProtocolWireEvent) -> Option<&str> {
+    wire.data()
+        .pointer("/response/id")
+        .or_else(|| wire.data().get("response_id"))
+        .and_then(Value::as_str)
+}
+
 fn openai_wire(event: &ProviderEvent) -> Option<&ProtocolWireEvent> {
     event
         .wire_event()
         .filter(|wire| wire.protocol() == OPENAI_PROTOCOL)
+}
+
+fn effective_event_type(wire: &ProtocolWireEvent) -> Option<&str> {
+    wire.event_type()
+        .or_else(|| wire.data().get("type").and_then(Value::as_str))
+}
+
+fn client_failure_payload(wire: &ProtocolWireEvent) -> Option<Value> {
+    if matches!(
+        effective_event_type(wire),
+        Some("error" | "response.failed")
+    ) {
+        capacity_error_for_client(wire.data())
+    } else {
+        None
+    }
 }
 
 /// 判断 WS 上游的 `error` 帧是否已经是客户端可直接消费的形状。

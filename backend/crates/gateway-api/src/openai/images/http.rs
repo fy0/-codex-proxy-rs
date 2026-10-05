@@ -8,16 +8,21 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
+use gateway_core::engine::execution::ClientTransport;
 use gateway_core::error::{GatewayError, GatewayErrorKind};
-use gateway_core::operation::{ImageRequest, ImageRequestKind, Operation, RawJsonPayload};
+use gateway_core::operation::{
+    ImageRequest, ImageRequestKind, Operation, OperationKind, RawJsonPayload,
+};
 use serde_json::Value;
 
 use crate::ApiState;
+use crate::middleware::headers::encode_headers;
+use crate::openai::middleware::RequestInput;
 use crate::openai::{
     auth::{authenticate_client, client_access_error_response},
-    endpoint::collect_raw_json_response,
-    error::gateway_error_response,
+    endpoint::provider_endpoint_response,
     responses::{OpenAiRequestHeaders, request_client_context},
+    router::{IMAGE_EDITS_PATH, IMAGE_GENERATIONS_PATH},
 };
 
 const OPENAI_PROTOCOL: &str = "openai";
@@ -36,7 +41,7 @@ pub(crate) async fn image_generations(
         headers,
         body,
         ImageRequestKind::Generation,
-        "/v1/images/generations",
+        IMAGE_GENERATIONS_PATH,
     )
     .await
 }
@@ -54,7 +59,7 @@ pub(crate) async fn image_edits(
         headers,
         body,
         ImageRequestKind::Edit,
-        "/v1/images/edits",
+        IMAGE_EDITS_PATH,
     )
     .await
 }
@@ -68,7 +73,7 @@ async fn handle_image_request(
     endpoint: &'static str,
 ) -> Response {
     let service = state.openai();
-    let client = match authenticate_client(service, &headers) {
+    let client = match authenticate_client(service, &headers).await {
         Ok(client) => client,
         Err(error) => return client_access_error_response(error),
     };
@@ -76,18 +81,23 @@ async fn handle_image_request(
         &headers,
         connect_info.map(|Extension(ConnectInfo(address))| address),
     );
-    let operation = match image_operation(body, &headers, kind) {
-        Ok(operation) => operation,
-        Err(error) => return gateway_error_response(&error),
-    };
-    let started = match service
-        .start_provider_endpoint(client, operation, client_ip, user_agent, endpoint)
-        .await
-    {
-        Ok(started) => started,
-        Err(error) => return gateway_error_response(&error),
-    };
-    collect_raw_json_response(started).await
+    provider_endpoint_response(
+        service.clone(),
+        client,
+        RequestInput {
+            endpoint: endpoint.to_owned(),
+            protocol: OPENAI_PROTOCOL.to_owned(),
+            operation: Some(OperationKind::GenerateImage),
+            transport: ClientTransport::HttpJson,
+            model_hint: None,
+            headers: encode_headers(&headers),
+            body,
+        },
+        client_ip,
+        user_agent,
+        move |body, headers| image_operation(body, headers, kind),
+    )
+    .await
 }
 
 fn image_operation(

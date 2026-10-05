@@ -67,9 +67,6 @@ pub struct BatchUpdateAccountsRequest {
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable_limit")]
     pub concurrency_limit: Option<Option<u64>>,
-    /// 缺省不修改；`null` 清除 BPS 子池上限。
-    #[serde(default, deserialize_with = "deserialize_optional_nullable_limit")]
-    pub bps_concurrency_limit: Option<Option<u64>>,
     pub weight: Option<u64>,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<String>>,
@@ -119,13 +116,9 @@ impl BatchUpdateAccountsRequest {
         self.concurrency_limit
             .map(parse_concurrency_limit)
             .transpose()?;
-        self.bps_concurrency_limit
-            .map(parse_concurrency_limit)
-            .transpose()?;
         self.weight.map(parse_account_weight).transpose()?;
         if self.enabled.is_none()
             && self.concurrency_limit.is_none()
-            && self.bps_concurrency_limit.is_none()
             && self.weight.is_none()
             && self.group_ids.is_none()
             && self.model_access.is_none()
@@ -147,10 +140,6 @@ impl BatchUpdateAccountsRequest {
                 .concurrency_limit
                 .map(parse_concurrency_limit)
                 .transpose()?,
-            bps_concurrency_limit: self
-                .bps_concurrency_limit
-                .map(parse_concurrency_limit)
-                .transpose()?,
             weight: self.weight.map(parse_account_weight).transpose()?,
             model_access: self.model_access,
             group_ids: self
@@ -158,8 +147,6 @@ impl BatchUpdateAccountsRequest {
                 .as_deref()
                 .map(validate_wire_group_ids)
                 .transpose()?,
-            turn_state_override: None,
-            basispoints_enabled: None,
         })
     }
 }
@@ -175,7 +162,7 @@ impl ListQuery {
         if page_size == 0 || page_size > MAX_PAGE_SIZE {
             return Err(WireValidationError::new("pageSize"));
         }
-        let provider_kind = parse_provider(self.provider.as_deref().unwrap_or("all"))?;
+        let provider_kind = parse_provider(self.provider.as_deref().unwrap_or_default())?;
         let group_filter = match self.group_id.as_deref().map(str::trim) {
             None | Some("") => None,
             Some("ungrouped") => Some(AccountGroupFilter::Ungrouped),
@@ -226,7 +213,7 @@ impl ListQuery {
 
 fn parse_provider(value: &str) -> Result<Option<ProviderKind>, WireValidationError> {
     let value = value.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("all") {
+    if value.is_empty() {
         return Ok(None);
     }
     ProviderKind::new(value.to_owned())
@@ -279,16 +266,11 @@ pub struct AccountSummaryView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
+    pub capabilities: AccountCapabilitiesView,
     pub outbound_proxy_endpoint: Option<String>,
     pub id: String,
     pub name: String,
     pub notes: Option<String>,
-    /// 管理员配置的 x-codex-turn-state 强制覆盖；`null` 表示不覆盖。
-    pub turn_state_override: Option<String>,
-    /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
-    pub basispoints_enabled: bool,
-    /// 账号内 BPS 子池上限；`null` 表示不单独限制。
-    pub bps_concurrency_limit: Option<u32>,
     pub provider: String,
     pub groups: Vec<AccountGroupRefView>,
     pub resource_ref: String,
@@ -308,18 +290,53 @@ pub struct AccountView {
     pub error_message: Option<String>,
     pub enabled: bool,
     pub concurrency_limit: Option<u32>,
+    pub capacity: AccountCapacityView,
     pub weight: u16,
     pub model_access: gateway_core::account::AccountModelAccess,
     pub access_token_expires_at: Option<String>,
     pub access_token_expires_at_display: Option<String>,
     pub refresh_token_expires_at: Option<String>,
     pub next_refresh_at: Option<String>,
+    pub next_refresh_at_display: Option<String>,
     pub added_at: String,
     pub added_at_display: String,
     pub updated_at: String,
     pub updated_at_display: String,
     pub quota: AccountQuotaView,
     pub usage: AccountUsageView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCapacityView {
+    pub used_slots: Option<u64>,
+    pub total_slots: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCapabilitiesView {
+    pub quota: bool,
+    pub quota_refresh: bool,
+    pub profile: bool,
+    pub subscription: bool,
+    pub avatar: bool,
+    pub reset_credits: bool,
+    pub consume_reset_credit: bool,
+}
+
+impl From<gateway_admin::model::accounts::ProviderAccountCapabilities> for AccountCapabilitiesView {
+    fn from(value: gateway_admin::model::accounts::ProviderAccountCapabilities) -> Self {
+        Self {
+            quota: value.quota,
+            quota_refresh: value.quota_refresh,
+            profile: value.profile,
+            subscription: value.subscription,
+            avatar: value.avatar,
+            reset_credits: value.reset_credits,
+            consume_reset_credit: value.consume_reset_credit,
+        }
+    }
 }
 
 /// 容量估算仅供管理端展示；金额不是订阅账单或可消费余额。
@@ -346,10 +363,6 @@ pub struct AccountQuotaForecastView {
     pub estimated_tokens_display: String,
     pub estimated_usd: Option<f64>,
     pub estimated_usd_display: String,
-    pub remaining_tokens: Option<u64>,
-    pub remaining_tokens_display: String,
-    pub remaining_usd: Option<f64>,
-    pub remaining_usd_display: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -382,9 +395,20 @@ pub struct AccountQuotaView {
     pub limit_reached: bool,
     /// 冷却到期或可开始恢复探测的时间；非限流中为 `null`。
     pub rate_limited_until: Option<String>,
+    pub rate_limit_recovery_display: Option<String>,
     pub rate_limit_reason: Option<String>,
     pub recovery_probe_required: bool,
     pub windows: Vec<AccountQuotaWindowView>,
+    pub credits: Option<AccountQuotaCreditsView>,
+}
+
+/// 上游点数安全视图，不透出额度响应中的其他 Provider 字段。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountQuotaCreditsView {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
 }
 
 /// 一个 quota 时间窗口。
@@ -438,6 +462,7 @@ pub struct AccountUsageView {
     pub read_tokens_display: String,
     pub last_used_at: Option<String>,
     pub last_used_at_display: String,
+    pub last_used_at_full_display: Option<String>,
     pub cost_estimate_status: String,
     pub known_cost_count: Option<u64>,
     pub partial_cost_count: Option<u64>,
@@ -480,6 +505,7 @@ pub struct ModelUsageView {
     pub costs: Vec<CurrencyCostView>,
     pub last_used_at: String,
     pub last_used_at_display: String,
+    pub last_used_at_full_display: Option<String>,
 }
 
 /// 单一货币的可查询成本。
@@ -694,6 +720,37 @@ pub struct AccountModelsData {
     pub models: Vec<AccountModelView>,
 }
 
+/// 账号模型目录文件；`catalog` 直接作为 Codex `model_catalog_json` 的文件正文落盘。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountModelCatalogData {
+    pub model_count: usize,
+    pub observed_at: String,
+    pub catalog: Value,
+}
+
+/// Provider 未给出 Codex 原生目录正文；该结果不能作为客户端目录文件返回。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedModelCatalogDocument;
+
+impl TryFrom<ProviderModelCatalogDocument> for AccountModelCatalogData {
+    type Error = UnsupportedModelCatalogDocument;
+
+    /// 目录正文由 Provider 按官方 wire 组装；这里只解析一次用于 JSON 响应，不改写字段。
+    fn try_from(result: ProviderModelCatalogDocument) -> Result<Self, Self::Error> {
+        if result.document.protocol() != "codex" {
+            return Err(UnsupportedModelCatalogDocument);
+        }
+        let catalog = serde_json::from_slice(result.document.body())
+            .map_err(|_| UnsupportedModelCatalogDocument)?;
+        Ok(Self {
+            model_count: result.model_count,
+            observed_at: result.observed_at.to_rfc3339(),
+            catalog,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountRefreshData {
@@ -722,16 +779,21 @@ pub struct AccountPersonalInfoData {
     pub subscription: Option<AccountSubscriptionData>,
 }
 
-impl From<AccountPersonalInfo> for AccountPersonalInfoData {
-    fn from(info: AccountPersonalInfo) -> Self {
+impl From<(AccountPersonalInfo, crate::time::TimePresenter)> for AccountPersonalInfoData {
+    fn from((info, time): (AccountPersonalInfo, crate::time::TimePresenter)) -> Self {
         let (profile, profile_error) = match info.profile {
-            Ok(profile) => (Some(AccountProfileStatisticsData::from(profile)), None),
+            Ok(profile) => (
+                Some(AccountProfileStatisticsData::from((profile, time))),
+                None,
+            ),
             Err(error) => (None, Some(error.message().to_owned())),
         };
         Self {
             profile,
             profile_error,
-            subscription: info.subscription.map(AccountSubscriptionData::from),
+            subscription: info
+                .subscription
+                .map(|value| AccountSubscriptionData::from((value, time))),
         }
     }
 }
@@ -741,21 +803,30 @@ impl From<AccountPersonalInfo> for AccountPersonalInfoData {
 #[serde(rename_all = "camelCase")]
 pub struct AccountSubscriptionData {
     pub starts_at: Option<String>,
+    pub starts_at_display: Option<String>,
     pub expires_at: String,
+    pub expires_at_display: String,
     pub will_renew: Option<bool>,
     pub billing_period: Option<String>,
     pub billing_currency: Option<String>,
     pub observed_at: String,
+    pub observed_at_display: String,
 }
 
-impl From<ProviderSubscription> for AccountSubscriptionData {
-    fn from(subscription: ProviderSubscription) -> Self {
+impl From<(ProviderSubscription, crate::time::TimePresenter)> for AccountSubscriptionData {
+    fn from((subscription, time): (ProviderSubscription, crate::time::TimePresenter)) -> Self {
         Self {
+            starts_at_display: subscription
+                .starts_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             starts_at: subscription.starts_at.map(|value| value.to_rfc3339()),
+            expires_at_display: time.datetime(&subscription.expires_at),
             expires_at: subscription.expires_at.to_rfc3339(),
             will_renew: subscription.will_renew,
             billing_period: subscription.billing_period,
             billing_currency: subscription.billing_currency,
+            observed_at_display: time.datetime(&subscription.observed_at),
             observed_at: subscription.observed_at.to_rfc3339(),
         }
     }
@@ -765,6 +836,7 @@ impl From<ProviderSubscription> for AccountSubscriptionData {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountProfileStatisticsData {
+    pub activity_calendar: Option<ProfileActivityCalendar>,
     pub display_name: Option<String>,
     pub username: Option<String>,
     pub image_url: Option<String>,
@@ -815,9 +887,15 @@ pub struct AccountProfileInvocationView {
     pub usage_count: Option<u64>,
 }
 
-impl From<ProviderProfileStatistics> for AccountProfileStatisticsData {
-    fn from(statistics: ProviderProfileStatistics) -> Self {
+impl From<(ProviderProfileStatistics, crate::time::TimePresenter)>
+    for AccountProfileStatisticsData
+{
+    fn from((statistics, time): (ProviderProfileStatistics, crate::time::TimePresenter)) -> Self {
         Self {
+            activity_calendar: statistics
+                .daily_usage
+                .as_deref()
+                .and_then(|daily| profile_activity_calendar(daily, time.today())),
             display_name: statistics.display_name,
             username: statistics.username,
             image_url: statistics.image_url,
@@ -896,6 +974,7 @@ pub struct AccountResetCreditView {
     pub status: Option<String>,
     pub title: Option<String>,
     pub expires_at: Option<String>,
+    pub expires_at_display: Option<String>,
     pub reset_type: Option<String>,
 }
 
@@ -907,36 +986,41 @@ pub struct AccountResetCreditResultData {
     pub credit: Option<AccountResetCreditView>,
 }
 
-impl From<ProviderResetCredit> for AccountResetCreditView {
-    fn from(credit: ProviderResetCredit) -> Self {
+impl From<(ProviderResetCredit, crate::time::TimePresenter)> for AccountResetCreditView {
+    fn from((credit, time): (ProviderResetCredit, crate::time::TimePresenter)) -> Self {
         Self {
             id: credit.id,
             status: credit.status,
             title: credit.title,
+            expires_at_display: credit.expires_at.as_ref().map(|value| time.datetime(value)),
             expires_at: credit.expires_at.map(|value| value.to_rfc3339()),
             reset_type: credit.reset_type,
         }
     }
 }
 
-impl From<ProviderResetCredits> for AccountResetCreditsData {
-    fn from(credits: ProviderResetCredits) -> Self {
+impl From<(ProviderResetCredits, crate::time::TimePresenter)> for AccountResetCreditsData {
+    fn from((credits, time): (ProviderResetCredits, crate::time::TimePresenter)) -> Self {
         Self {
             available_count: credits.available_count,
             credits: credits
                 .credits
                 .into_iter()
-                .map(AccountResetCreditView::from)
+                .map(|value| AccountResetCreditView::from((value, time)))
                 .collect(),
         }
     }
 }
 
-impl From<ProviderResetCreditResult> for AccountResetCreditResultData {
-    fn from(result: ProviderResetCreditResult) -> Self {
+impl From<(ProviderResetCreditResult, crate::time::TimePresenter)>
+    for AccountResetCreditResultData
+{
+    fn from((result, time): (ProviderResetCreditResult, crate::time::TimePresenter)) -> Self {
         Self {
             code: result.code,
-            credit: result.credit.map(AccountResetCreditView::from),
+            credit: result
+                .credit
+                .map(|value| AccountResetCreditView::from((value, time))),
         }
     }
 }
@@ -952,7 +1036,15 @@ impl AccountExportData {
         Self(value)
     }
 
-    pub(super) fn from_result(bundle: AccountExportBundle) -> Self {
+    pub(super) fn from_result(
+        bundle: AccountExportBundle,
+        time: crate::time::TimePresenter,
+    ) -> Self {
+        let filename = format!(
+            "cpr-accounts-selected-{}-{}.json",
+            bundle.documents.len(),
+            time.label(bundle.exported_at, "%Y-%m-%d")
+        );
         let documents = bundle
             .documents
             .into_iter()
@@ -965,6 +1057,7 @@ impl AccountExportData {
             .collect::<Vec<_>>();
         Self::new(serde_json::json!({
             "exportedAt": bundle.exported_at.to_rfc3339(),
+            "fileName": filename,
             "documents": documents,
         }))
     }
@@ -980,9 +1073,9 @@ pub struct AccountConnectionTestEvent {
     pub data: Value,
 }
 
-impl From<DomainConnectionTestEvent> for AccountConnectionTestEvent {
-    fn from(event: DomainConnectionTestEvent) -> Self {
-        let data = match event {
+impl From<(DomainConnectionTestEvent, crate::time::TimePresenter)> for AccountConnectionTestEvent {
+    fn from((event, time): (DomainConnectionTestEvent, crate::time::TimePresenter)) -> Self {
+        let mut data = match event {
             DomainConnectionTestEvent::Started { model } => serde_json::json!({
                 "type": "test_start",
                 "model": model,
@@ -1035,6 +1128,75 @@ impl From<DomainConnectionTestEvent> for AccountConnectionTestEvent {
                 "upstreamBody": upstream_body
             }),
         };
+        let now = Utc::now();
+        data["occurredAt"] = now.to_rfc3339().into();
+        data["occurredAtDisplay"] = time.datetime(&now).into();
+        data["timeDisplay"] = time.time(&now).into();
         Self { data }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileActivityCalendar {
+    pub range_label: String,
+    pub weeks: Vec<ProfileActivityWeek>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileActivityWeek {
+    pub key: String,
+    pub month_label: Option<String>,
+    pub cells: Vec<ProfileActivityCell>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileActivityCell {
+    pub date: String,
+    pub date_display: String,
+    pub tokens: u64,
+    pub is_future: bool,
+}
+fn profile_activity_calendar(
+    daily: &[ProviderProfileDailyUsage],
+    today: chrono::NaiveDate,
+) -> Option<ProfileActivityCalendar> {
+    use chrono::{Datelike as _, Days};
+    let week_start =
+        today.checked_sub_days(Days::new(u64::from(today.weekday().num_days_from_sunday())))?;
+    let start = week_start.checked_sub_days(Days::new(51 * 7))?;
+    let mut counts = std::collections::BTreeMap::<_, u64>::new();
+    for entry in daily {
+        if entry.date >= start && entry.date <= today {
+            let value = counts.entry(entry.date).or_default();
+            *value = value.saturating_add(entry.tokens);
+        }
+    }
+    let mut weeks = Vec::with_capacity(52);
+    for index in 0..52 {
+        let mut cells = Vec::with_capacity(7);
+        let mut month_label = None;
+        let week = start.checked_add_days(Days::new(index * 7))?;
+        for day in 0..7 {
+            let date = week.checked_add_days(Days::new(day))?;
+            if date.day() == 1 {
+                month_label = Some(format!("{}月", date.month()));
+            }
+            cells.push(ProfileActivityCell {
+                date: date.to_string(),
+                date_display: format!("{}年{}月{}日", date.year(), date.month(), date.day()),
+                tokens: counts.get(&date).copied().unwrap_or_default(),
+                is_future: date > today,
+            });
+        }
+        weeks.push(ProfileActivityWeek {
+            key: week.to_string(),
+            month_label,
+            cells,
+        });
+    }
+    Some(ProfileActivityCalendar {
+        range_label: format!("{start} 至 {today}"),
+        weeks,
+    })
 }

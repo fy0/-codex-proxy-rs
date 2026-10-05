@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import type { BaseTablePagination as BaseTablePaginationState } from '@/components/base/BaseTable/pagination'
+import type { BaseTablePaginationState } from '@codex-proxy/ui'
+
+import { BaseButton, BaseCard, BaseCheckbox, BaseColorPicker, BaseEmpty, BaseForm, BaseIconButton, BaseInput, BaseMenuItem, BaseMotionIcon, BaseNumberInput, BasePopover, BaseRadio, BaseRange, BaseSegmented, BaseSelect, BaseSkeleton, BaseSwitch, BaseTable, BaseTablePagination, BaseTag, BaseTextarea, defineTableColumns, BaseFormItem as FormItem } from '@codex-proxy/ui'
 
 import {
   Bell,
@@ -16,30 +18,6 @@ import {
 } from '@lucide/vue'
 import { shallowRef } from 'vue'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseColorPicker from '@/components/base/BaseColorPicker/index.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import FormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseForm from '@/components/base/BaseForm/index.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
-import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
-import BaseNumberInput from '@/components/base/BaseNumberInput.vue'
-import BasePopover from '@/components/base/BasePopover.vue'
-import BaseRadio from '@/components/base/BaseRadio.vue'
-import BaseRange from '@/components/base/BaseRange.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
-import BaseSkeleton from '@/components/base/BaseSkeleton.vue'
-import BaseSwitch from '@/components/base/BaseSwitch.vue'
-import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
-import { defineTableColumns } from '@/components/base/BaseTable/columns'
-import BaseTable from '@/components/base/BaseTable/index.vue'
-import BaseTextarea from '@/components/base/BaseTextarea.vue'
-
 interface PreviewTableRow {
   id: string
   account: string
@@ -51,7 +29,7 @@ interface PreviewTableRow {
 }
 
 const search = shallowRef('中继账号')
-const notes = shallowRef('优先保持当前账号，额度耗尽后再切换。')
+const notes = shallowRef('优先保持当前账号，额度耗尽后再切换')
 const brandColor = shallowRef('#5983F4')
 const invalidKey = shallowRef('sk-invalid')
 const disabledText = shallowRef('不可编辑')
@@ -63,6 +41,7 @@ const selected = shallowRef(true)
 const partialSelected = shallowRef(false)
 const strategy = shallowRef('balanced')
 const controlHeight = shallowRef(38)
+const syncTagVisible = shallowRef(true)
 
 const providerOptions = [
   { label: 'OpenAI', value: 'openai' },
@@ -138,7 +117,7 @@ function statusClass(status: PreviewTableRow['status']) {
 
       <div class="flex shrink-0 items-center gap-6">
         <span class="rounded-full bg-cp-primary-container px-3 py-1.5 font-mono text-[10px] font-heavy tracking-wide text-cp-primary-on-container uppercase">
-          20 Base Components
+          21 Base Components
         </span>
         <div class="flex items-center gap-5" aria-label="当前主题语义色">
           <div
@@ -316,14 +295,25 @@ function statusClass(status: PreviewTableRow['status']) {
         </template>
       </BaseCard>
 
-      <BaseCard padding="compact" class="col-span-4 h-full min-w-0 bg-cp-fill-quaternary! shadow-none!" title="状态与进度" description="Alias Token · Progress Token">
+      <BaseCard padding="compact" class="col-span-4 h-full min-w-0 bg-cp-fill-quaternary! shadow-none!" title="状态与进度" description="BaseTag · Progress Token">
         <template #body>
           <div class="grid gap-4">
             <div class="flex flex-wrap gap-2">
-              <span class="rounded-full bg-cp-success-container px-3 py-1.5 text-cp-xs font-heavy text-cp-success-on-container">运行正常</span>
-              <span class="rounded-full bg-cp-warning-container px-3 py-1.5 text-cp-xs font-heavy text-cp-warning-on-container">额度受限</span>
-              <span class="rounded-full bg-cp-error-container px-3 py-1.5 text-cp-xs font-heavy text-cp-error-on-container">需要处理</span>
-              <span class="rounded-full bg-cp-info-container px-3 py-1.5 text-cp-xs font-heavy text-cp-info-on-container">同步中</span>
+              <BaseTag type="success" round>
+                运行正常
+              </BaseTag>
+              <BaseTag type="warning" round>
+                额度受限
+              </BaseTag>
+              <BaseTag type="danger" round>
+                需要处理
+              </BaseTag>
+              <BaseTag v-if="syncTagVisible" type="info" round closable @close="syncTagVisible = false">
+                同步中
+              </BaseTag>
+              <BaseButton v-else size="sm" variant="ghost" @click="syncTagVisible = true">
+                恢复标签
+              </BaseButton>
             </div>
             <div v-for="item in progressItems" :key="item.label" class="grid gap-2">
               <div class="flex justify-between text-cp-sm font-heavy text-cp-text-secondary">
@@ -369,7 +359,7 @@ function statusClass(status: PreviewTableRow['status']) {
     <section class="grid min-w-0 grid-cols-12 gap-6 overflow-hidden" aria-label="边界状态组件">
       <BaseCard padding="compact" class="col-span-4 h-full min-w-0 bg-cp-fill-quaternary! shadow-none!" title="空状态" description="BaseEmpty · BaseButton">
         <template #body>
-          <BaseEmpty title="暂无匹配账号" description="调整筛选条件，或添加一个新的上游账号。" class="flex-1">
+          <BaseEmpty title="暂无匹配账号" description="调整筛选条件，或添加一个新的上游账号" class="flex-1">
             <template #action>
               <BaseButton size="sm" variant="primary">
                 添加账号

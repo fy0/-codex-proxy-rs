@@ -36,6 +36,7 @@ mod error {
             AdminErrorCode::NOT_FOUND,
             AdminErrorCode::CONFLICT,
             AdminErrorCode::TOO_MANY_LOGIN_ATTEMPTS,
+            AdminErrorCode::RATE_LIMITED,
             AdminErrorCode::SETTINGS_PERSIST,
             AdminErrorCode::INTERNAL,
             AdminErrorCode::USAGE_RECORD_ACCOUNTS,
@@ -48,8 +49,8 @@ mod error {
         assert_eq!(
             actual,
             [
-                40000, 40001, 40002, 40003, 40101, 40102, 40103, 40401, 40901, 42901, 50000, 50001,
-                50002, 50201, 50202, 50301,
+                40000, 40001, 40002, 40003, 40101, 40102, 40103, 40401, 40901, 42901, 42902, 50000,
+                50001, 50002, 50201, 50202, 50301,
             ]
         );
     }
@@ -190,6 +191,11 @@ mod response {
                 42901,
             ),
             (
+                AdminError::rate_limited(),
+                StatusCode::TOO_MANY_REQUESTS,
+                42902,
+            ),
+            (
                 AdminError::conflict("conflict"),
                 StatusCode::CONFLICT,
                 40901,
@@ -227,5 +233,34 @@ mod response {
             assert!(body["message"].is_string());
             assert!(body["data"].is_null());
         }
+    }
+
+    #[tokio::test]
+    async fn generic_and_login_rate_limits_should_keep_distinct_wire_contracts() {
+        let generic = AdminError::rate_limited().into_response();
+        assert_eq!(generic.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(generic.headers().get("retry-after").is_none());
+        assert_eq!(
+            response_json(generic).await,
+            json!({
+                "code": 42902,
+                "message": "请求过于频繁，请稍后重试",
+                "data": null
+            })
+        );
+
+        let login = AdminError::too_many_login_attempts()
+            .with_retry_after(17)
+            .into_response();
+        assert_eq!(login.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(login.headers()["retry-after"], "17");
+        assert_eq!(
+            response_json(login).await,
+            json!({
+                "code": 42901,
+                "message": "登录尝试过多，请稍后重试",
+                "data": null
+            })
+        );
     }
 }

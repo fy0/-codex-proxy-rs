@@ -49,7 +49,7 @@ pub trait ProxyStore: Send + Sync {
         revision: Revision,
         result: ProxyTestResult,
         context: &MutationContext,
-    ) -> AdminStoreResult<ProxyRecord>;
+    ) -> AdminStoreResult<ProxyMutation>;
 }
 
 /// 离开作用域时释放保护，错误返回和请求取消也遵循相同规则。
@@ -62,5 +62,5 @@ pub struct ProxyImportReservation {
 
 #[async_trait]
 pub trait ProxyProbe: Send + Sync {
-    async fn test(&self, proxy: &OutboundProxy) -> ProxyTestResult;
+    async fn test(&self, proxy: &OutboundProxy, detect_location: bool) -> ProxyTestResult;
 }

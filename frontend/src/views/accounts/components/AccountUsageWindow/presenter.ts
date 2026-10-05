@@ -1,7 +1,7 @@
 import type { AccountQuotaWindow } from '../../constants'
 import { clamp } from 'es-toolkit'
-import { formatInteger } from '@/utils/number'
-import { isRecord } from '@/utils/object'
+import { isRecord } from '@/utils/data'
+import { formatInteger } from '@/utils/format'
 
 export type AccountUsageWindowVariant = 'compact' | 'detail' | 'metric'
 
@@ -9,6 +9,7 @@ type AccountUsageWindowMode = 'quota' | 'local' | 'unknown'
 
 interface AccountRequestBucket {
   bucketStart: string
+  label: string
   requestCount: number
 }
 
@@ -46,7 +47,6 @@ export interface AccountUsageWindowPresentationInput {
   window: AccountQuotaWindow | undefined
   variant: AccountUsageWindowVariant
   showLocalValue: boolean
-  now: number
 }
 
 const variantDefinitions: Record<
@@ -91,12 +91,6 @@ const variantDefinitions: Record<
   },
 }
 
-const hourMilliseconds = 60 * 60 * 1_000
-const hourFormatter = new Intl.DateTimeFormat('zh-CN', {
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-})
 const quotaToneClasses: Record<
   QuotaWindowTone,
   { bar: string, text: string }
@@ -166,7 +160,7 @@ export function resolveAccountUsageWindowPresentation(
       requestDisplay: localRequestDisplay,
       requestValueVisible: localRequestValueVisible,
       timelineTitle: `${localRequestLabel} ${localRequestDisplay} 次`,
-      requestBars: requestTimeline(localUsage?.requestBuckets ?? [], input.now),
+      requestBars: requestTimeline(localUsage?.requestBuckets ?? []),
       durationDisplay: rollingWindowDurationDisplay(input.window?.windowSeconds),
     },
   }
@@ -204,12 +198,13 @@ function requestBuckets(value: unknown) {
     if (
       typeof item.bucketStart !== 'string'
       || !finiteNumber(item.requestCount)
-      || !Number.isFinite(new Date(item.bucketStart).getTime())
+      || typeof item.label !== 'string'
     ) {
       return []
     }
     return [{
       bucketStart: item.bucketStart,
+      label: item.label,
       requestCount: item.requestCount,
     }]
   })
@@ -288,37 +283,12 @@ function quotaWindowTone(usedPercent: number | null): QuotaWindowTone {
   return 'success'
 }
 
-function requestTimeline(
-  buckets: NonNullable<AccountLocalUsage['requestBuckets']>,
-  now: number,
-): AccountRequestBar[] {
-  const currentHour = Math.floor(now / hourMilliseconds) * hourMilliseconds
-  const bucketCounts = new Map(
-    buckets.map((bucket) => {
-      const bucketHour = Math.floor(new Date(bucket.bucketStart).getTime() / hourMilliseconds)
-        * hourMilliseconds
-      return [bucketHour, Math.max(0, bucket.requestCount)] as const
-    }),
-  )
-  const slots = Array.from({ length: 24 }, (_, index) => {
-    const startTime = currentHour - (23 - index) * hourMilliseconds
-    return {
-      startTime,
-      requestCount: bucketCounts.get(startTime) ?? 0,
-    }
-  })
-  const maximum = Math.max(1, ...slots.map(slot => slot.requestCount))
-
-  return slots.map((slot) => {
-    const start = new Date(slot.startTime)
-    const end = new Date(slot.startTime + hourMilliseconds)
-    return {
-      key: start.toISOString(),
-      requestCount: slot.requestCount,
-      height: slot.requestCount === 0
-        ? '0'
-        : `${Math.max(25, Math.round(slot.requestCount / maximum * 100))}%`,
-      title: `${hourFormatter.format(start)}–${hourFormatter.format(end)} · ${slot.requestCount} 次请求`,
-    }
-  })
+function requestTimeline(buckets: NonNullable<AccountLocalUsage['requestBuckets']>): AccountRequestBar[] {
+  const maximum = Math.max(1, ...buckets.map(bucket => bucket.requestCount))
+  return buckets.map(bucket => ({
+    key: bucket.bucketStart,
+    requestCount: bucket.requestCount,
+    height: bucket.requestCount === 0 ? '0' : `${Math.max(25, Math.round(bucket.requestCount / maximum * 100))}%`,
+    title: bucket.label,
+  }))
 }

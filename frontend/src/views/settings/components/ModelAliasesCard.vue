@@ -1,20 +1,13 @@
 <script setup lang="ts">
-import { Plus, Trash2 } from '@lucide/vue'
+import { BaseButton, BaseCard, BaseIconButton, BaseInput } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
+import { Plus, Trash2 } from '@lucide/vue'
 
 withDefaults(defineProps<{
   mappings: Array<{ requestedModel: string, upstreamModel: string }>
-  title?: string
-  description?: string
   loading?: boolean
   error?: string
 }>(), {
-  title: '模型映射',
-  description: '配置请求模型与上游模型的映射关系',
   loading: false,
   error: '',
 })
@@ -28,8 +21,8 @@ const emit = defineEmits<{
 
 <template>
   <BaseCard
-    :title="title"
-    :description="description"
+    title="模型映射"
+    description="将客户端请求的模型名称映射为实际使用的上游模型"
   >
     <div class="grid gap-4">
       <div class="flex flex-wrap items-center gap-3">

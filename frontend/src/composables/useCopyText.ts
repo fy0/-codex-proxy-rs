@@ -1,7 +1,7 @@
-import { useClipboard } from '@vueuse/core'
+import { toast } from '@codex-proxy/ui'
 
-import { toast } from '@/components/base/BaseToast'
-import { errorMessage } from '@/utils/async'
+import { useClipboard } from '@vueuse/core'
+import { errorMessage } from '@/utils/operation'
 
 interface CopyTextOptions {
   successText: string

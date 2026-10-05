@@ -3,14 +3,18 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use gateway_core::engine::authentication::ClientAuthenticationRequest;
 use gateway_core::engine::continuation::PreviousResponseId;
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ClientTransport, ExecutionRequestMetadata,
-    ExecutionService, StartExecution, StartProviderExecution, StartedExecution,
+    ExecutionService, PreparedExecutionRequest, PreparedRootExecution, StartProviderExecution,
+    StartedExecution,
 };
 use gateway_core::error::{GatewayError, GatewayErrorKind};
 use gateway_core::lifecycle::{ConnectionDraining, ConnectionGuard, ConnectionLifecycle};
-use gateway_core::routing::{ProviderCatalogUnavailable, PublicModelDescriptor, PublicModelId};
+use gateway_core::routing::{
+    ProviderCatalogUnavailable, ProviderKind, PublicModelDescriptor, PublicModelId,
+};
 use uuid::Uuid;
 
 use super::auth::ClientApiKeyAuthError;
@@ -24,6 +28,10 @@ pub(crate) struct OpenAiService {
 }
 
 impl OpenAiService {
+    pub(crate) fn execution(&self) -> Arc<dyn ExecutionService> {
+        Arc::clone(&self.execution)
+    }
+
     #[must_use]
     pub(crate) const fn new(
         execution: Arc<dyn ExecutionService>,
@@ -35,12 +43,23 @@ impl OpenAiService {
         }
     }
 
-    pub(crate) fn authenticate(
+    pub(crate) async fn authenticate(
         &self,
-        plaintext: &str,
+        request: ClientAuthenticationRequest,
     ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
         self.execution
-            .authenticate(plaintext)
+            .authenticate_request(request)
+            .await
+            .map_err(map_authentication_error)
+    }
+
+    pub(crate) async fn verify(
+        &self,
+        request: ClientAuthenticationRequest,
+    ) -> Result<AuthenticatedClient, ClientApiKeyAuthError> {
+        self.execution
+            .verify_request(request)
+            .await
             .map_err(map_authentication_error)
     }
 
@@ -70,9 +89,9 @@ impl OpenAiService {
         self.execution.contains_public_model(client, model)
     }
 
-    pub(crate) async fn start_response(
+    pub(crate) async fn start_prepared_response(
         &self,
-        client: AuthenticatedClient,
+        prepared: PreparedRootExecution,
         request: DecodedResponsesRequest,
         transport: ClientTransport,
         endpoint: &'static str,
@@ -92,53 +111,63 @@ impl OpenAiService {
             }
         };
         self.execution
-            .start(StartExecution {
-                client,
-                public_model,
-                operation,
-                metadata: ExecutionRequestMetadata {
-                    protocol: "openai".to_owned(),
-                    endpoint: endpoint.to_owned(),
-                    transport,
-                    stream: metadata.stream(),
-                    client_ip: metadata.client_ip(),
-                    user_agent: metadata.user_agent().map(str::to_owned),
-                    previous_response_id,
+            .start_prepared(
+                prepared,
+                PreparedExecutionRequest {
+                    public_model,
+                    operation,
+                    metadata: ExecutionRequestMetadata {
+                        protocol: "openai".to_owned(),
+                        endpoint: endpoint.to_owned(),
+                        transport,
+                        stream: metadata.stream(),
+                        client_ip: metadata.client_ip(),
+                        user_agent: metadata.user_agent().map(str::to_owned),
+                        previous_response_id,
+                    },
                 },
-            })
+            )
             .await
     }
 
-    pub(crate) async fn start_provider_endpoint(
+    pub(crate) async fn start_prepared_provider_endpoint(
         &self,
-        client: AuthenticatedClient,
+        prepared: PreparedRootExecution,
         operation: gateway_core::operation::Operation,
         client_ip: Option<IpAddr>,
         user_agent: Option<String>,
-        endpoint: &'static str,
+        endpoint: String,
     ) -> Result<StartedExecution, GatewayError> {
-        let provider = gateway_core::routing::ProviderKind::new("openai").map_err(|_| {
+        let provider = ProviderKind::new("openai").map_err(|_| {
             GatewayError::new(
                 GatewayErrorKind::Internal,
                 "OpenAI provider identifier is invalid",
             )
         })?;
         self.execution
-            .start_provider_endpoint(StartProviderExecution {
-                client,
+            .start_prepared_provider_endpoint(
+                prepared,
                 provider,
+                None,
                 operation,
-                metadata: ExecutionRequestMetadata {
+                ExecutionRequestMetadata {
                     protocol: "openai".to_owned(),
-                    endpoint: endpoint.to_owned(),
+                    endpoint,
                     transport: ClientTransport::HttpJson,
                     stream: false,
                     client_ip,
                     user_agent,
                     previous_response_id: None,
                 },
-            })
+            )
             .await
+    }
+
+    pub(crate) async fn start_bound_provider_endpoint(
+        &self,
+        request: StartProviderExecution,
+    ) -> Result<StartedExecution, GatewayError> {
+        self.execution.start_provider_endpoint(request).await
     }
 
     pub(crate) fn try_register_connection(
@@ -162,5 +191,6 @@ const fn map_authentication_error(error: ClientAuthenticationError) -> ClientApi
     match error {
         ClientAuthenticationError::InvalidKey => ClientApiKeyAuthError::InvalidKey,
         ClientAuthenticationError::SnapshotUnavailable => ClientApiKeyAuthError::RuntimeUnavailable,
+        ClientAuthenticationError::ProviderUnavailable => ClientApiKeyAuthError::RuntimeUnavailable,
     }
 }

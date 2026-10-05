@@ -1,13 +1,13 @@
 <script setup lang="ts">
+import { BaseScrollbar } from '@codex-proxy/ui'
 import { storeToRefs } from 'pinia'
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { RouterView, useRoute } from 'vue-router'
 
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
+import { RouterView, useRoute } from 'vue-router'
+import AppAboutModal from '@/components/AppAboutModal.vue'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useUiStore } from '@/stores/modules/ui'
 
-import AppAboutModal from './components/AppAboutModal.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import FloatingSidebarToggle from './components/FloatingSidebarToggle.vue'
 import SystemUpdateModal from './components/SystemUpdateModal/index.vue'
@@ -15,14 +15,13 @@ import SystemUpdateModal from './components/SystemUpdateModal/index.vue'
 const uiStore = useUiStore()
 const systemUpdateStore = useSystemUpdateStore()
 const { sidebarCollapsed } = storeToRefs(uiStore)
-const { loadedOnce } = storeToRefs(systemUpdateStore)
+const { version } = storeToRefs(systemUpdateStore)
 const { toggleSidebar } = uiStore
 const route = useRoute()
 const pageScrollbarRef = ref<InstanceType<typeof BaseScrollbar> | null>(null)
 const mobileSidebarOpen = shallowRef(false)
 const aboutOpen = shallowRef(false)
 const systemUpdateOpen = shallowRef(false)
-const systemUpdateOpening = shallowRef(false)
 
 function openMobileSidebar() {
   mobileSidebarOpen.value = true
@@ -30,24 +29,6 @@ function openMobileSidebar() {
 
 function closeMobileSidebar() {
   mobileSidebarOpen.value = false
-}
-
-async function openSystemUpdate() {
-  if (systemUpdateOpen.value || systemUpdateOpening.value)
-    return
-
-  systemUpdateOpening.value = true
-  try {
-    if (!loadedOnce.value)
-      await systemUpdateStore.loadSystem(false)
-  }
-  catch {
-    // 弹窗打开后由弹窗内的加载逻辑提示失败原因。
-  }
-  finally {
-    systemUpdateOpening.value = false
-    systemUpdateOpen.value = true
-  }
 }
 
 onMounted(() => {
@@ -75,7 +56,7 @@ watch(
       :collapsed="sidebarCollapsed"
       @toggle="toggleSidebar"
       @open-about="aboutOpen = true"
-      @open-system-update="openSystemUpdate"
+      @open-system-update="systemUpdateOpen = true"
     />
     <FloatingSidebarToggle v-if="!mobileSidebarOpen" @open="openMobileSidebar" />
     <main class="relative isolate h-dvh min-w-0 flex-1 overflow-hidden">
@@ -103,14 +84,14 @@ watch(
               @close="closeMobileSidebar"
               @navigate="closeMobileSidebar"
               @open-about="aboutOpen = true"
-              @open-system-update="openSystemUpdate"
+              @open-system-update="systemUpdateOpen = true"
             />
           </div>
         </div>
       </Transition>
     </Teleport>
 
-    <AppAboutModal v-model="aboutOpen" />
+    <AppAboutModal v-model="aboutOpen" :version="version" />
     <SystemUpdateModal v-model="systemUpdateOpen" />
   </div>
 </template>

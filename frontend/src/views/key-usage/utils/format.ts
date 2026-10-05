@@ -1,11 +1,3 @@
-import { formatDateTime } from '@/utils/date'
-
-export const KEY_USAGE_TIME_ZONE = 'Asia/Shanghai'
-
-export function keyUsageTime(value: string | null) {
-  return value ? formatDateTime(value, '—', KEY_USAGE_TIME_ZONE) : '—'
-}
-
 export function money(value: string | number | null, currency = 'USD') {
   if (value === null)
     return '未定价'

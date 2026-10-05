@@ -5,6 +5,12 @@ use super::*;
 #[async_trait]
 pub trait ProviderAccountRepository: Send + Sync {
     async fn load_provider_account(&self, id: &str) -> StoreResult<Option<ProviderAccountRecord>>;
+    async fn list_plugin_accounts(
+        &self,
+        provider_kind: Option<&str>,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> StoreResult<Vec<ProviderAccountSummary>>;
     async fn list_provider_accounts(
         &self,
         provider_kind: Option<&str>,
@@ -103,20 +109,56 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         row.map(account_record_from_row).transpose()
     }
 
+    async fn list_plugin_accounts(
+        &self,
+        provider_kind: Option<&str>,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> StoreResult<Vec<ProviderAccountSummary>> {
+        if provider_kind.is_some_and(str::is_empty) {
+            return Err(invalid("account provider kind must not be empty"));
+        }
+        if limit <= 0 {
+            return Err(invalid("plugin account page limit must be positive"));
+        }
+        let rows = sqlx::query(
+            "select auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
+                    upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
+                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+                    credential_observed_at, quota_access_state, quota_evidence,
+                    quota_access_observed_at, quota_reset_at,
+                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
+               from provider_accounts
+               left join (select id as location_proxy_id, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
+                 on outbound_proxy_id = location_proxy_id
+              where ($1::text is null or provider_kind = $1)
+                and ($2::text is null or id > $2)
+              order by id
+              limit $3",
+        )
+        .bind(provider_kind)
+        .bind(cursor)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| postgres_unavailable("list plugin accounts"))?;
+        rows.into_iter().map(account_summary_from_row).collect()
+    }
+
     async fn list_provider_accounts(
         &self,
         provider_kind: Option<&str>,
         include_disabled: bool,
     ) -> StoreResult<Vec<ProviderAccountSummary>> {
         let rows = sqlx::query(
-            "select location_country, location_region, location_city, location_timezone, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
+            "select auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
-                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at, turn_state_override, basispoints_enabled, bps_concurrency_limit
+                    quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
              from provider_accounts
-             left join (select id as location_proxy_id, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
+             left join (select id as location_proxy_id, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone from outbound_proxies) proxy_location
                on outbound_proxy_id = location_proxy_id
              where ($1::text is null or provider_kind = $1) and ($2 or enabled)
              order by provider_kind, name, id",
@@ -151,12 +193,10 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
                has_refresh_token, access_token_expires_at, next_refresh_at, enabled,
                concurrency_limit, weight, model_access_json, credential_state, provider_quota_json,
-               credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at,
-               bps_concurrency_limit
+               credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at
              ) values (
                $18, $19, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13,
-               $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17),
-               $21
+               $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17)
              )",
         )
         .bind(account.id)
@@ -179,11 +219,6 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(account.outbound_proxy.as_ref().map(|proxy| proxy.expose_url()))
         .bind(proxy_id)
         .bind(account.model_access.as_ref().map(sqlx::types::Json))
-        .bind(
-            account
-                .bps_concurrency_limit
-                .map(|limit| i64::from(limit.get())),
-        )
         .execute(&mut *transaction)
         .await
         .map_err(|_| postgres_unavailable("insert provider account"))?;
@@ -199,7 +234,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         require_nonempty(ENTITY, "name", &account.name)?;
         let result = sqlx::query(
             "update provider_accounts
-             set name = $2, email = $3, plan_type = $4, updated_at = now()
+             set name = $2, email = $3, plan_type = $4, updated_at = greatest(now(), updated_at)
              where id = $1",
         )
         .bind(account.id)
@@ -232,7 +267,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                  has_refresh_token = $4,
                  access_token_expires_at = $5,
                  next_refresh_at = $6,
-                 updated_at = now()
+                 updated_at = greatest(now(), updated_at)
              where id = $1 and credential_revision = $2
              returning credential_revision",
         )
@@ -260,23 +295,11 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         update.validate()?;
         let result = sqlx::query(
             "update provider_accounts
-             set credential_state = case
-                     when enabled then $3
-                     else credential_state
-                 end,
-                 credential_observed_at = case
-                     when enabled then $4
-                     else credential_observed_at
-                 end,
-                 last_error_reason = case
-                     when enabled then $5
-                     else last_error_reason
-                 end,
-                 last_error_message = case
-                     when enabled then $6
-                     else last_error_message
-                 end,
-                 updated_at = case when enabled then greatest(now(), $4) else updated_at end
+             set credential_state = $3,
+                 credential_observed_at = $4,
+                 last_error_reason = $5,
+                 last_error_message = $6,
+                 updated_at = greatest(now(), updated_at, $4)
              where id = $1 and credential_revision = $2
                and (credential_observed_at is null or credential_observed_at <= $4)",
         )
@@ -295,7 +318,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
     async fn set_provider_account_enabled(&self, id: &str, enabled: bool) -> StoreResult<bool> {
         require_nonempty(ENTITY, "id", id)?;
         let result = sqlx::query(
-            "update provider_accounts set enabled = $2, updated_at = now() where id = $1",
+            "update provider_accounts set enabled = $2, updated_at = greatest(now(), updated_at) where id = $1",
         )
         .bind(id)
         .bind(enabled)
@@ -337,7 +360,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                    when $7::timestamptz is not null
                      and (quota_access_observed_at is null or quota_access_observed_at <= $7)
                    then $8 else quota_reset_at end,
-                 updated_at = greatest(now(), $4)
+                 updated_at = greatest(now(), updated_at, $4, $7)
              where id = $1 and credential_revision = $2
                and (quota_observed_at is null or quota_observed_at <= $4)",
         )
@@ -371,7 +394,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
             "update provider_accounts
              set quota_access_observed_at = $3, quota_access_state = $4,
                  quota_evidence = $5, quota_reset_at = $6,
-                 updated_at = greatest(now(), $3)
+                 updated_at = greatest(now(), updated_at, $3)
              where id = $1 and credential_revision = $2
                and (quota_access_observed_at is null or quota_access_observed_at <= $3)",
         )
@@ -396,7 +419,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         require_nonempty(ENTITY, "account_id", account_id)?;
         let result = sqlx::query(
             "update provider_accounts
-             set quota_observed_at = $3, updated_at = greatest(now(), $3)
+             set quota_observed_at = $3, updated_at = greatest(now(), updated_at, $3)
              where id = $1 and credential_revision = $2
                and provider_quota_json is not null
                and (quota_observed_at is null or quota_observed_at <= $3)",
@@ -463,75 +486,12 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
         &self,
         command: ImportProviderAccounts,
     ) -> StoreResult<ProviderAccountAdminImport> {
-        command.validate()?;
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|_| postgres_unavailable("begin provider account admin import"))?;
-        let result = async {
-            let revision = bump_config_revision_in_transaction(&mut transaction).await?;
-            if let Some(binding) = &command.outbound_proxy {
-                let (_, current) = super::super::proxies::resolve_proxy_selection(
-                    &mut transaction,
-                    &gateway_admin::model::proxies::AccountProxySelection::Saved(
-                        binding.id.clone(),
-                    ),
-                )
-                .await?;
-                if current.as_ref() != Some(&binding.proxy) {
-                    return Err(StoreError::Conflict {
-                        entity: "outbound proxy",
-                        id: binding.id.clone(),
-                        kind: ConflictKind::StaleRevision,
-                    });
-                }
-            }
-            let mut account_ids = Vec::with_capacity(command.accounts.len());
-            for account in &command.accounts {
-                account_ids
-                    .push(upsert_provider_account_in_transaction(&mut transaction, account).await?);
-            }
-            if let Some(settings) = &command.settings {
-                let unique_ids = account_ids
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                update_provider_accounts_scheduling_in_transaction(
-                    &mut transaction,
-                    &unique_ids,
-                    Some(settings.enabled),
-                    Some(settings.concurrency_limit),
-                    Some(settings.weight),
-                    settings.model_access.as_ref(),
-                    None,
-                )
-                .await?;
-                replace_account_group_assignments_in_transaction(
-                    &mut transaction,
-                    &unique_ids,
-                    &settings.group_ids,
-                )
-                .await?;
-                if let Some(notes) = settings.notes.as_deref() {
-                    update_provider_account_notes_in_transaction(
-                        &mut transaction,
-                        &unique_ids,
-                        notes,
-                    )
-                    .await?;
-                }
-            }
-            append_admin_audit_event_in_transaction(&mut transaction, command.audit, revision)
-                .await?;
-            Ok(ProviderAccountAdminImport {
-                config_revision: revision,
-                account_ids,
-            })
-        }
-        .await;
+        let result = import_provider_accounts_in_transaction(&mut transaction, command).await;
         finish_admin_transaction(transaction, result, "provider account admin import").await
     }
 
@@ -539,101 +499,12 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
         &self,
         command: RotateProviderAccount,
     ) -> StoreResult<ProviderAccountAdminRotation> {
-        command.scope.validate()?;
-        require_nonempty(ENTITY, "account_id", &command.profile.id)?;
-        require_nonempty(ENTITY, "name", &command.profile.name)?;
-        if let Some(identity) = &command.replacement_identity {
-            require_nonempty(ENTITY, "upstream_user_id", identity.upstream_user_id())?;
-            if let Some(account_id) = identity.upstream_account_id() {
-                require_nonempty(ENTITY, "upstream_account_id", account_id)?;
-            }
-        }
-        if command.profile.id != command.credential.account_id {
-            return Err(invalid("rotated profile and credential account IDs differ"));
-        }
-        validate_credential_update(&command.credential)?;
-        if let Some(settings) = &command.settings {
-            if settings.account_id != command.profile.id {
-                return Err(invalid(
-                    "rotated credential and account settings IDs differ",
-                ));
-            }
-            validate_batch_update_group_ids(&settings.group_ids)?;
-        }
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|_| postgres_unavailable("begin provider account admin rotation"))?;
-        let result = async {
-            let config_revision = bump_config_revision_in_transaction(&mut transaction).await?;
-            let credential_revision = rotate_provider_account_in_transaction(
-                &mut transaction,
-                &command.scope,
-                &command.profile,
-                command.replacement_identity.as_ref(),
-                &command.credential,
-            )
-            .await?;
-            // 凭据 CAS、普通设置和审计共享事务，任何设置失败都回滚凭据更新。
-            if let Some(settings) = &command.settings {
-                let ids = std::slice::from_ref(&settings.account_id);
-                update_provider_accounts_scheduling_in_transaction(
-                    &mut transaction,
-                    ids,
-                    Some(settings.enabled),
-                    Some(settings.concurrency_limit),
-                    Some(settings.weight),
-                    settings.model_access.as_ref(),
-                    settings.outbound_proxy.as_ref(),
-                )
-                .await?;
-                replace_account_group_assignments_in_transaction(
-                    &mut transaction,
-                    ids,
-                    &settings.group_ids,
-                )
-                .await?;
-                if let Some(notes) = settings.notes.as_deref() {
-                    update_provider_account_notes_in_transaction(&mut transaction, ids, notes)
-                        .await?;
-                }
-                if let Some(turn_state) = settings.turn_state_override.as_deref() {
-                    update_provider_account_turn_state_in_transaction(
-                        &mut transaction,
-                        ids,
-                        turn_state,
-                    )
-                    .await?;
-                }
-                if let Some(enabled) = settings.basispoints_enabled {
-                    update_provider_accounts_basispoints_in_transaction(
-                        &mut transaction,
-                        ids,
-                        enabled,
-                    )
-                    .await?;
-                }
-                // 单账号更新是整体替换语义：上限始终按提交值覆盖，`None` 表示清除。
-                update_provider_accounts_bps_limit_in_transaction(
-                    &mut transaction,
-                    ids,
-                    settings.bps_concurrency_limit,
-                )
-                .await?;
-            }
-            append_admin_audit_event_in_transaction(
-                &mut transaction,
-                command.audit,
-                config_revision,
-            )
-            .await?;
-            Ok(ProviderAccountAdminRotation {
-                config_revision,
-                credential_revision,
-            })
-        }
-        .await;
+        let result = rotate_provider_account_admin_in_transaction(&mut transaction, command).await;
         finish_admin_transaction(transaction, result, "provider account admin rotation").await
     }
 
@@ -678,30 +549,6 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 )
                 .await?;
             }
-            if let Some(turn_state) = command.turn_state_override.as_deref() {
-                update_provider_account_turn_state_in_transaction(
-                    &mut transaction,
-                    &command.account_ids,
-                    turn_state,
-                )
-                .await?;
-            }
-            if let Some(enabled) = command.basispoints_enabled {
-                update_provider_accounts_basispoints_in_transaction(
-                    &mut transaction,
-                    &command.account_ids,
-                    enabled,
-                )
-                .await?;
-            }
-            if let Some(limit) = command.bps_concurrency_limit {
-                update_provider_accounts_bps_limit_in_transaction(
-                    &mut transaction,
-                    &command.account_ids,
-                    limit,
-                )
-                .await?;
-            }
             append_admin_audit_event_in_transaction(&mut transaction, command.audit, revision)
                 .await?;
             Ok(revision)
@@ -739,7 +586,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                      quota_reset_at = null,
                      last_error_reason = null,
                      last_error_message = null,
-                     updated_at = now()
+                     updated_at = greatest(now(), updated_at)
                  where id = $1
                  returning id",
             )
@@ -803,54 +650,6 @@ async fn update_provider_account_notes_in_transaction(
     Ok(())
 }
 
-/// 空串经 `nullif` 落为 NULL 表示清除覆盖；非空值由调用方完成合法性与长度校验。
-async fn update_provider_account_turn_state_in_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    account_ids: &[String],
-    turn_state: &str,
-) -> StoreResult<()> {
-    sqlx::query(
-        "update provider_accounts set turn_state_override = nullif($2, '') where id = any($1::text[])",
-    )
-    .bind(account_ids)
-    .bind(turn_state.trim())
-    .execute(&mut **transaction)
-    .await
-    .map_err(|_| postgres_unavailable("update provider account turn state override"))?;
-    Ok(())
-}
-
-async fn update_provider_accounts_basispoints_in_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    account_ids: &[String],
-    enabled: bool,
-) -> StoreResult<()> {
-    sqlx::query("update provider_accounts set basispoints_enabled = $2 where id = any($1::text[])")
-        .bind(account_ids)
-        .bind(enabled)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|_| postgres_unavailable("update provider account basispoints flag"))?;
-    Ok(())
-}
-
-/// `None` 清除子池上限，回到只受账号总并发约束的行为。
-async fn update_provider_accounts_bps_limit_in_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-    account_ids: &[String],
-    limit: Option<AccountConcurrencyLimit>,
-) -> StoreResult<()> {
-    sqlx::query(
-        "update provider_accounts set bps_concurrency_limit = $2 where id = any($1::text[])",
-    )
-    .bind(account_ids)
-    .bind(limit.map(|limit| i64::from(limit.get())))
-    .execute(&mut **transaction)
-    .await
-    .map_err(|_| postgres_unavailable("update provider account bps concurrency limit"))?;
-    Ok(())
-}
-
 async fn replace_account_group_assignments_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     account_ids: &[String],
@@ -901,7 +700,7 @@ async fn replace_account_group_assignments_in_transaction(
 pub(crate) async fn upsert_provider_account_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     account: &NewProviderAccount,
-) -> StoreResult<String> {
+) -> StoreResult<(String, Revision)> {
     account.validate()?;
     let credential_state = account.credential_state;
     let proxy_id = match account.outbound_proxy.as_ref() {
@@ -912,18 +711,16 @@ pub(crate) async fn upsert_provider_account_in_transaction(
         ),
         None => None,
     };
-    let imported_id = sqlx::query_scalar::<_, String>(
+    let imported = sqlx::query_as::<_, (String, i64)>(
         "insert into provider_accounts (
            outbound_proxy_url, outbound_proxy_id, id, provider_kind, name, email, upstream_user_id,
            upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
            has_refresh_token, access_token_expires_at, next_refresh_at, enabled,
            concurrency_limit, weight, model_access_json, credential_state, provider_quota_json,
-           credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at,
-           bps_concurrency_limit
+           credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at
          ) values (
            $18, $19, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13,
-           $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17),
-           $21
+           $14, $15, coalesce($20, '{\"mode\":\"all\",\"models\":[]}'::jsonb), $16, null, $17, null, null, now(), greatest(now(), $17)
          )
          on conflict (
            provider_kind,
@@ -953,8 +750,8 @@ pub(crate) async fn upsert_provider_account_in_transaction(
            quota_observed_at = null,
            last_error_reason = null,
            last_error_message = null,
-           updated_at = greatest(now(), excluded.credential_observed_at)
-         returning id",
+           updated_at = greatest(now(), provider_accounts.updated_at, excluded.credential_observed_at)
+         returning id, credential_revision",
     )
     .bind(&account.id)
     .bind(&account.provider_kind)
@@ -976,11 +773,6 @@ pub(crate) async fn upsert_provider_account_in_transaction(
     .bind(account.outbound_proxy.as_ref().map(|proxy| proxy.expose_url()))
     .bind(proxy_id)
     .bind(account.model_access.as_ref().map(sqlx::types::Json))
-    .bind(
-        account
-            .bps_concurrency_limit
-            .map(|limit| i64::from(limit.get())),
-    )
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {
@@ -1002,7 +794,7 @@ pub(crate) async fn upsert_provider_account_in_transaction(
         id: account.id.clone(),
         kind: ConflictKind::InvalidTransition,
     })?;
-    Ok(imported_id)
+    Ok((imported.0, Revision::new(to_u64(imported.1)?)?))
 }
 
 pub(crate) async fn rotate_provider_account_in_transaction(
@@ -1030,16 +822,16 @@ pub(crate) async fn rotate_provider_account_in_transaction(
              upstream_user_id = case when $11::boolean then $12::text else upstream_user_id end,
              upstream_account_id = case when $11::boolean then $13::text else upstream_account_id end,
              credential_state = case
-                 when not enabled then credential_state
+                 when $15::boolean then credential_state
                  when $11::boolean or credential_state <> 'unknown' then 'ready'
                  else 'unknown'
              end,
              credential_observed_at = case
-                 when not enabled then credential_observed_at
+                 when $15::boolean then credential_observed_at
                  else now()
              end,
-             last_error_reason = case when enabled then null else last_error_reason end,
-             last_error_message = case when enabled then null else last_error_message end,
+             last_error_reason = case when not $15::boolean then null else last_error_reason end,
+             last_error_message = case when not $15::boolean then null else last_error_message end,
              updated_at = greatest(now(), updated_at)
          where id = $1 and provider_kind = $2
            and credential_revision = $3
@@ -1059,6 +851,7 @@ pub(crate) async fn rotate_provider_account_in_transaction(
     .bind(upstream_user_id)
     .bind(upstream_account_id)
     .bind(update.preserve_profile)
+    .bind(update.preserve_credential_state)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {
@@ -1240,4 +1033,127 @@ pub(crate) async fn finish_admin_transaction<T>(
             Err(error)
         }
     }
+}
+
+// 授权回执与账号写入需要共享事务；常规导入、刷新和轮换复用同一写入合同。
+pub(super) async fn import_provider_accounts_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: ImportProviderAccounts,
+) -> StoreResult<ProviderAccountAdminImport> {
+    command.validate()?;
+    let revision = bump_config_revision_in_transaction(transaction).await?;
+    if let Some(binding) = &command.outbound_proxy {
+        let (_, current) = super::super::proxies::resolve_proxy_selection(
+            transaction,
+            &gateway_admin::model::proxies::AccountProxySelection::Saved(binding.id.clone()),
+        )
+        .await?;
+        if current.as_ref() != Some(&binding.proxy) {
+            return Err(StoreError::Conflict {
+                entity: "outbound proxy",
+                id: binding.id.clone(),
+                kind: ConflictKind::StaleRevision,
+            });
+        }
+    }
+    let mut account_ids = Vec::with_capacity(command.accounts.len());
+    let mut credential_revisions = std::collections::BTreeMap::new();
+    for account in &command.accounts {
+        let (id, revision) = upsert_provider_account_in_transaction(transaction, account).await?;
+        credential_revisions.insert(id.clone(), revision);
+        account_ids.push(id);
+    }
+    if let Some(settings) = &command.settings {
+        let unique_ids = account_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        update_provider_accounts_scheduling_in_transaction(
+            transaction,
+            &unique_ids,
+            Some(settings.enabled),
+            Some(settings.concurrency_limit),
+            Some(settings.weight),
+            settings.model_access.as_ref(),
+            None,
+        )
+        .await?;
+        replace_account_group_assignments_in_transaction(
+            transaction,
+            &unique_ids,
+            &settings.group_ids,
+        )
+        .await?;
+        if let Some(notes) = settings.notes.as_deref() {
+            update_provider_account_notes_in_transaction(transaction, &unique_ids, notes).await?;
+        }
+    }
+    append_admin_audit_event_in_transaction(transaction, command.audit, revision).await?;
+    Ok(ProviderAccountAdminImport {
+        config_revision: revision,
+        account_ids,
+        credential_revisions,
+    })
+}
+
+pub(super) async fn rotate_provider_account_admin_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: RotateProviderAccount,
+) -> StoreResult<ProviderAccountAdminRotation> {
+    command.scope.validate()?;
+    require_nonempty(ENTITY, "account_id", &command.profile.id)?;
+    require_nonempty(ENTITY, "name", &command.profile.name)?;
+    if let Some(identity) = &command.replacement_identity {
+        require_nonempty(ENTITY, "upstream_user_id", identity.upstream_user_id())?;
+        if let Some(account_id) = identity.upstream_account_id() {
+            require_nonempty(ENTITY, "upstream_account_id", account_id)?;
+        }
+    }
+    if command.profile.id != command.credential.account_id {
+        return Err(invalid("rotated profile and credential account IDs differ"));
+    }
+    validate_credential_update(&command.credential)?;
+    if let Some(settings) = &command.settings {
+        if settings.account_id != command.profile.id {
+            return Err(invalid(
+                "rotated credential and account settings IDs differ",
+            ));
+        }
+        validate_batch_update_group_ids(&settings.group_ids)?;
+    }
+    let config_revision = bump_config_revision_in_transaction(transaction).await?;
+    let credential_revision = rotate_provider_account_in_transaction(
+        transaction,
+        &command.scope,
+        &command.profile,
+        command.replacement_identity.as_ref(),
+        &command.credential,
+    )
+    .await?;
+    // 凭据 CAS、普通设置和审计共享事务，任何设置失败都回滚凭据更新。
+    if let Some(settings) = &command.settings {
+        let ids = std::slice::from_ref(&settings.account_id);
+        update_provider_accounts_scheduling_in_transaction(
+            transaction,
+            ids,
+            Some(settings.enabled),
+            Some(settings.concurrency_limit),
+            Some(settings.weight),
+            settings.model_access.as_ref(),
+            settings.outbound_proxy.as_ref(),
+        )
+        .await?;
+        replace_account_group_assignments_in_transaction(transaction, ids, &settings.group_ids)
+            .await?;
+        if let Some(notes) = settings.notes.as_deref() {
+            update_provider_account_notes_in_transaction(transaction, ids, notes).await?;
+        }
+    }
+    append_admin_audit_event_in_transaction(transaction, command.audit, config_revision).await?;
+    Ok(ProviderAccountAdminRotation {
+        config_revision,
+        credential_revision,
+    })
 }

@@ -97,14 +97,14 @@ impl ProxyStore for TestProxies {
         _: Revision,
         _: ProxyTestResult,
         _: &MutationContext,
-    ) -> AdminStoreResult<ProxyRecord> {
+    ) -> AdminStoreResult<ProxyMutation> {
         Err(super::unavailable("proxy"))
     }
 }
 
 #[async_trait]
 impl ProxyProbe for TestProxies {
-    async fn test(&self, _: &OutboundProxy) -> ProxyTestResult {
+    async fn test(&self, _: &OutboundProxy, _: bool) -> ProxyTestResult {
         panic!("unexpected proxy probe")
     }
 }
@@ -124,6 +124,8 @@ async fn authorization_uses_selected_proxy_regardless_of_probe_status() {
                 .accounts(FakeAccountStore::new(kind, events.clone()))
                 .proxies(Arc::new(TestProxies {
                     record: Some(ProxyRecord {
+                        auto_location: false,
+                        detected_location: None,
                         location: None,
                         id: "proxy_oauth".to_owned(),
                         name: "授权出口".to_owned(),
@@ -132,6 +134,7 @@ async fn authorization_uses_selected_proxy_regardless_of_probe_status() {
                         account_count: 0,
                         last_test_at: probe_success.map(|_| now),
                         last_test: probe_success.map(|success| ProxyTestResult {
+                            location: Default::default(),
                             success,
                             latency_ms: 10,
                             exit_ip: None,
@@ -153,9 +156,19 @@ async fn authorization_uses_selected_proxy_regardless_of_probe_status() {
                 reauthorization: None,
             };
             let result = if kind == "openai" {
-                services.openai().start_authorization(command).await
+                services
+                    .credentials()
+                    .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+                    .unwrap()
+                    .start_authorization(command)
+                    .await
             } else {
-                services.xai().start_authorization(command).await
+                services
+                    .credentials()
+                    .for_provider(&gateway_core::routing::ProviderKind::new("xai").unwrap())
+                    .unwrap()
+                    .start_authorization(command)
+                    .await
             };
             assert!(result.is_ok(), "{kind}, {probe_success:?}: {result:?}");
             assert_eq!(recorded(&events), ["provider.start_authorization"]);
@@ -177,6 +190,7 @@ async fn linked_accounts_share_plan_resolution_and_only_read_cached_quota() {
     ] {
         let provider = FakeProviderAdmin::new("openai", events());
         provider.set_quota(ProviderQuota {
+            credits: None,
             plan_type: cached.map(str::to_owned),
             observed_at: None,
             refresh_token_expires_at: None,
@@ -263,9 +277,19 @@ async fn credential_import_keeps_proxy_reserved_until_commit_and_releases_on_err
                 document: document(),
             };
             let result = if kind == "openai" {
-                services.openai().import_document(command).await
+                services
+                    .credentials()
+                    .for_provider(&gateway_core::routing::ProviderKind::new("openai").unwrap())
+                    .unwrap()
+                    .import_document(command)
+                    .await
             } else {
-                services.xai().import_document(command).await
+                services
+                    .credentials()
+                    .for_provider(&gateway_core::routing::ProviderKind::new("xai").unwrap())
+                    .unwrap()
+                    .import_document(command)
+                    .await
             };
             assert_eq!(result.is_err(), failure.is_some());
             let events = recorded(&events);

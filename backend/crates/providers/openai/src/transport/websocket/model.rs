@@ -7,12 +7,23 @@ use crate::transport::protocol::responses::{
 };
 
 /// WebSocket opening 描述。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CodexWebSocketConnection {
+    pub(crate) connection_budget: Option<gateway_core::engine::connection::ConnectionBudget>,
     pub(crate) outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub(super) endpoint: String,
     pub(super) headers: Vec<(String, String)>,
 }
+
+// 请求预算不是连接身份；连接池复用不能由请求局部状态决定。
+impl PartialEq for CodexWebSocketConnection {
+    fn eq(&self, other: &Self) -> bool {
+        self.endpoint == other.endpoint
+            && self.headers == other.headers
+            && self.outbound_proxy == other.outbound_proxy
+    }
+}
+impl Eq for CodexWebSocketConnection {}
 
 /// 已构造完成的 Responses WebSocket 请求描述。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +126,7 @@ impl CodexWebSocketConnection {
             endpoint: endpoint.into(),
             headers,
             outbound_proxy: None,
+            connection_budget: None,
         }
     }
 

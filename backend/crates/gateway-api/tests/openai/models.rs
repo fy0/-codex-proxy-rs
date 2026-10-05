@@ -4,6 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header::AUTHORIZATION},
 };
+use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ExecutionService, StartExecution,
@@ -23,6 +24,7 @@ pub(super) struct ModelsExecution {
     presentation: Option<ModelPresentation>,
     native: Option<Result<Vec<PublicModelDescriptor>, ProviderCatalogUnavailable>>,
     requested_versions: Mutex<Vec<String>>,
+    middleware: Option<Arc<crate::openai::middleware::RequestMiddleware>>,
 }
 
 impl ModelsExecution {
@@ -32,6 +34,7 @@ impl ModelsExecution {
             presentation: None,
             native: None,
             requested_versions: Mutex::default(),
+            middleware: None,
         })
     }
 
@@ -68,6 +71,7 @@ impl ModelsExecution {
             presentation: Some(presentation),
             native: None,
             requested_versions: Mutex::default(),
+            middleware: None,
         })
     }
 
@@ -77,6 +81,7 @@ impl ModelsExecution {
             presentation: None,
             native: None,
             requested_versions: Mutex::default(),
+            middleware: None,
         })
     }
 
@@ -90,6 +95,7 @@ impl ModelsExecution {
             presentation: None,
             native: None,
             requested_versions: Mutex::default(),
+            middleware: None,
         })
     }
 
@@ -108,6 +114,15 @@ impl ModelsExecution {
 }
 
 impl ExecutionService for ModelsExecution {
+    fn middleware_plan(
+        &self,
+        _: &gateway_core::engine::execution::PreparedRootExecution,
+    ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan> {
+        self.middleware
+            .as_ref()
+            .map(|middleware| middleware.frozen())
+    }
+
     fn client_model_catalog<'a>(
         &'a self,
         _client: &'a AuthenticatedClient,
@@ -141,10 +156,10 @@ impl ExecutionService for ModelsExecution {
         }
     }
 
-    fn public_models(&self, _: &AuthenticatedClient) -> Vec<PublicModelId> {
+    fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId> {
         ["model-a", "model-b"]
             .into_iter()
-            .map(|model| PublicModelId::new(model).expect("model"))
+            .map(|model| PublicModelId::new(client.snapshot().mapped_model(model)).expect("model"))
             .collect()
     }
 
@@ -182,6 +197,115 @@ fn authorized_request(path: &str) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn request_settings_reach_query_terminal_without_mutating_authenticated_baseline() {
+    let mut execution = ModelsExecution::new();
+    Arc::get_mut(&mut execution).unwrap().middleware =
+        Some(Arc::new(crate::openai::middleware::RequestMiddleware {
+            settings: Some(|settings| {
+                let mut runtime = serde_json::to_value(&settings.runtime).unwrap();
+                runtime["model_mappings"] = serde_json::json!({"model-a":"plugin-model"});
+                runtime["concurrency_wait_timeout_seconds"] = serde_json::json!(30);
+                settings.runtime = serde_json::from_value(runtime).unwrap();
+                settings.disable_fast = true;
+            }),
+            ..Default::default()
+        }));
+    let app = api_router(execution.clone()).await;
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(authorized_request("/v1/models"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"][0]["id"], "plugin-model");
+        assert_eq!(body["data"][1]["id"], "model-b");
+        assert_eq!(
+            execution.client.snapshot().mapped_model("model-a"),
+            "model-a"
+        );
+        assert!(!execution.client.policy().account_scope().disable_fast());
+    }
+}
+
+#[tokio::test]
+async fn model_queries_enter_the_same_chain_after_auth_and_hold_generation_until_body_end() {
+    use std::sync::atomic::Ordering;
+
+    let middleware = Arc::new(crate::openai::middleware::RequestMiddleware::default());
+    let mut execution = ModelsExecution::new();
+    Arc::get_mut(&mut execution).unwrap().middleware = Some(middleware.clone());
+    let app = api_router(execution).await;
+    let unauthenticated = Request::get("/v1/models").body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(unauthenticated).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(middleware.endpoints.lock().unwrap().is_empty());
+
+    for (path, status) in [
+        ("/v1/models", StatusCode::OK),
+        ("/v1/models/model-a", StatusCode::OK),
+        ("/v1/models/hidden-model", StatusCode::NOT_FOUND),
+    ] {
+        let response = app.clone().oneshot(authorized_request(path)).await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["x-request-middleware"], "applied");
+        assert_eq!(middleware.live_leases.load(Ordering::SeqCst), 1);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(!body.is_empty());
+        assert_eq!(middleware.live_leases.load(Ordering::SeqCst), 0);
+    }
+    assert_eq!(
+        *middleware.endpoints.lock().unwrap(),
+        [
+            "/v1/models",
+            "/v1/models/model-a",
+            "/v1/models/hidden-model"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn model_query_middleware_short_circuit_sets_json_content_type_without_calling_terminal() {
+    let middleware = Arc::new(
+        crate::openai::middleware::RequestMiddleware::default().with_json_short_circuit(
+            Bytes::from_static(br#"{"object":"list","data":[],"source":"middleware"}"#),
+        ),
+    );
+    let mut execution = ModelsExecution::new();
+    Arc::get_mut(&mut execution).unwrap().middleware = Some(middleware);
+
+    let response = api_router(execution.clone())
+        .await
+        .oneshot(authorized_request(
+            "/v1/models?client_version=0.154.0-alpha.3",
+        ))
+        .await
+        .expect("short-circuit response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("short-circuit body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("short-circuit JSON"),
+        serde_json::json!({"object":"list","data":[],"source":"middleware"})
+    );
+    assert!(
+        execution
+            .requested_versions
+            .lock()
+            .expect("versions")
+            .is_empty(),
+        "terminal catalog lookup must not run after middleware short circuit"
+    );
+}
+
+#[tokio::test]
 async fn native_catalog_preserves_complete_objects_and_only_rewrites_alias_slug() {
     let original = serde_json::json!({
         "slug": "gpt-native", "display_name": "Official name", "priority": 47,
@@ -204,6 +328,7 @@ async fn native_catalog_preserves_complete_objects_and_only_rewrites_alias_slug(
         presentation: None,
         native: Some(Ok(vec![entry("gpt-native"), entry("my-alias")])),
         requested_versions: Mutex::default(),
+        middleware: None,
     });
     let response = api_router(execution.clone())
         .await
@@ -236,6 +361,7 @@ async fn native_catalog_failure_does_not_publish_a_synthetic_or_empty_success() 
         presentation: None,
         native: Some(Err(ProviderCatalogUnavailable)),
         requested_versions: Mutex::default(),
+        middleware: None,
     });
     let response = api_router(execution)
         .await

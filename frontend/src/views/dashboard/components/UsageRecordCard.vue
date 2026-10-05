@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { dashboardSnapshotView } from '../composables/useDashboard'
 
-import BaseCard from '@/components/base/BaseCard.vue'
+import { BaseCard } from '@codex-proxy/ui'
 import UsageRecordsTable from '@/views/usage/components/UsageRecordsTable.vue'
 import { usageRecordColumns } from '@/views/usage/constants'
 
@@ -11,7 +11,9 @@ defineProps<{
   rows: DashboardSnapshot['usageRecords']
 }>()
 
-const dashboardUsageRecordColumns = usageRecordColumns.filter(column => column.key !== 'actions')
+const dashboardUsageRecordColumns = usageRecordColumns.filter(
+  column => column.key !== 'actions' && column.key !== 'clientApiKeyName',
+)
 </script>
 
 <template>

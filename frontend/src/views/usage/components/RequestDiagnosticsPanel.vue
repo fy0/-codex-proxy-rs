@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import type { OpsError, OpsErrorMetadata } from '@/api'
+import { BaseButton, BaseEmpty, BaseScrollbar } from '@codex-proxy/ui'
 import { Download, RefreshCw } from '@lucide/vue'
 import { computed } from 'vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useDownload } from '@/composables/useDownload'
 import { useRequestDiagnostics } from '../composables/useRequestDiagnostics'
@@ -12,10 +10,10 @@ import { requestDiagnosticsBundle } from '../utils/diagnosticsBundle'
 import RequestTransportFailure from './RequestTransportFailure.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 
-const props = defineProps<{ requestId: string, metadata?: OpsErrorMetadata, errorRecord?: OpsError }>()
+const props = withDefaults(defineProps<{ requestId: string, metadata?: OpsErrorMetadata, errorRecord?: OpsError, active?: boolean }>(), { active: true })
 const { downloadJson } = useDownload()
 const { loading: exporting, run: runExport } = useAsyncAction()
-const { selectedId, detail, loading, error, refresh } = useRequestDiagnostics(() => props.requestId)
+const { selectedId, detail, loading, error, refresh } = useRequestDiagnostics(() => props.requestId, () => props.active)
 const trace = computed(() => detail.value?.trace)
 const events = computed(() => (trace.value?.events ?? []).map(event => ({
   ...event,

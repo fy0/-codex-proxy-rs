@@ -49,10 +49,6 @@ impl CodexCookiePolicy {
                 "cf_clearance",
                 "__cf_bm",
                 "_cfuvid",
-                // state 探测不回放路由 Cookie；Cookie 锁定另由共享池管理。
-                "__cflb",
-                "__oai_lb",
-                "__oailb",
             ],
             ["chatgpt.com", "openai.com"],
         )

@@ -1,15 +1,8 @@
 <script setup lang="ts">
 import type { BackupRecord } from '@/api'
 
+import { BaseButton, BaseCard, BaseConfirmModal, BaseIconButton, BaseTable, BaseTablePagination, defineTableColumns } from '@codex-proxy/ui'
 import { Download, Play, RefreshCw, Trash2 } from '@lucide/vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseTablePagination from '@/components/base/BaseTable/BaseTablePagination.vue'
-import { defineTableColumns } from '@/components/base/BaseTable/columns'
-import BaseTable from '@/components/base/BaseTable/index.vue'
-import { formatDateTime } from '@/utils/date'
 
 import BackupStatusBadge from './BackupStatusBadge.vue'
 
@@ -36,8 +29,8 @@ const emit = defineEmits<{
   download: [record: BackupRecord]
   requestDelete: [record: BackupRecord]
   confirmDelete: []
-  cancelDelete: []
 }>()
+const deleteOpen = defineModel<boolean>('deleteOpen', { required: true })
 
 const columns = defineTableColumns<BackupRecord>([
   { key: 'id', label: 'ID', kind: 'mono', size: 'lg' },
@@ -152,7 +145,7 @@ function canDelete(record: BackupRecord): boolean {
 
         <template #expiresAt="{ row }">
           <span class="text-cp-text-secondary">
-            {{ row.expiresAt ? formatDateTime(row.expiresAt) : '—' }}
+            {{ row.expiresAtDisplay ?? '—' }}
           </span>
         </template>
 
@@ -164,7 +157,7 @@ function canDelete(record: BackupRecord): boolean {
 
         <template #startedAt="{ row }">
           <span class="text-cp-text-secondary">
-            {{ row.startedAt ? formatDateTime(row.startedAt) : '—' }}
+            {{ row.startedAtDisplay ?? '—' }}
           </span>
         </template>
 
@@ -199,13 +192,12 @@ function canDelete(record: BackupRecord): boolean {
     </div>
 
     <BaseConfirmModal
-      :model-value="deleteTarget !== null"
+      v-model="deleteOpen"
       title="删除备份"
       description="将删除远端对象并移除记录，此操作不可撤销"
       destructive
       confirm-text="确认删除"
       :loading="deleting"
-      @update:model-value="emit('cancelDelete')"
       @confirm="emit('confirmDelete')"
     >
       <p class="m-0">

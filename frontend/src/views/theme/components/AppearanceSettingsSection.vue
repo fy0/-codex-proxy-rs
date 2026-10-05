@@ -1,12 +1,7 @@
 <script setup lang="ts">
-import { Check, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
+import { BaseButton, BaseInput, BasePageHeader, BaseScrollbar, BaseSegmented, toast } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BasePageHeader from '@/components/base/BasePageHeader.vue'
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import { toast } from '@/components/base/BaseToast'
+import { Check, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
 
 import { useThemeEditor } from '../composables/useThemeEditor'
 import ThemeComponentTokenPanel from './ThemeComponentTokenPanel.vue'

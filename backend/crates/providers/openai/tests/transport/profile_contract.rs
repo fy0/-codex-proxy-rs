@@ -134,3 +134,43 @@ fn residency_is_explicit_and_survives_artifact_updates() {
     assert_eq!(model["version"], "2.0.0");
     assert!(!account.contains_key("x-openai-internal-codex-residency"));
 }
+
+#[tokio::test]
+async fn profile_statistics_should_fallback_when_custom_upstream_returns_404() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/codex/profiles/me"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/codex/profiles/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "profile": {
+                "display_name": "Fallback User"
+            },
+            "stats": {}
+        })))
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let client = CodexBackendClient::new(
+        build_reqwest_client().expect("HTTP client"),
+        custom_server.uri(),
+        test_wire_profile(),
+    )
+    .with_official_base_url(official_server.uri());
+
+    let context = request_context("audit", Some("audit-account"));
+    let statistics = client
+        .fetch_profile_statistics(context)
+        .await
+        .expect("profile statistics after fallback");
+
+    assert_eq!(statistics.display_name.as_deref(), Some("Fallback User"));
+}

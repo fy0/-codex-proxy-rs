@@ -16,7 +16,7 @@ use gateway_core::error::{
     ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind, ProviderError, ProviderErrorKind,
 };
 use gateway_core::event::ProviderResponseHeader;
-use gateway_core::operation::Operation;
+use gateway_core::operation::{Operation, OperationKind};
 use gateway_core::routing::PublicModelId;
 use gateway_core::upstream::UpstreamSendState;
 use serde_json::{Value, json};
@@ -41,6 +41,7 @@ struct SearchExecution {
     captured: Mutex<Vec<CapturedSearchRequest>>,
     committed_statuses: Arc<Mutex<Vec<u16>>>,
     fail_with_upstream_response: bool,
+    middleware: Option<Arc<crate::openai::middleware::RequestMiddleware>>,
 }
 
 impl SearchExecution {
@@ -50,6 +51,7 @@ impl SearchExecution {
             captured: Mutex::new(Vec::new()),
             committed_statuses: Arc::new(Mutex::new(Vec::new())),
             fail_with_upstream_response,
+            middleware: None,
         })
     }
 
@@ -59,6 +61,13 @@ impl SearchExecution {
 }
 
 impl ExecutionService for SearchExecution {
+    fn middleware_plan(
+        &self,
+        _: &gateway_core::engine::execution::PreparedRootExecution,
+    ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan> {
+        self.middleware.as_ref().map(|plan| plan.frozen())
+    }
+
     fn authenticate(
         &self,
         plaintext: &str,
@@ -151,7 +160,13 @@ impl ExecutionService for SearchExecution {
 
 #[tokio::test]
 async fn search_route_should_preserve_request_and_success_response_bytes() {
-    let execution = SearchExecution::new(false);
+    let mut execution = SearchExecution::new(false);
+    let middleware = Arc::new(crate::openai::middleware::RequestMiddleware {
+        expected_operation: Some(OperationKind::Search),
+        committed_statuses: Some(execution.committed_statuses.clone()),
+        ..Default::default()
+    });
+    Arc::get_mut(&mut execution).unwrap().middleware = Some(middleware.clone());
     let request_body = br#"{ "id":"search-session", "model":"gpt-future", "commands":{"search_query":[{"q":"private query"}]}, "future":1, "future":2 }"#;
     let turn_metadata =
         r#"{"session_id":"session","thread_id":"thread","turn_id":"turn","future":true}"#;
@@ -171,6 +186,11 @@ async fn search_route_should_preserve_request_and_success_response_bytes() {
         .expect("search response");
 
     assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["x-request-middleware"], "applied");
+    assert_eq!(
+        *middleware.endpoints.lock().unwrap(),
+        vec!["/v1/alpha/search"]
+    );
     assert_eq!(response.headers()["x-request-id"], "req_search_test");
     assert_eq!(
         response.headers()["x-gateway-request-id"],

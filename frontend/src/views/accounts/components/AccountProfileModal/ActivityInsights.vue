@@ -3,7 +3,7 @@ import type { AccountProfileActivityInsights, AccountProfileInvocation } from '@
 import { Package } from '@lucide/vue'
 import { computed } from 'vue'
 
-import { formatInteger } from '@/utils/number'
+import { formatInteger } from '@/utils/format'
 
 const props = defineProps<{
   insights: AccountProfileActivityInsights

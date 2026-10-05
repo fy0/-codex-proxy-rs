@@ -1,10 +1,8 @@
 <script setup lang="ts">
+import { BaseButton, BaseFormItem, BaseTextarea } from '@codex-proxy/ui'
 import { Upload } from '@lucide/vue'
 import { useFileDialog } from '@vueuse/core'
 import { onScopeDispose, ref } from 'vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseTextarea from '@/components/base/BaseTextarea.vue'
 
 defineProps<{
   label: string

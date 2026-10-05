@@ -1,11 +1,11 @@
 //! Codex HTTP/SSE/WebSocket 上游 transport。
 
-pub mod bps;
 pub mod canonical;
 pub mod catalog;
 pub mod client;
 mod client_json;
 mod client_sse;
+pub(crate) mod connection;
 pub mod diagnostics;
 mod downstream;
 pub mod endpoints;
@@ -16,13 +16,11 @@ pub mod profile_statistics;
 pub mod protocol;
 pub mod request;
 pub mod reset_credits;
-pub(crate) mod response_meta;
+mod response_meta;
 pub(crate) mod session;
 pub mod subscription;
-mod time;
-mod turn_state;
+pub(crate) use downstream::normalize_selected_codex_downstream_body;
 pub(crate) use endpoints::valid_upstream_base_url;
-pub(crate) use turn_state::{TurnStateObserver, TurnStateResponse};
 pub mod tls;
 pub mod usage;
 pub mod websocket;
@@ -64,7 +62,10 @@ pub use self::{
         CodexRateLimitResetCreditsConsumeResult, MAX_CODEX_RESET_CREDITS_BODY_BYTES,
     },
     response_meta::CodexResponseMetadata,
-    usage::{MAX_CODEX_USAGE_BODY_BYTES, OpenAiBillingUsage, openai_billing_breakdown},
+    usage::{
+        MAX_CODEX_USAGE_BODY_BYTES, OpenAiBillingUsage, openai_billing_breakdown,
+        openai_billing_breakdown_with_override,
+    },
     websocket::{
         CodexWebSocketPool, CodexWebSocketPoolConfig, CodexWebSocketPoolKey, WebSocketPoolDecision,
     },

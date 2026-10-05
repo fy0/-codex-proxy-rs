@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::transport::protocol::websocket::{
     OpeningAuditHeader, OpeningAuditSnapshot, WebSocketAuditArtifact,
 };
-use crate::transport::time::china_filename_timestamp_millis;
+use gateway_core::time::DeploymentTimeZone;
 
 use super::model::CodexWebSocketConnection;
 
@@ -37,13 +37,14 @@ pub fn websocket_audit_dir() -> Option<&'static Path> {
 pub async fn write_websocket_audit_artifact_for_dir(
     dir: Option<&Path>,
     artifact: &WebSocketAuditArtifact,
+    timezone: DeploymentTimeZone,
 ) -> io::Result<Option<PathBuf>> {
     let Some(dir) = dir.filter(|dir| !dir.as_os_str().is_empty()) else {
         return Ok(None);
     };
 
     tokio::fs::create_dir_all(dir).await?;
-    let path = dir.join(websocket_audit_file_name());
+    let path = dir.join(websocket_audit_file_name(timezone));
     let body = serde_json::to_vec_pretty(artifact).map_err(io::Error::other)?;
     tokio::fs::write(&path, body).await?;
     Ok(Some(path))
@@ -52,8 +53,9 @@ pub async fn write_websocket_audit_artifact_for_dir(
 /// 按环境变量配置写入 WebSocket audit artifact。
 pub async fn write_websocket_audit_artifact_from_env(
     artifact: &WebSocketAuditArtifact,
+    timezone: DeploymentTimeZone,
 ) -> io::Result<Option<PathBuf>> {
-    write_websocket_audit_artifact_for_dir(websocket_audit_dir(), artifact).await
+    write_websocket_audit_artifact_for_dir(websocket_audit_dir(), artifact, timezone).await
 }
 
 impl CodexWebSocketConnection {
@@ -116,7 +118,7 @@ fn is_sensitive_opening_header(name: &str) -> bool {
     )
 }
 
-fn websocket_audit_file_name() -> String {
-    let timestamp = china_filename_timestamp_millis(&Utc::now());
+fn websocket_audit_file_name(timezone: DeploymentTimeZone) -> String {
+    let timestamp = timezone.local(Utc::now()).format("%Y%m%dT%H%M%S%.3f%z");
     format!("codex-ws-audit-{timestamp}-{}.json", Uuid::new_v4())
 }

@@ -1,5 +1,6 @@
 //! PostgreSQL owner for provider-neutral account groups and memberships.
 
+use gateway_admin::model::audit::MutationAuditOperation;
 use std::{collections::BTreeMap, str::FromStr as _};
 
 use async_trait::async_trait;
@@ -36,13 +37,23 @@ const ENTITY: &str = "account group";
 /// Account group store with transactional revision and audit ownership.
 #[derive(Clone)]
 pub struct PgAccountGroupRepository {
+    timezone: gateway_core::time::DeploymentTimeZone,
     pool: PgPool,
 }
 
 impl PgAccountGroupRepository {
     #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            timezone: Default::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_timezone(mut self, timezone: gateway_core::time::DeploymentTimeZone) -> Self {
+        self.timezone = timezone;
+        self
     }
 
     async fn current_revision(&self) -> AdminStoreResult<gateway_admin::model::Revision> {
@@ -59,7 +70,7 @@ impl PgAccountGroupRepository {
             .await
             .map_err(|error| admin_store_error(ENTITY, error))?
             .ok_or_else(|| not_found(id.as_str()))?;
-        let costs = group_costs(&self.pool, &[id.as_str().to_owned()])
+        let costs = group_costs(&self.pool, &[id.as_str().to_owned()], self.timezone)
             .await
             .map_err(|error| admin_store_error(ENTITY, error))?;
         if let Some(usage) = costs.get(id.as_str()) {
@@ -135,7 +146,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             .iter()
             .map(|record| record.id.as_str().to_owned())
             .collect::<Vec<_>>();
-        let costs = group_costs(&self.pool, &group_ids)
+        let costs = group_costs(&self.pool, &group_ids, self.timezone)
             .await
             .map_err(|error| admin_store_error(ENTITY, error))?;
         for record in &mut items {
@@ -164,7 +175,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             .map(|group_id| group_id.as_str().to_owned())
             .collect::<Vec<_>>();
         let rows = sqlx::query(
-            "select proxy.location_country, proxy.location_region, proxy.location_city, proxy.location_timezone, membership.account_group_id,
+            "select proxy.auto_location, proxy.detected_location_json, proxy.location_country, proxy.location_region, proxy.location_city, proxy.location_timezone, membership.account_group_id,
                     account.id, account.provider_kind, account.name, account.notes, account.email,
                     account.upstream_user_id, account.upstream_account_id, account.plan_type,
                     account.authentication_kind, account.credential_revision, account.outbound_proxy_url,
@@ -174,8 +185,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     account.quota_evidence, account.quota_access_observed_at,
                     account.quota_reset_at, account.last_error_reason,
                     account.last_error_message, account.credential_observed_at,
-                    account.created_at, account.updated_at, account.turn_state_override,
-                    account.basispoints_enabled, account.bps_concurrency_limit,
+                    account.created_at, account.updated_at,
                     settings.max_concurrent_per_account
                from account_group_accounts membership
                join provider_accounts account on account.id = membership.provider_account_id
@@ -214,9 +224,10 @@ impl AccountGroupStore for PgAccountGroupRepository {
                         last_error_reason: account.last_error_reason,
                         last_error_message: account.last_error_message,
                     },
-                    total_slots: account
-                        .concurrency_limit
-                        .map_or(default_slots, |limit| u64::from(limit.get())),
+                    total_slots: account.concurrency_limit.map_or_else(
+                        || (default_slots > 0).then_some(default_slots),
+                        |limit| Some(u64::from(limit.get())),
+                    ),
                 })
             })
             .collect::<StoreResult<Vec<_>>>()
@@ -228,12 +239,10 @@ impl AccountGroupStore for PgAccountGroupRepository {
         command: NewAccountGroup,
         context: &MutationContext,
     ) -> AdminStoreResult<AccountGroupMutation> {
-        validate_group_fields(&command.name, command.description.as_deref())?;
         let id = command.id.clone();
         let audit = mutation_audit(
             context,
-            "create",
-            "account_group",
+            MutationAuditOperation::AccountGroupCreate,
             id.as_str(),
             vec![
                 "name".to_owned(),
@@ -244,19 +253,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
         let revision = self
             .mutate(audit, |transaction| {
                 Box::pin(async move {
-                    sqlx::query(
-                        "insert into account_groups
-                         (id, name, description, color, disable_fast, enabled, created_at, updated_at)
-                         values ($1, $2, $3, $4, $5, true, now(), now())",
-                    )
-                    .bind(command.id.as_str())
-                    .bind(command.name)
-                    .bind(command.description)
-                    .bind(command.color.as_str())
-                    .bind(command.disable_fast)
-                    .execute(&mut **transaction)
-                    .await
-                    .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
+                    insert_account_group_in_transaction(transaction, &command).await?;
                     Ok(())
                 })
             })
@@ -277,8 +274,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
         let id = command.id.clone();
         let audit = mutation_audit(
             context,
-            "update",
-            "account_group",
+            MutationAuditOperation::AccountGroupUpdate,
             id.as_str(),
             vec![
                 "name".to_owned(),
@@ -321,8 +317,9 @@ impl AccountGroupStore for PgAccountGroupRepository {
         let id = command.id.clone();
         let audit = mutation_audit(
             context,
-            if command.enabled { "enable" } else { "disable" },
-            "account_group",
+            MutationAuditOperation::AccountGroupEnabled {
+                enabled: command.enabled,
+            },
             id.as_str(),
             vec!["enabled".to_owned()],
         );
@@ -354,7 +351,12 @@ impl AccountGroupStore for PgAccountGroupRepository {
         context: &MutationContext,
     ) -> AdminStoreResult<AccountGroupMutation> {
         let id = command.id.clone();
-        let audit = mutation_audit(context, "delete", "account_group", id.as_str(), Vec::new());
+        let audit = mutation_audit(
+            context,
+            MutationAuditOperation::AccountGroupDelete,
+            id.as_str(),
+            Vec::new(),
+        );
         let revision = self
             .mutate(audit, |transaction| {
                 Box::pin(async move {
@@ -505,7 +507,7 @@ fn group_record(row: &sqlx::postgres::PgRow) -> StoreResult<AccountGroupRecord> 
         },
         capacity: AccountGroupCapacity {
             used_slots: None,
-            total_slots: 0,
+            total_slots: Some(0),
         },
         usage: AccountGroupUsage {
             today_usd: DecimalAmount::from_str("0").map_err(|_| invalid("invalid zero cost"))?,
@@ -524,25 +526,29 @@ fn group_record(row: &sqlx::postgres::PgRow) -> StoreResult<AccountGroupRecord> 
 async fn group_costs(
     pool: &PgPool,
     group_ids: &[String],
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> StoreResult<BTreeMap<String, AccountGroupUsage>> {
     if group_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
     let completed_usage = completed_usage_fact_predicate("mr");
+    // 用量按实际完成请求的账号统计：账号属于多个分组时计入每个所属分组，
+    // 不再按 Client Key 绑定分组快照归属，避免多分组 Key 的费用重复出现在未承接请求的分组上。
     let statement = format!(
         "with requested_groups(group_id) as (
            select unnest($1::text[])
          )
          select requested_groups.group_id,
                 coalesce(sum(mr.cost_amount) filter (
-                  where mr.started_at >= date_trunc('day', now() at time zone 'Asia/Shanghai')
-                    at time zone 'Asia/Shanghai'
+                  where mr.started_at >= $2
                 ), 0)::text as today_usd,
                 coalesce(sum(mr.cost_amount), 0)::text as retained_total_usd
          from requested_groups
          cross join runtime_settings settings
+         left join account_group_accounts membership
+           on membership.account_group_id = requested_groups.group_id
          left join model_requests mr
-           on mr.routing_group_refs @> array[requested_groups.group_id]::text[]
+           on mr.provider_account_ref = membership.provider_account_id
           and mr.started_at >= now() - make_interval(days => settings.usage_retention_days::int)
           and {completed_usage}
           and mr.cost_currency = 'USD'
@@ -553,6 +559,11 @@ async fn group_costs(
     // 动态片段仅为共享的固定 usage-fact predicate；group IDs 仍使用 bind。
     let rows = sqlx::query(sqlx::AssertSqlSafe(statement))
         .bind(group_ids)
+        .bind(
+            timezone
+                .day_start(chrono::Utc::now())
+                .ok_or_else(|| invalid("invalid business date"))?,
+        )
         .fetch_all(pool)
         .await
         .map_err(|_| unavailable("load account group costs"))?;
@@ -664,4 +675,27 @@ fn invalid(message: &str) -> StoreError {
 
 fn unavailable(message: &'static str) -> StoreError {
     postgres_unavailable(message)
+}
+
+/// 原生管理与插件自有分组共用字段校验和写入规则。
+pub(crate) async fn insert_account_group_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &NewAccountGroup,
+) -> StoreResult<()> {
+    validate_group_fields(&command.name, command.description.as_deref())
+        .map_err(|_| invalid("invalid account group fields"))?;
+    sqlx::query(
+        "insert into account_groups
+         (id, name, description, color, disable_fast, enabled, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, true, now(), now())",
+    )
+    .bind(command.id.as_str())
+    .bind(&command.name)
+    .bind(&command.description)
+    .bind(command.color.as_str())
+    .bind(command.disable_fast)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
+    Ok(())
 }

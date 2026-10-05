@@ -19,7 +19,7 @@ use gateway_core::error::{
     ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind, ProviderError, ProviderErrorKind,
 };
 use gateway_core::event::{ProtocolWireEvent, ProviderEvent, ProviderResponseHeader};
-use gateway_core::operation::{ImageRequestKind, Operation};
+use gateway_core::operation::{ImageRequestKind, Operation, OperationKind};
 use gateway_core::routing::PublicModelId;
 use gateway_core::upstream::UpstreamSendState;
 use serde_json::{Value, json};
@@ -44,7 +44,9 @@ struct ImageExecution {
     client: AuthenticatedClient,
     captured: Arc<Mutex<Vec<CapturedImageRequest>>>,
     committed_statuses: Arc<Mutex<Vec<u16>>>,
+    error_statuses: Arc<Mutex<Vec<u16>>>,
     fail_with_upstream_response: bool,
+    middleware: Option<Arc<crate::openai::middleware::RequestMiddleware>>,
 }
 
 impl ImageExecution {
@@ -53,7 +55,9 @@ impl ImageExecution {
             client: authenticated_client("sk_images_test"),
             captured: Arc::new(Mutex::new(Vec::new())),
             committed_statuses: Arc::new(Mutex::new(Vec::new())),
+            error_statuses: Arc::new(Mutex::new(Vec::new())),
             fail_with_upstream_response: false,
+            middleware: None,
         })
     }
 
@@ -62,7 +66,9 @@ impl ImageExecution {
             client: authenticated_client("sk_images_test"),
             captured: Arc::new(Mutex::new(Vec::new())),
             committed_statuses: Arc::new(Mutex::new(Vec::new())),
+            error_statuses: Arc::new(Mutex::new(Vec::new())),
             fail_with_upstream_response: true,
+            middleware: None,
         })
     }
 
@@ -79,6 +85,13 @@ impl ImageExecution {
 }
 
 impl ExecutionService for ImageExecution {
+    fn middleware_plan(
+        &self,
+        _: &gateway_core::engine::execution::PreparedRootExecution,
+    ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan> {
+        self.middleware.as_ref().map(|plan| plan.frozen())
+    }
+
     fn authenticate(
         &self,
         plaintext: &str,
@@ -139,6 +152,7 @@ impl ExecutionService for ImageExecution {
                         Bytes::from_static(b"42"),
                     )],
                     committed_statuses: Arc::clone(&self.committed_statuses),
+                    error_statuses: Arc::clone(&self.error_statuses),
                     finalized: Arc::new(AtomicBool::new(false)),
                     fail_with_upstream_response: self.fail_with_upstream_response,
                 }),
@@ -151,6 +165,7 @@ struct ImageSession {
     response: Option<Bytes>,
     response_headers: Vec<ProviderResponseHeader>,
     committed_statuses: Arc<Mutex<Vec<u16>>>,
+    error_statuses: Arc<Mutex<Vec<u16>>>,
     finalized: Arc<AtomicBool>,
     fail_with_upstream_response: bool,
 }
@@ -216,8 +231,14 @@ impl ExecutionSession for ImageSession {
         })
     }
 
-    fn record_client_status(&mut self, _: u16) -> BoxFuture<'_, Result<(), EngineError>> {
-        Box::pin(async { Ok(()) })
+    fn record_client_status(&mut self, status: u16) -> BoxFuture<'_, Result<(), EngineError>> {
+        Box::pin(async move {
+            self.error_statuses
+                .lock()
+                .expect("error status lock")
+                .push(status);
+            Ok(())
+        })
     }
 
     fn is_finalized(&self) -> bool {
@@ -237,29 +258,43 @@ impl ExecutionSession for ImageSession {
 
 #[tokio::test]
 async fn image_routes_should_not_decode_bodies_and_should_preserve_both_directions() {
-    let execution = ImageExecution::new();
+    let mut execution = ImageExecution::new();
+    let middleware = Arc::new(crate::openai::middleware::RequestMiddleware {
+        expected_operation: Some(OperationKind::GenerateImage),
+        committed_statuses: Some(execution.committed_statuses.clone()),
+        ..Default::default()
+    });
+    Arc::get_mut(&mut execution).unwrap().middleware = Some(middleware.clone());
     let router = api_router(execution.clone()).await;
     let cases = [
         (
             "/v1/images/generations",
             ImageRequestKind::Generation,
+            "application/json",
             br#"{ "model":"gpt-image-future", "prompt":"a lighthouse", "future":9007199254740993 }"#.as_slice(),
         ),
         (
             "/v1/images/edits",
             ImageRequestKind::Edit,
+            "application/json",
             br#"{"model":"gpt-image-2","images":[{"image_url":"data:image/png;base64,AAEC"}],"prompt":"add fog","prompt":"duplicate stays raw"}"#.as_slice(),
+        ),
+        (
+            "/v1/images/edits",
+            ImageRequestKind::Edit,
+            "multipart/form-data; boundary=image-boundary",
+            b"--image-boundary\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\x00\xff\r\n--image-boundary--\r\n".as_slice(),
         ),
     ];
 
-    for (path, _, body) in &cases {
+    for (path, _, content_type, body) in &cases {
         let response = router
             .clone()
             .oneshot(
                 Request::post(*path)
                     .header(AUTHORIZATION, "Bearer sk_images_test")
                     .header("x-request-id", "caller-image-request")
-                    .header("content-type", "application/json")
+                    .header("content-type", *content_type)
                     .header("x-codex-image-turn-id", "turn_image_route")
                     .header("session-id", "root-image-session")
                     .header("thread-id", "child-image-thread")
@@ -269,6 +304,7 @@ async fn image_routes_should_not_decode_bodies_and_should_preserve_both_directio
             .await
             .expect("image response");
         assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()["x-request-middleware"], "applied");
         assert_eq!(response.headers()["x-request-id"], "req_images_test");
         assert_eq!(
             response.headers()["x-gateway-request-id"],
@@ -286,7 +322,15 @@ async fn image_routes_should_not_decode_bodies_and_should_preserve_both_directio
 
     let captured = execution.captured();
     assert_eq!(captured.len(), cases.len());
-    for (captured, (endpoint, kind, body)) in captured.iter().zip(cases.iter()) {
+    assert_eq!(
+        *middleware.endpoints.lock().unwrap(),
+        vec![
+            "/v1/images/generations",
+            "/v1/images/edits",
+            "/v1/images/edits"
+        ]
+    );
+    for (captured, (endpoint, kind, _, body)) in captured.iter().zip(cases.iter()) {
         assert_eq!(captured.provider, "openai");
         assert_eq!(captured.endpoint, *endpoint);
         assert_eq!(captured.transport, ClientTransport::HttpJson);
@@ -306,7 +350,7 @@ async fn image_routes_should_not_decode_bodies_and_should_preserve_both_directio
 #[tokio::test]
 async fn image_route_should_return_the_exact_upstream_error_response() {
     let execution = ImageExecution::failing();
-    let response = api_router(execution)
+    let response = api_router(execution.clone())
         .await
         .oneshot(
             Request::post("/v1/images/edits")
@@ -340,5 +384,10 @@ async fn image_route_should_return_the_exact_upstream_error_response() {
     assert_eq!(
         body.as_ref(),
         br#"{ "error":{"message":"future image validation"}, "future":9007199254740993 }"#
+    );
+    assert!(execution.committed_statuses().is_empty());
+    assert_eq!(
+        *execution.error_statuses.lock().expect("error status lock"),
+        vec![422]
     );
 }

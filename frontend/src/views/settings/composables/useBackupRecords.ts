@@ -1,5 +1,6 @@
 import type { BackupRecord, BackupStatus } from '@/api'
 
+import { toast } from '@codex-proxy/ui'
 import { computed, onScopeDispose, shallowRef } from 'vue'
 import {
   createBackup,
@@ -8,9 +9,8 @@ import {
   getBackupRecords,
 } from '@/api'
 import { ApiError } from '@/api/request'
-import { toast } from '@/components/base/BaseToast'
 import { usePagedQuery } from '@/composables/usePagedQuery'
-import { errorMessage } from '@/utils/async'
+import { errorMessage } from '@/utils/operation'
 
 const ACTIVE_STATUSES: BackupStatus[] = ['queued', 'dumping', 'uploading']
 const POLL_INTERVAL_MS = 2000
@@ -25,6 +25,7 @@ export function useBackupRecords() {
   const refreshing = shallowRef(false)
   const deleting = shallowRef(false)
   const deleteTarget = shallowRef<BackupRecord | null>(null)
+  const showDelete = shallowRef(false)
   const downloadStates = shallowRef<Record<string, boolean>>({})
 
   const paged = usePagedQuery<{
@@ -150,11 +151,12 @@ export function useBackupRecords() {
 
   function requestDelete(record: BackupRecord): void {
     deleteTarget.value = record
+    showDelete.value = true
   }
 
   async function confirmDelete(): Promise<void> {
     const target = deleteTarget.value
-    if (!target || deleting.value)
+    if (!showDelete.value || !target || deleting.value)
       return
     deleting.value = true
     try {
@@ -165,7 +167,7 @@ export function useBackupRecords() {
     catch {}
     finally {
       deleting.value = false
-      deleteTarget.value = null
+      showDelete.value = false
     }
   }
 
@@ -187,6 +189,7 @@ export function useBackupRecords() {
     refreshing,
     deleting,
     deleteTarget,
+    showDelete,
     downloadStates,
     load,
     refresh,

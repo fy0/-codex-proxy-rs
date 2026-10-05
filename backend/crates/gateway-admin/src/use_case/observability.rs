@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Timelike as _, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use gateway_core::{account::ProviderAccountId, routing::ProviderKind};
 
@@ -24,7 +24,7 @@ use crate::{
             UsageCalculatedBillingFact, UsageDetail, UsageFilter, UsageInsights, UsageInsightsCost,
             UsageInsightsCostPoint, UsageInsightsHealth, UsageInsightsHealthPoint,
             UsageInsightsPerformance, UsageInsightsPerformancePoint, UsageOverview, UsagePage,
-            UsageQuery, UsageSummary, china_day_start,
+            UsageQuery, UsageSummary,
         },
         provider_credentials::ProviderQuotaRequest,
     },
@@ -37,7 +37,6 @@ use crate::{
 use super::{map_provider_error, map_store_error};
 
 const HEALTH_TIMELINE_SLOT_MINUTES: i64 = 15;
-const HEALTH_TIMELINE_SLOTS: i64 = 24 * 4;
 const HEALTH_TIMELINE_MIN_SAMPLE_SIZE: u64 = 10;
 const HEALTH_TIMELINE_UNAVAILABLE_FAILURE_THRESHOLD: u64 = 3;
 const HEALTH_TIMELINE_STABLE_RELIABILITY: f64 = 99.0;
@@ -126,6 +125,7 @@ pub trait ObservabilityService: Send + Sync {
 }
 
 pub(crate) struct DefaultObservabilityService {
+    timezone: gateway_core::time::DeploymentTimeZone,
     store: Arc<dyn ObservabilityStore>,
     accounts: Arc<dyn AccountStore>,
     settings: Arc<dyn SettingsStore>,
@@ -140,8 +140,10 @@ impl DefaultObservabilityService {
         accounts: Arc<dyn AccountStore>,
         settings: Arc<dyn SettingsStore>,
         providers: ProviderAdminRegistry,
+        timezone: gateway_core::time::DeploymentTimeZone,
     ) -> Self {
         Self {
+            timezone,
             store,
             accounts,
             settings,
@@ -161,7 +163,7 @@ impl DefaultObservabilityService {
             self.store.dashboard_runtime_slots(observed_at),
         )
         .map_err(|error| map_store_error(error, "dashboard"))?;
-        self.enrich_list_billing(&mut observation.recent_requests);
+        self.enrich_list_records(&mut observation.recent_requests);
         self.enrich_dashboard_quotas(&mut observation.account_usage)
             .await;
         for account in &mut observation.account_usage {
@@ -169,8 +171,14 @@ impl DefaultObservabilityService {
                 .providers
                 .plan_type_display(&account.provider_kind, account.plan_type.as_deref());
         }
-        let today_start = china_day_start(observation.range.end);
-        let yesterday_start = today_start - Duration::days(1);
+        let today_start = self
+            .timezone
+            .day_start(observation.range.end)
+            .ok_or_else(|| AdminError::internal("时间超出支持范围"))?;
+        let yesterday_start = self
+            .timezone
+            .days_before(observation.range.end, 1)
+            .ok_or_else(|| AdminError::internal("时间超出支持范围"))?;
         let today =
             dashboard_period_metrics(&observation.trend, today_start, observation.range.end);
         let yesterday = dashboard_period_metrics(&observation.trend, yesterday_start, today_start);
@@ -191,30 +199,31 @@ impl DefaultObservabilityService {
         let average_first_token_latency_ms =
             average(first_token_latency_sum_ms, first_token_latency_count);
         let trend = trend(TrendKind::Usage, observation.trend.clone())?;
-        let health_timeline = health_timeline_at(&observation.trend, Utc::now());
-        let wire_profiles = self.providers.dashboard_wire_profiles();
+        let health_timeline =
+            health_timeline_at(&observation.trend, observation.range.end, self.timezone)?;
+        let wire_profiles = self
+            .providers
+            .dashboard_wire_profiles(&settings.request_profiles);
         let max_concurrent_per_account = u64::from(settings.max_concurrent_per_account);
-        let total_slots = runtime_slots.as_ref().map_or_else(
-            || {
-                observation
-                    .provider_accounts
-                    .normal
-                    .saturating_mul(max_concurrent_per_account)
-            },
-            |slots| {
-                slots
-                    .inherited_accounts
-                    .saturating_mul(max_concurrent_per_account)
-                    .saturating_add(slots.overridden_slots)
-            },
-        );
+        let (inherited_accounts, overridden_slots) = runtime_slots
+            .as_ref()
+            .map_or((observation.provider_accounts.normal, 0), |slots| {
+                (slots.inherited_accounts, slots.overridden_slots)
+            });
+        let total_slots = (max_concurrent_per_account > 0 || inherited_accounts == 0).then(|| {
+            inherited_accounts
+                .saturating_mul(max_concurrent_per_account)
+                .saturating_add(overridden_slots)
+        });
         let used_slots = runtime_slots.and_then(|slots| slots.used_slots);
         Ok(DashboardResult {
             capacity: DashboardCapacity {
                 max_concurrent_per_account,
                 total_slots,
                 used_slots,
-                available_slots: used_slots.map(|used| total_slots.saturating_sub(used)),
+                available_slots: used_slots
+                    .zip(total_slots)
+                    .map(|(used, total)| total.saturating_sub(used)),
             },
             rotation_strategy: settings.rotation_strategy,
             observation,
@@ -268,7 +277,7 @@ impl ObservabilityService for DefaultObservabilityService {
             .list_usage_records(query)
             .await
             .map_err(|error| map_store_error(error, "usage records"))?;
-        self.enrich_list_billing(&mut page.items);
+        self.enrich_list_records(&mut page.items);
         Ok(page)
     }
 
@@ -334,37 +343,37 @@ impl ObservabilityService for DefaultObservabilityService {
         filter: UsageFilter,
         dimension: DiagnosticDimension,
     ) -> Result<DiagnosticsResult, AdminError> {
-        let items = self
+        let observation = self
             .store
             .usage_diagnostics(range, filter, dimension)
             .await
             .map_err(|error| map_store_error(error, "usage diagnostics"))?;
-        let total_requests = items.iter().fold(0_u64, |total, item| {
-            total.saturating_add(item.request_count)
-        });
-        let mut items = items
+        let items = observation
+            .items
             .into_iter()
             .map(|item| {
                 let error_rate = rate_or_zero(item.failure_count, item.request_count);
                 let non_completion_rate =
                     rate_or_zero(item.non_completion_count, item.request_count);
-                let retry_rate = rate_or_zero(item.retry_count, item.request_count);
-                let impact_score = diagnostic_impact_score(
-                    item.request_count,
-                    total_requests,
-                    error_rate,
-                    non_completion_rate,
-                    retry_rate,
-                    item.first_token_p95_ms,
-                );
+                let retry_rate = rate_or_zero(item.retried_request_count, item.request_count);
                 DiagnosticsItem {
                     key: item.key,
                     name: item.name,
+                    account_plan_type_display: item.account_provider_kind.as_deref().and_then(
+                        |provider| {
+                            self.providers
+                                .plan_type_display(provider, item.account_plan_type.as_deref())
+                        },
+                    ),
+                    account_plan_type: item.account_plan_type,
                     request_count: item.request_count,
                     success_count: item.success_count,
                     error_count: item.failure_count,
                     error_rate,
-                    request_share: rate_or_zero(item.request_count, total_requests),
+                    request_share: rate_or_zero(
+                        item.request_count,
+                        observation.total_request_count,
+                    ),
                     average_latency_ms: item.average_latency_ms,
                     latency_p95_ms: item.latency_p95_ms,
                     first_token_p95_ms: item.first_token_p95_ms,
@@ -372,27 +381,29 @@ impl ObservabilityService for DefaultObservabilityService {
                     non_completion_rate,
                     retry_count: item.retry_count,
                     retry_rate,
-                    impact_score,
                     estimated_cost: usd_cost(&item.costs),
                     attempt_count: item.attempt_count,
                     total_tokens: item.total_tokens,
                 }
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            right
-                .impact_score
-                .total_cmp(&left.impact_score)
-                .then_with(|| right.request_count.cmp(&left.request_count))
-        });
         Ok(DiagnosticsResult { dimension, items })
     }
 
     async fn ops_errors(&self, query: OpsErrorQuery) -> Result<OpsErrorPage, AdminError> {
-        self.store
+        let mut page = self
+            .store
             .list_ops_errors(query)
             .await
-            .map_err(|error| map_store_error(error, "operations errors"))
+            .map_err(|error| map_store_error(error, "operations errors"))?;
+        for error in &mut page.items {
+            error.provider_account_plan_type_display =
+                error.provider_kind.as_deref().and_then(|provider| {
+                    self.providers
+                        .plan_type_display(provider, error.provider_account_plan_type.as_deref())
+                });
+        }
+        Ok(page)
     }
 }
 
@@ -612,7 +623,7 @@ async fn recover_standard_costs(
     mut facts: UsageCalculatedBillingStream<'_>,
 ) -> Result<UsageCostScenarios, AdminError> {
     let mut scenarios = UsageCostScenarios::default();
-    while let Some(fact) = facts
+    while let Some(mut fact) = facts
         .try_next()
         .await
         .map_err(|error| map_store_error(error, "usage billing facts"))?
@@ -629,7 +640,14 @@ async fn recover_standard_costs(
             cache_write_tokens: fact.cache_write_tokens,
             total: fact.total.clone(),
         };
-        let breakdown = match providers.calculated_billing(&provider_kind, &input) {
+        let breakdown = match fact
+            .breakdown
+            .take()
+            .filter(|b| b.total_amount == input.total)
+            .map_or_else(
+                || providers.calculated_billing(&provider_kind, &input),
+                |b| Ok(Some(b)),
+            ) {
             Ok(breakdown) => breakdown,
             Err(error) if error.kind() == ProviderAdminErrorKind::Unsupported => continue,
             Err(error) => return Err(map_provider_error(error, "usage billing")),
@@ -658,8 +676,15 @@ fn no_cache_cost(
     fact: &UsageCalculatedBillingFact,
     breakdown: &crate::model::observability::CalculatedBillingBreakdown,
 ) -> Option<DecimalAmount> {
-    let input_tokens = fact.input_tokens?;
-    let cached_tokens = fact.cached_tokens.unwrap_or_default().min(input_tokens);
+    let image = breakdown.image.as_ref();
+    let input_tokens = fact
+        .input_tokens?
+        .checked_sub(image.map_or(0, |i| i.input_tokens))?;
+    let cached_tokens = fact
+        .cached_tokens
+        .unwrap_or_default()
+        .checked_sub(image.map_or(0, |i| i.cached_tokens))?
+        .min(input_tokens);
     let cache_write_tokens = fact
         .cache_write_tokens
         .unwrap_or_default()
@@ -669,11 +694,20 @@ fn no_cache_cost(
         .scaled()
         .checked_mul(u128::from(cached_tokens.saturating_add(cache_write_tokens)))?
         .checked_div(1_000_000)?;
-    let total = decimal(&breakdown.total_amount.amount)?
+    let mut total = decimal(&breakdown.total_amount.amount)?
         .scaled()
         .checked_sub(decimal(&breakdown.cache_read_amount.amount)?.scaled())?
         .checked_sub(decimal(&breakdown.cache_write_amount.amount)?.scaled())?
         .checked_add(replaced_input_amount)?;
+    if let Some(image) = image {
+        let image_no_cache = decimal(&image.input_price_per_million.amount)?
+            .scaled()
+            .checked_mul(u128::from(image.cached_tokens))?
+            .checked_div(1_000_000)?;
+        total = total
+            .checked_sub(decimal(&image.cache_read_amount.amount)?.scaled())?
+            .checked_add(image_no_cache)?;
+    }
     DecimalAmount::from_str(
         &gateway_core::metering::Decimal::from_scaled(total)
             .ok()?
@@ -699,25 +733,6 @@ fn amount_difference(
 
 fn decimal(value: &DecimalAmount) -> Option<gateway_core::metering::Decimal> {
     value.as_str().parse().ok()
-}
-
-fn diagnostic_impact_score(
-    request_count: u64,
-    total_requests: u64,
-    error_rate: f64,
-    non_completion_rate: f64,
-    retry_rate: f64,
-    first_token_p95_ms: Option<u64>,
-) -> f64 {
-    let request_share = rate_or_zero(request_count, total_requests);
-    let slow_score = first_token_p95_ms
-        .map_or(0.0, |value| value as f64 / 30_000.0)
-        .min(1.0);
-    error_rate * 0.35
-        + non_completion_rate * 0.25
-        + retry_rate.min(1.0) * 0.20
-        + request_share * 0.10
-        + slow_score * 0.10
 }
 
 fn usd_cost(costs: &[CurrencyCost]) -> Option<DecimalAmount> {
@@ -783,10 +798,15 @@ impl DefaultObservabilityService {
         }
     }
 
-    /// 逐条尽力把可校验的总额升级为完整分解；单条脏数据（非法 Provider kind、
+    /// 补充当前套餐展示名称，逐条尽力把可校验的总额升级为完整分解；单条脏数据（非法 Provider kind、
     /// 不支持的来源或费用规则失败）只保留该条已存的总额，不影响整页返回。
-    fn enrich_list_billing(&self, records: &mut [crate::model::observability::UsageListRecord]) {
+    fn enrich_list_records(&self, records: &mut [crate::model::observability::UsageListRecord]) {
         for record in records {
+            record.provider_account_plan_type_display =
+                record.provider_kind.as_deref().and_then(|provider| {
+                    self.providers
+                        .plan_type_display(provider, record.provider_account_plan_type.as_deref())
+                });
             let Some(UsageBilling::Total { source, total }) = record.billing.as_ref() else {
                 continue;
             };
@@ -850,15 +870,28 @@ impl DefaultObservabilityService {
     }
 }
 
-/// 按指定时刻计算中国自然日的 96 个 15 分钟健康桶。
-#[must_use]
+/// 按部署时区的自然日计算 15 分钟健康桶，桶数随夏令时变化。
 pub(super) fn health_timeline_at(
     records: &[RequestMetricPoint],
     now: DateTime<Utc>,
-) -> HealthTimeline {
-    let current_slot = quarter_hour_start(now);
-    let start = china_day_start(now);
-    let mut buckets = (0..HEALTH_TIMELINE_SLOTS)
+    timezone: gateway_core::time::DeploymentTimeZone,
+) -> Result<HealthTimeline, AdminError> {
+    let start = timezone
+        .day_start(now)
+        .ok_or_else(|| AdminError::internal("时间超出支持范围"))?;
+    let end = timezone
+        .days_after(now, 1)
+        .ok_or_else(|| AdminError::internal("时间超出支持范围"))?;
+    let current_slot = start
+        + Duration::minutes(
+            (now - start)
+                .num_minutes()
+                .div_euclid(HEALTH_TIMELINE_SLOT_MINUTES)
+                * HEALTH_TIMELINE_SLOT_MINUTES,
+        );
+    let slots = ((end - start).num_minutes() + HEALTH_TIMELINE_SLOT_MINUTES - 1)
+        / HEALTH_TIMELINE_SLOT_MINUTES;
+    let mut buckets = (0..slots)
         .map(|index| {
             (
                 start + Duration::minutes(HEALTH_TIMELINE_SLOT_MINUTES * index),
@@ -870,7 +903,13 @@ pub(super) fn health_timeline_at(
         if record.bucket_start < start || record.bucket_start > now {
             continue;
         }
-        let record_slot = quarter_hour_start(record.bucket_start);
+        let record_slot = start
+            + Duration::minutes(
+                (record.bucket_start - start)
+                    .num_minutes()
+                    .div_euclid(HEALTH_TIMELINE_SLOT_MINUTES)
+                    * HEALTH_TIMELINE_SLOT_MINUTES,
+            );
         if let Some((_, bucket)) = buckets
             .iter_mut()
             .find(|(bucket_start, _)| *bucket_start == record_slot)
@@ -886,7 +925,7 @@ pub(super) fn health_timeline_at(
             totals.add_window(*bucket);
             totals
         });
-    HealthTimeline {
+    Ok(HealthTimeline {
         reliability_percent: health_reliability(totals),
         status: health_status(totals, false),
         success_requests: totals.success_requests,
@@ -907,7 +946,7 @@ pub(super) fn health_timeline_at(
                 caller_error_requests: bucket.caller_error_requests,
             })
             .collect(),
-    }
+    })
 }
 
 fn trend(kind: TrendKind, points: Vec<RequestMetricPoint>) -> Result<Trend, AdminError> {
@@ -1170,11 +1209,4 @@ fn service_failure_count(metrics: &RequestMetrics) -> u64 {
     metrics
         .failure_count
         .saturating_sub(metrics.caller_error_count)
-}
-
-fn quarter_hour_start(value: DateTime<Utc>) -> DateTime<Utc> {
-    let elapsed = value
-        .timestamp()
-        .rem_euclid(HEALTH_TIMELINE_SLOT_MINUTES * 60);
-    value - Duration::seconds(elapsed) - Duration::nanoseconds(i64::from(value.nanosecond()))
 }

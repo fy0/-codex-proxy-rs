@@ -6,6 +6,9 @@ use gateway_protocol::openai::sse::SseError;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// RFC 6455 close code 1009：上游拒收超出大小限制的消息。
+pub(crate) const WEBSOCKET_CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
+
 use crate::transport::client::CodexClientVisibleUpstreamResponse;
 use crate::transport::diagnostics::CodexUpstreamDiagnostics;
 use crate::transport::diagnostics::CodexUpstreamSendPhase;
@@ -73,6 +76,13 @@ pub enum CodexWebSocketExchangeError {
     /// 上游在 terminal 事件前关闭。
     #[error("{0}")]
     ClosedBeforeTerminal(CodexWebSocketCloseError),
+    /// 未收到 Close 帧即结束，保留 pump 的安全原因码与本地保活时限。
+    #[error("websocket stream ended before terminal event ({reason})")]
+    StreamEndedBeforeTerminal {
+        reason: &'static str,
+        timeout: Option<Duration>,
+        last_event_type: Option<String>,
+    },
     /// 上游在指定时间内没有发送任何事件。
     #[error("websocket receive idle timeout after {timeout:?}")]
     ReceiveIdleTimeout {

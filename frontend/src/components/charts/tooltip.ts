@@ -1,4 +1,4 @@
-import { isRecord } from '@/utils/object'
+import { isRecord } from '@/utils/data'
 
 interface ChartTooltipTheme {
   surface: string

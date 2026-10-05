@@ -10,7 +10,7 @@ import {
   getUsageRecords,
   getUsageRecordSummary,
 } from '@/api'
-import { withMinimumDuration } from '@/utils/async'
+import { withMinimumDuration } from '@/utils/operation'
 
 interface UseUsageRecordsTableOptions {
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>

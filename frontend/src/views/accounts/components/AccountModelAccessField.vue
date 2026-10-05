@@ -1,16 +1,10 @@
 <script setup lang="ts">
 import type { AccountModelAccess } from '@/api'
 
+import { BaseCheckbox, BaseEmpty, BaseFormItem, BaseIconButton, BaseInput, BaseScrollbar, BaseSegmented } from '@codex-proxy/ui'
 import { RefreshCw, Search } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { getAccountModels, refreshAccountModels } from '@/api'
-import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseScrollbar from '@/components/base/BaseScrollbar.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError, accountModelIdError } from '../utils/modelAccess'
 

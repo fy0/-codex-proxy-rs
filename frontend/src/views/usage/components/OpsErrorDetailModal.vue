@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import type { OpsError } from '@/api'
 
+import { BaseButton, BaseModal } from '@codex-proxy/ui'
 import { computed } from 'vue'
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
 import { failureClassText } from '../utils/opsErrorPresentation'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
@@ -130,7 +129,7 @@ function visibleFields(items: DetailField[]) {
     size="xl"
   >
     <template v-if="record">
-      <RequestDiagnosticsPanel v-if="open && record.requestId" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" :error-record="record" />
+      <RequestDiagnosticsPanel v-if="record.requestId" class="mb-3" :request-id="record.requestId" :metadata="record.metadata" :error-record="record" :active="open" />
       <section :class="panelClass">
         <h3 :class="panelTitleClass">
           错误

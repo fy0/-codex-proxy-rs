@@ -126,7 +126,7 @@ const metricItems = outcomeMeta
       </div>
 
       <p class="m-0 border-t border-cp-split pt-3 text-[10px] leading-[1.45] font-emphasis text-cp-text-quaternary">
-        客户端取消与调用方错误单独记录，不计入可用性。
+        客户端取消与调用方错误单独记录，不计入可用性
       </p>
     </div>
   </section>

@@ -6,6 +6,7 @@ use provider_openai::transport::{
 };
 use reqwest::{Method, StatusCode};
 use serde_json::json;
+use std::time::Duration;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -18,6 +19,7 @@ fn client(base_url: &str) -> CodexBackendClient {
             .expect("reset-credit client"),
         base_url,
         CodexWireProfileState::new(CodexWireProfile {
+            client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
             originator: "Codex Desktop".to_owned(),
             codex_version: "0.115.0-alpha.11".to_owned(),
             desktop_version: "26.818.21641".to_owned(),
@@ -26,6 +28,7 @@ fn client(base_url: &str) -> CodexBackendClient {
             os_version: "15.5.0".to_owned(),
             arch: "arm64".to_owned(),
             terminal: "xterm-256color".to_owned(),
+            exact_user_agent: None,
             residency: None,
             verified_at: Utc
                 .with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
@@ -256,6 +259,215 @@ async fn list_should_reject_oversized_success_body() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn list_should_fallback_to_official_endpoint_when_custom_upstream_returns_404() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(StatusCode::NOT_FOUND))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(StatusCode::OK).set_body_json(json!({
+            "available_count": 2,
+            "credits": [{
+                "id": "credit_fallback",
+                "status": "available",
+                "title": "Fallback Reset Credit",
+                "expires_at": "2026-09-30T12:00:00Z"
+            }]
+        })))
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let test_client = client(&custom_server.uri()).with_official_base_url(official_server.uri());
+    let result = test_client
+        .list_rate_limit_reset_credits(context())
+        .await
+        .expect("fallback reset-credit list");
+
+    assert_eq!(result.available_count, 2);
+    assert_eq!(result.credits[0].id, "credit_fallback");
+}
+
+#[tokio::test]
+async fn consume_should_fallback_to_official_endpoint_when_custom_upstream_returns_404() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .respond_with(ResponseTemplate::new(StatusCode::NOT_FOUND))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .respond_with(ResponseTemplate::new(StatusCode::OK).set_body_json(json!({
+            "code": "reset"
+        })))
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let test_client = client(&custom_server.uri()).with_official_base_url(official_server.uri());
+    let result = test_client
+        .consume_rate_limit_reset_credit(
+            context(),
+            Some("credit_fallback"),
+            Uuid::parse_str("8fbf302d-11df-4bd5-82e4-08e4b3df7874").expect("UUID"),
+        )
+        .await
+        .expect("fallback consume result");
+
+    assert_eq!(result.code, "reset");
+    for server in [&custom_server, &official_server] {
+        let requests = server.received_requests().await.expect("consume requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+            json!({
+                "credit_id": "credit_fallback",
+                "redeem_request_id": "8fbf302d-11df-4bd5-82e4-08e4b3df7874"
+            })
+        );
+        assert_eq!(
+            header(&requests[0], "authorization"),
+            Some("Bearer oauth-access")
+        );
+        assert_eq!(
+            header(&requests[0], "chatgpt-account-id"),
+            Some("acct_workspace")
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_fallback_should_preserve_credential_refresh_signal() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("expired"))
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let error = client(&custom_server.uri())
+        .with_official_base_url(official_server.uri())
+        .list_rate_limit_reset_credits(context())
+        .await
+        .expect_err("fallback requires credential refresh");
+    let CodexClientError::Upstream {
+        status,
+        body,
+        diagnostics,
+        ..
+    } = error
+    else {
+        panic!("expected the fallback HTTP rejection");
+    };
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(diagnostics.status_code, Some(401));
+    assert_eq!(body, "expired");
+}
+
+#[tokio::test]
+async fn consume_fallback_should_preserve_rejection_and_retry_after() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "17")
+                .set_body_raw(r#"{"code":"no_credit"}"#, "application/json"),
+        )
+        .expect(1)
+        .mount(&official_server)
+        .await;
+
+    let error = client(&custom_server.uri())
+        .with_official_base_url(official_server.uri())
+        .consume_rate_limit_reset_credit(context(), None, Uuid::new_v4())
+        .await
+        .expect_err("fallback explicitly rejects consumption");
+    let CodexClientError::Upstream {
+        status,
+        body,
+        diagnostics,
+        retry_after_seconds,
+        ..
+    } = error
+    else {
+        panic!("expected the fallback HTTP rejection");
+    };
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(diagnostics.status_code, Some(429));
+    assert_eq!(body, r#"{"code":"no_credit"}"#);
+    assert_eq!(retry_after_seconds, Some(17));
+}
+
+#[tokio::test]
+async fn consume_fallback_timeout_should_not_become_an_explicit_404_rejection() {
+    let custom_server = MockServer::start().await;
+    let official_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code": "reset"}))
+                .set_delay(Duration::from_secs(3)),
+        )
+        .expect(1)
+        .mount(&official_server)
+        .await;
+    let test_client = CodexBackendClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap(),
+        custom_server.uri(),
+        super::test_wire_profile(),
+    )
+    .with_official_base_url(official_server.uri());
+    let redeem_request_id = Uuid::new_v4();
+
+    let error = test_client
+        .consume_rate_limit_reset_credit(context(), None, redeem_request_id)
+        .await
+        .expect_err("fallback consumption outcome is unknown");
+    assert!(matches!(error, CodexClientError::HttpJson(error) if error.is_timeout()));
+    for server in [&custom_server, &official_server] {
+        let requests = server.received_requests().await.expect("consume requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+            json!({"redeem_request_id": redeem_request_id.to_string()})
+        );
+    }
 }
 
 fn header<'a>(request: &'a wiremock::Request, name: &str) -> Option<&'a str> {

@@ -3,8 +3,11 @@
 //! Continuation affinity 决定下一轮 Provider 与账号，必须在响应 ID 可复用前
 //! 获得 Redis 确认，因此不属于本模块的可丢失副作用。
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 
 use futures::future::{BoxFuture, ready};
 use gateway_core::engine::ModelRequestId;
@@ -12,16 +15,13 @@ use gateway_core::engine::admission::{
     ClientAdmissionDecision, ClientAdmissionError, ClientAdmissionPort, ClientAdmissionRecovery,
     ClientAdmissionRequest, ClientAdmissionRestoreResult,
 };
-use gateway_core::engine::execution::{
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
-};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::policy::ClientApiKeyId;
-use gateway_core::routing::ProviderKind;
 use gateway_core::task::{DaemonTask, WorkerTaskError};
 use tokio::sync::{Mutex, mpsc};
 
 const DEFAULT_QUEUE_CAPACITY: usize = 4_096;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 准入读取保持强一致；终态释放只做有界入队，Redis 失败由 worker 吸收。
 #[derive(Clone)]
@@ -127,7 +127,10 @@ impl DaemonTask for ClientAdmissionReleaseWriter {
             let mut receiver = self.receiver.lock().await;
             loop {
                 let release = tokio::select! {
-                    () = cancellation.cancelled() => return Ok(()),
+                    () = cancellation.cancelled() => {
+                        drain_admission_releases(&mut receiver, self.inner.as_ref()).await;
+                        return Ok(());
+                    },
                     release = receiver.recv() => release,
                 };
                 let Some(release) = release else {
@@ -147,116 +150,24 @@ impl DaemonTask for ClientAdmissionReleaseWriter {
     }
 }
 
-/// Circuit decision 仍直读 Redis；success/failure feedback 只做有界入队。
-#[derive(Clone)]
-pub struct BufferedProviderCircuitPort {
-    inner: Arc<dyn ProviderCircuitPort>,
-    sender: mpsc::Sender<CircuitFeedback>,
-}
-
-impl BufferedProviderCircuitPort {
-    #[must_use]
-    pub fn new(inner: Arc<dyn ProviderCircuitPort>) -> (Self, ProviderCircuitFeedbackWriter) {
-        Self::with_capacity(
-            inner,
-            NonZeroUsize::new(DEFAULT_QUEUE_CAPACITY).expect("queue capacity is non-zero"),
-        )
-    }
-
-    #[must_use]
-    pub fn with_capacity(
-        inner: Arc<dyn ProviderCircuitPort>,
-        capacity: NonZeroUsize,
-    ) -> (Self, ProviderCircuitFeedbackWriter) {
-        let (sender, receiver) = mpsc::channel(capacity.get());
-        (
-            Self {
-                inner: Arc::clone(&inner),
-                sender,
-            },
-            ProviderCircuitFeedbackWriter {
-                inner,
-                receiver: Mutex::new(receiver),
-            },
-        )
-    }
-
-    fn enqueue(&self, feedback: CircuitFeedback) {
-        if let Err(error) = self.sender.try_send(feedback) {
-            let reason = match error {
-                mpsc::error::TrySendError::Full(_) => "full",
-                mpsc::error::TrySendError::Closed(_) => "closed",
-            };
-            tracing::warn!(
-                operation = "record_provider_circuit_feedback",
-                reason,
-                "Redis 协调队列不可用，已丢弃本次 circuit feedback"
-            );
+async fn drain_admission_releases(
+    receiver: &mut mpsc::Receiver<AdmissionRelease>,
+    port: &dyn ClientAdmissionPort,
+) {
+    receiver.close();
+    let started_at = Instant::now();
+    while let Some(release) = receiver.recv().await {
+        let remaining = SHUTDOWN_DRAIN_TIMEOUT.saturating_sub(started_at.elapsed());
+        if remaining.is_zero()
+            || tokio::time::timeout(
+                remaining,
+                port.release(&release.client_api_key_id, &release.model_request_id),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!("Client admission 关闭排空超时，剩余租约依赖 TTL 收敛");
+            break;
         }
-    }
-}
-
-impl ProviderCircuitPort for BufferedProviderCircuitPort {
-    fn decision<'a>(
-        &'a self,
-        provider_kind: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        self.inner.decision(provider_kind)
-    }
-
-    fn observe_failure<'a>(
-        &'a self,
-        provider_kind: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        self.enqueue(CircuitFeedback::Failure(provider_kind.clone()));
-        Box::pin(ready(Ok(())))
-    }
-
-    fn observe_success<'a>(
-        &'a self,
-        provider_kind: &'a ProviderKind,
-    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        self.enqueue(CircuitFeedback::Success(provider_kind.clone()));
-        Box::pin(ready(Ok(())))
-    }
-}
-
-enum CircuitFeedback {
-    Failure(ProviderKind),
-    Success(ProviderKind),
-}
-
-pub struct ProviderCircuitFeedbackWriter {
-    inner: Arc<dyn ProviderCircuitPort>,
-    receiver: Mutex<mpsc::Receiver<CircuitFeedback>>,
-}
-
-impl DaemonTask for ProviderCircuitFeedbackWriter {
-    fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
-        Box::pin(async move {
-            let mut receiver = self.receiver.lock().await;
-            loop {
-                let feedback = tokio::select! {
-                    () = cancellation.cancelled() => return Ok(()),
-                    feedback = receiver.recv() => feedback,
-                };
-                let Some(feedback) = feedback else {
-                    return Err(WorkerTaskError::safe(
-                        "provider circuit feedback queue closed",
-                    ));
-                };
-                let result = match feedback {
-                    CircuitFeedback::Failure(provider) => {
-                        self.inner.observe_failure(&provider).await
-                    }
-                    CircuitFeedback::Success(provider) => {
-                        self.inner.observe_success(&provider).await
-                    }
-                };
-                if let Err(error) = result {
-                    tracing::warn!(%error, "Provider circuit feedback 后台写入失败");
-                }
-            }
-        })
     }
 }

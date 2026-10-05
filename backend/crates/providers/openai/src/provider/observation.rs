@@ -702,9 +702,12 @@ pub(super) fn codex_request_context<'a>(
     }
 }
 
-pub(super) fn build_cookie_header<'a>(
-    cookies: impl IntoIterator<Item = &'a RuntimeCodexCookie>,
+pub(super) fn build_cookie_header(
+    cookies: &[RuntimeCodexCookie],
 ) -> Result<Option<SecretString>, ProviderError> {
+    if cookies.is_empty() {
+        return Ok(None);
+    }
     let mut header = String::new();
     for cookie in cookies {
         let value = cookie.value.expose_secret();
@@ -730,9 +733,6 @@ pub(super) fn build_cookie_header<'a>(
                 UpstreamSendState::NotSent,
             ));
         }
-    }
-    if header.is_empty() {
-        return Ok(None);
     }
     Ok(Some(SecretString::from(header)))
 }
@@ -788,18 +788,36 @@ pub(super) fn map_selection_error(error: CredentialSelectionError) -> ProviderEr
             ProviderErrorKind::NoEligibleAccount,
             UpstreamSendState::NotSent,
         ),
-        CredentialSelectionError::MissingTurnState => provider_error(
-            ProviderErrorKind::NoEligibleAccount,
+        CredentialSelectionError::QuotaExhausted => provider_error(
+            ProviderErrorKind::QuotaExhausted,
             UpstreamSendState::NotSent,
-        ).with_no_eligible_account_reason(gateway_core::error::NoEligibleAccountReason::MissingTurnState)
-        .with_diagnostic(gateway_core::error::ProviderDiagnostic::new(
-            "No eligible account: waiting for a valid installed turn state for the upstream model",
-        ).with_classification("account_selection", "missing_turn_state")),
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            "All eligible accounts have exhausted their quota. Retry after quota resets or add an available account.",
+            Some("usage_limit_reached".to_owned()),
+            Some("usage_limit_reached".to_owned()),
+        )),
+        CredentialSelectionError::AccountSnapshotChanged => provider_error(
+            ProviderErrorKind::ProviderInfrastructureUnavailable,
+            UpstreamSendState::NotSent,
+        )
+        .with_diagnostic(
+            ProviderDiagnostic::new("OpenAI account changed repeatedly during selection")
+                .with_classification("account_selection", "account_snapshot_conflict"),
+        ),
         CredentialSelectionError::InvalidCredential
         | CredentialSelectionError::Store
         | CredentialSelectionError::Coordinator
         | CredentialSelectionError::CookiePolicy => provider_error(
             ProviderErrorKind::ProviderInfrastructureUnavailable,
+            UpstreamSendState::NotSent,
+        ),
+        CredentialSelectionError::PolicyRejected => provider_error(
+            ProviderErrorKind::RequestPolicyDenied,
+            UpstreamSendState::NotSent,
+        ),
+        CredentialSelectionError::PolicyUnavailable => provider_error(
+            ProviderErrorKind::Unavailable,
             UpstreamSendState::NotSent,
         ),
     }

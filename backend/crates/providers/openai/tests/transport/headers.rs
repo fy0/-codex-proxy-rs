@@ -711,3 +711,244 @@ async fn websocket_should_keep_an_exact_chain_while_new_connections_adopt_the_la
     assert_eq!(second_version, "1.2.4");
     assert_ne!(first_user_agent, second_user_agent);
 }
+
+#[tokio::test]
+async fn custom_core_version_change_reconnects_new_chains_and_keeps_exact_continuations() {
+    use gateway_core::account::OpaqueProviderData;
+    use provider_openai::transport::profile::identity::RequestProfileSelection;
+
+    const USER_AGENT: &str = "Custom Agent/test";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut first = accept_codex_test_websocket_with(stream, |request, _response| {
+            assert_eq!(request.headers()["user-agent"], USER_AGENT);
+            assert_eq!(request.headers()["originator"], "custom-agent");
+            assert_eq!(request.headers()["version"], "1.2.3");
+        })
+        .await;
+        for response_id in ["resp_custom_first", "resp_custom_continued"] {
+            timeout(Duration::from_secs(2), first.next())
+                .await
+                .expect("exact continuation uses the original connection")
+                .unwrap()
+                .unwrap();
+            first
+                .send(Message::Text(
+                    completed_websocket_response(response_id, 1, 1).into(),
+                ))
+                .await
+                .unwrap();
+        }
+        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("a Core version change requires a new connection for a new chain")
+            .unwrap();
+        let mut second = accept_codex_test_websocket_with(stream, |request, _response| {
+            assert_eq!(request.headers()["user-agent"], USER_AGENT);
+            assert_eq!(request.headers()["originator"], "custom-agent");
+            assert_eq!(request.headers()["version"], "1.2.4");
+        })
+        .await;
+        second.next().await.unwrap().unwrap();
+        second
+            .send(Message::Text(
+                completed_websocket_response("resp_custom_second", 1, 1).into(),
+            ))
+            .await
+            .unwrap();
+    });
+
+    let state = test_wire_profile();
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{address}"),
+        state.clone(),
+    )
+    .with_websocket_pool(Arc::new(CodexWebSocketPool::new(Duration::from_mins(1))));
+    let with_version = |version| {
+        let configuration = json!({
+            "mode": "custom",
+            "userAgent": USER_AGENT,
+            "originator": "custom-agent",
+            "codexVersion": version,
+        });
+        let profile = RequestProfileSelection::parse(&OpaqueProviderData::new(
+            configuration.as_object().unwrap().clone(),
+        ))
+        .unwrap()
+        .resolve(&state)
+        .unwrap();
+        client.clone().with_request_profile(profile)
+    };
+    let mut request = codex_request("gpt-test", "", Vec::new());
+    request.use_websocket = true;
+    request.local_conversation_id = Some("custom-profile-rotation".to_owned());
+    let context = request_context("req_custom_profile", Some("acct-custom-profile"));
+    with_version("1.2.3")
+        .create_response(&request, context)
+        .await
+        .unwrap();
+    let updated = with_version("1.2.4");
+    let mut continuation = request.clone();
+    continuation.set_previous_response_id(Some("resp_custom_first".to_owned()));
+    continuation.previous_response_scope = Some(PreviousResponseScope::ConnectionLocal);
+    updated
+        .create_response(&continuation, context)
+        .await
+        .unwrap();
+    updated.create_response(&request, context).await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_request_profiles_emit_independent_http_identities() {
+    use provider_openai::transport::profile::selection::{
+        ClientKind, ClientPlatform, ClientProfileSelection,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut handlers = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            handlers.push(tokio::spawn(async move {
+                let request = read_http_request(&mut stream).await;
+                write_completed_sse_response(&mut stream).await;
+                request
+            }));
+        }
+        let mut requests = Vec::new();
+        for handler in handlers {
+            requests.push(handler.await.unwrap());
+        }
+        requests
+    });
+    let state = provider_openai::transport::profile::CodexWireProfileState::new(Default::default());
+    let desktop = ClientProfileSelection::default().resolve(&state).unwrap();
+    let cli = ClientProfileSelection {
+        client: ClientKind::Cli,
+        platform: ClientPlatform::Linux,
+        ..Default::default()
+    }
+    .resolve(&state)
+    .unwrap();
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{address}"),
+        state.clone(),
+    );
+    let desktop_client = client.clone().with_request_profile(desktop.clone());
+    let cli_client = client.with_request_profile(cli.clone());
+    state.update_bundled_release(&CodexBundledReleaseProfile {
+        codex_version: "0.999.0".into(),
+        desktop_version: "99.1.1".into(),
+        desktop_build: "99999".into(),
+        verified_at: Utc::now(),
+    });
+    let mut request = codex_request("gpt-test", "", Vec::new());
+    request.force_http_sse = true;
+    let (first, second) = tokio::join!(
+        desktop_client.create_response(
+            &request,
+            request_context("req_desktop", Some("acct_desktop"))
+        ),
+        cli_client.create_response(&request, request_context("req_cli", Some("acct_cli")))
+    );
+    first.unwrap();
+    second.unwrap();
+    let requests = server.await.unwrap();
+    for expected in [desktop, cli] {
+        let actual = requests
+            .iter()
+            .find(|request| {
+                read_header_value(request, "originator") == Some(expected.originator.as_str())
+            })
+            .unwrap();
+        assert_eq!(
+            read_header_value(actual, "user-agent"),
+            Some(expected.user_agent().as_str())
+        );
+        assert_eq!(
+            read_header_value(actual, "version"),
+            Some(expected.codex_version.as_str())
+        );
+    }
+}
+
+#[tokio::test]
+async fn tui_and_exec_send_the_same_complete_identity_over_http_and_websocket() {
+    use provider_openai::transport::profile::selection::{
+        CliEntry, ClientKind, ClientPlatform, ClientProfileSelection, VersionMode,
+    };
+    for (entry, name) in [(CliEntry::Tui, "codex-tui"), (CliEntry::Exec, "codex_exec")] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected =
+            format!("{name}/0.157.0 (Alpine Linux 3.24.1; x86_64) unknown ({name}; 0.157.0)");
+        let server = tokio::spawn(async move {
+            let (mut http, _) = listener.accept().await.unwrap();
+            let headers = read_http_request(&mut http).await;
+            assert_eq!(
+                read_header_value(&headers, "user-agent"),
+                Some(expected.as_str())
+            );
+            assert_eq!(read_header_value(&headers, "originator"), Some(name));
+            assert_eq!(read_header_value(&headers, "version"), Some("0.157.0"));
+            write_completed_sse_response(&mut http).await;
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_codex_test_websocket_with(stream, |request, _| {
+                assert_eq!(request.headers()["user-agent"], expected);
+                assert_eq!(request.headers()["originator"], name);
+                assert_eq!(request.headers()["version"], "0.157.0");
+            })
+            .await;
+            ws.next().await.unwrap().unwrap();
+            ws.send(Message::Text(
+                completed_websocket_response("resp_cli_entry", 1, 1).into(),
+            ))
+            .await
+            .unwrap();
+        });
+        let state =
+            provider_openai::transport::profile::CodexWireProfileState::new(Default::default());
+        let profile = ClientProfileSelection {
+            client: ClientKind::Cli,
+            platform: ClientPlatform::Linux,
+            cli_entry: Some(entry),
+            os_type: Some("Alpine Linux".into()),
+            os_version: Some("3.24.1".into()),
+            version_mode: VersionMode::Fixed,
+            codex_version: Some("0.157.0".into()),
+            ..Default::default()
+        }
+        .resolve(&state)
+        .unwrap();
+        let client = CodexBackendClient::new(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            format!("http://{address}"),
+            state,
+        )
+        .with_request_profile(profile);
+        let mut request = codex_request("gpt-test", "", Vec::new());
+        request.force_http_sse = true;
+        client
+            .create_response(
+                &request,
+                request_context("req_cli_http", Some("acct-fixture")),
+            )
+            .await
+            .unwrap();
+        request.force_http_sse = false;
+        request.use_websocket = true;
+        client
+            .create_response(
+                &request,
+                request_context("req_cli_ws", Some("acct-fixture")),
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+}

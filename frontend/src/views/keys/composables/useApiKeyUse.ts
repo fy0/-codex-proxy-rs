@@ -1,9 +1,8 @@
 import type { Ref, ShallowRef } from 'vue'
 import type { getApiKeys } from '@/api'
-import { computed, shallowRef, watch } from 'vue'
+import { computed, shallowRef } from 'vue'
 
-import { API_BASE_URL } from '@/api/constants'
-import { buildCodexCcSwitchImportDeeplink } from '../utils/ccswitchImport'
+import { buildCodexCcSwitchImportDeeplink, resolveServiceRootUrl } from '@/utils/client'
 
 // “使用密钥”弹窗展示明文时，在列表行上补挂 reveal 得到的完整 key。
 type ApiKeyRow = Awaited<ReturnType<typeof getApiKeys>>['items'][number] & { key?: string }
@@ -20,25 +19,6 @@ export function useApiKeyUse(options: {
 
   const serviceRootUrl = computed(() => resolveServiceRootUrl())
   const openAiBaseUrl = computed(() => `${serviceRootUrl.value}/v1`)
-
-  function resolveServiceRootUrl() {
-    const normalizedApiBase = API_BASE_URL.trim().replace(/\/+$/, '')
-
-    if (/^https?:\/\//i.test(normalizedApiBase)) {
-      return normalizedApiBase
-    }
-
-    if (typeof window === 'undefined') {
-      return normalizedApiBase
-    }
-
-    const origin = window.location.origin.replace(/\/+$/, '')
-    if (!normalizedApiBase) {
-      return origin
-    }
-
-    return `${origin}${normalizedApiBase.startsWith('/') ? normalizedApiBase : `/${normalizedApiBase}`}`
-  }
 
   function importCreatedKeyToCcs() {
     if (!options.createdKey.value)
@@ -69,11 +49,6 @@ export function useApiKeyUse(options: {
       providerName: apiKey.name || apiKey.prefix || 'codex-proxy-rs',
     })
   }
-
-  watch(showUseKeyModal, (open) => {
-    if (!open)
-      selectedUseKey.value = null
-  })
 
   return {
     showUseKeyModal,

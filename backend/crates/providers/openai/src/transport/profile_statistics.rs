@@ -165,11 +165,14 @@ impl CodexBackendClient {
         &self,
         context: CodexRequestContext<'_>,
     ) -> CodexClientResult<CodexProfileStatistics> {
+        let headers = self.account_request_headers(context)?;
+        let request = |base_url| {
+            self.client
+                .get(account_endpoint_url(base_url, "profiles/me"))
+                .headers(headers.clone())
+        };
         let response = self
-            .client
-            .get(account_endpoint_url(&self.base_url, "profiles/me"))
-            .headers(self.account_request_headers(context)?)
-            .send()
+            .send_account_request(request(&self.base_url), request(&self.official_base_url))
             .await?;
         let status = response.status();
         let diagnostics = response_meta::diagnostics(Some(status.as_u16()), response.headers());

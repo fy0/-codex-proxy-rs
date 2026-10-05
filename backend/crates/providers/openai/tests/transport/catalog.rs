@@ -410,6 +410,7 @@ async fn fetch_should_reject_streamed_body_over_hard_limit() {
 
 fn profile() -> CodexWireProfileState {
     CodexWireProfileState::new(CodexWireProfile {
+        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
         originator: "codex_cli_rs".to_owned(),
         codex_version: "0.144.0".to_owned(),
         desktop_version: "1.0.0".to_owned(),
@@ -418,6 +419,7 @@ fn profile() -> CodexWireProfileState {
         os_version: "6.8".to_owned(),
         arch: "x86_64".to_owned(),
         terminal: "xterm".to_owned(),
+        exact_user_agent: None,
         residency: None,
         verified_at: Utc
             .with_ymd_and_hms(2026, 7, 18, 0, 0, 0)

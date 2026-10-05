@@ -1,7 +1,6 @@
 <script setup lang="ts">
+import { BaseFormItem, BaseSelect } from '@codex-proxy/ui'
 import { computed } from 'vue'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseSelect from '@/components/base/BaseSelect.vue'
 import { useProxyCatalog } from '@/composables/useProxyCatalog'
 
 const props = withDefaults(defineProps<{ accountId?: string, endpoint?: string | null, disabled?: boolean, preserve?: boolean, error?: string }>(), { preserve: true })

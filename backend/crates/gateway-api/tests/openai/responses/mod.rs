@@ -120,6 +120,26 @@ fn decoder_should_preserve_the_openai_body_and_only_derive_stable_routing_facts(
 }
 
 #[test]
+fn decoder_should_default_omitted_http_stream_to_json_without_rewriting_body() {
+    let body = json!({"model": "smart-code", "input": "hello"});
+    let decoded = generate_request(body.clone());
+
+    assert!(!decoded.metadata().stream());
+    assert_eq!(openai_wire_body(&decoded), body.as_object().unwrap());
+}
+
+#[test]
+fn decoder_should_preserve_explicit_http_stream_values() {
+    for stream in [false, true] {
+        let body = json!({"model": "smart-code", "input": "hello", "stream": stream});
+        let decoded = generate_request(body.clone());
+
+        assert_eq!(decoded.metadata().stream(), stream);
+        assert_eq!(openai_wire_body(&decoded), body.as_object().unwrap());
+    }
+}
+
+#[test]
 fn decoder_should_preserve_opaque_client_model_values() {
     for model in [
         format!("future-{}", "x".repeat(512)),
@@ -313,6 +333,10 @@ fn decoder_should_preserve_ordinary_request_headers_as_opaque_multivalues() {
         HeaderValue::from_static("client-attestation"),
     );
     headers.insert("x-oai-is", HeaderValue::from_static("client-is"));
+    for name in ["x-openai-account-routing-override", "x-openai-fedramp"] {
+        headers.append(name, HeaderValue::from_static("first"));
+        headers.append(name, HeaderValue::from_static("second"));
+    }
     headers.insert(
         "x-oai-is-update",
         HeaderValue::from_static("client-is-update"),
@@ -381,6 +405,8 @@ fn decoder_should_preserve_ordinary_request_headers_as_opaque_multivalues() {
         "cookie",
         "chatgpt-account-id",
         "chatgpt-project-id",
+        "x-openai-account-routing-override",
+        "x-openai-fedramp",
         // 上游指纹由运行时画像统一生成，客户端不得覆盖。
         "user-agent",
         "originator",
@@ -625,6 +651,7 @@ fn decoder_should_leave_openai_semantic_validation_to_the_upstream() {
         "future_official_field": [1, 2, 3]
     }));
 
+    assert!(decoded.metadata().stream());
     assert_eq!(
         Value::Object(openai_wire_body(&decoded).clone()),
         json!({
@@ -846,7 +873,7 @@ fn transparent_encoder_should_translate_error_wire_to_response_failed_for_websoc
     assert_eq!(payload["type"], "response.failed");
     assert_eq!(payload["response"]["id"], response_id);
     assert_eq!(payload["response"]["status"], "failed");
-    assert_eq!(payload["response"]["error"]["code"], "server_is_overloaded");
+    assert_eq!(payload["response"]["error"]["code"], "server_error");
 
     // 与 SSE 边界投影到同一份 data 负载，两条客户端通道行为一致。
     let mut sse_encoder = OpenAiResponsesEncoder::new();
@@ -918,6 +945,108 @@ fn transparent_encoder_should_follow_wire_when_canonical_identity_changes() {
             .expect("wire terminal remains authoritative"),
         json!({"id": "wire_resp_2"})
     );
+}
+
+#[test]
+fn capacity_failure_projection_preserves_wire_metadata_and_original_events() {
+    for code in ["server_is_overloaded", "slow_down"] {
+        for (event_type, explicit_type) in [
+            ("error", true),
+            ("error", false),
+            ("response.failed", true),
+            ("response.failed", false),
+        ] {
+            for status in [None, Some(400), Some(429), Some(503)] {
+                let error = json!({"code": code, "type": "service_unavailable_error", "message": "busy", "future": 42});
+                let mut original = if event_type == "error" {
+                    json!({"type": event_type, "error": error, "sequence_number": 3})
+                } else {
+                    json!({"type": event_type, "response": {"id": "resp_capacity", "status": "failed", "error": error}, "sequence_number": 3})
+                };
+                if let Some(status) = status {
+                    original["status_code"] = json!(status);
+                }
+                let raw = Bytes::from(format!(
+                    "id: capacity\r\nretry: 1700\r\nevent: {event_type}\r\ndata: {original}\r\n\r\n"
+                ));
+                let event = ProviderEvent::wire(
+                    ProtocolWireEvent::json_with_raw_sse_metadata(
+                        "openai",
+                        explicit_type.then(|| event_type.to_owned()),
+                        original.clone(),
+                        raw.clone(),
+                        Some("capacity".to_owned()),
+                        Some(1700),
+                    )
+                    .expect("wire"),
+                );
+                let mut sse = OpenAiResponsesEncoder::new();
+                let mut ws = OpenAiResponsesEncoder::new();
+                let created = openai_wire_event(
+                    Vec::new(),
+                    "response.created",
+                    json!({"type": "response.created", "response": {"id": "resp_capacity", "status": "in_progress"}}),
+                );
+                sse.push_sse(&created);
+                ws.push_websocket(&created);
+                let frames = sse.push_sse(&event);
+                let parsed =
+                    parse_sse_events(std::str::from_utf8(&frames[0]).expect("UTF-8")).expect("SSE");
+                let sse_data: Value = serde_json::from_str(&parsed[0].data).expect("JSON");
+                assert_eq!(parsed[0].id.as_deref(), Some("capacity"));
+                assert_eq!(parsed[0].retry, Some(1700));
+                assert_eq!(parsed[0].event.as_deref(), Some("response.failed"));
+                assert_eq!(sse_data["response"]["error"]["code"], "server_error");
+                assert_eq!(sse_data["response"]["error"]["message"], "busy");
+                assert_eq!(sse_data["response"]["error"]["future"], 42);
+                let messages = ws.push_websocket(&event);
+                let ws_data: Value = serde_json::from_str(&messages[0]).expect("JSON");
+                if event_type == "error" && status.is_some() {
+                    let mut expected = original.clone();
+                    expected["error"]["code"] = json!("server_error");
+                    expected["status_code"] = json!(503);
+                    assert_eq!(ws_data, expected);
+                } else {
+                    assert_eq!(ws_data, sse_data);
+                }
+                assert!(sse.has_wire_failure());
+                assert!(ws.has_wire_failure());
+                let wire = event.wire_event().expect("original wire");
+                assert_eq!(wire.data(), &original);
+                assert_eq!(wire.raw_sse_frame(), Some(&raw));
+            }
+        }
+    }
+}
+
+#[test]
+fn capacity_client_projection_does_not_touch_other_codes_or_non_failure_events() {
+    for (event_type, code) in [
+        ("response.failed", "rate_limit_exceeded"),
+        ("response.failed", "insufficient_quota"),
+        ("response.failed", "previous_response_not_found"),
+        ("response.future", "server_is_overloaded"),
+    ] {
+        let original =
+            json!({"type": event_type, "response": {"error": {"code": code, "message": "busy"}}});
+        let raw = Bytes::from(format!("event: {event_type}\r\ndata: {original}\r\n\r\n"));
+        let event = ProviderEvent::wire(
+            ProtocolWireEvent::json_with_raw_sse_metadata(
+                "openai",
+                Some(event_type.to_owned()),
+                original.clone(),
+                raw.clone(),
+                None,
+                None,
+            )
+            .expect("wire"),
+        );
+        assert_eq!(OpenAiResponsesEncoder::new().push_sse(&event), vec![raw]);
+        assert_eq!(
+            OpenAiResponsesEncoder::new().push_websocket(&event),
+            vec![original.to_string()]
+        );
+    }
 }
 
 #[test]

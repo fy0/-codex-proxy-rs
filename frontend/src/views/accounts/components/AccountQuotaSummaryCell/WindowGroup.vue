@@ -37,8 +37,8 @@ const trackGridStyle = computed(() => ({
 </script>
 
 <template>
-  <div class="grid min-w-0 gap-1.5">
-    <div class="flex min-w-0 items-baseline justify-between gap-1 text-[10px] leading-3 font-bold">
+  <div class="col-span-full grid min-w-0 grid-cols-subgrid gap-y-1.5">
+    <div class="col-span-full grid min-w-0 grid-cols-subgrid items-baseline text-[10px] leading-3 font-bold">
       <span class="min-w-0 truncate text-cp-text-quaternary" :title="label">
         {{ label }}
       </span>
@@ -51,7 +51,7 @@ const trackGridStyle = computed(() => ({
       </strong>
     </div>
 
-    <div class="grid min-w-0 gap-1" :style="trackGridStyle">
+    <div class="col-span-full grid min-w-0 gap-1" :style="trackGridStyle">
       <div
         v-for="item in windowItems"
         :key="item.key"

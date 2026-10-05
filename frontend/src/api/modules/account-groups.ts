@@ -16,7 +16,7 @@ export interface AccountGroupAccountSummary {
 
 export interface AccountGroupCapacity {
   usedSlots: number | null
-  totalSlots: number
+  totalSlots: number | null
 }
 
 export interface AccountGroupUsage {
@@ -34,7 +34,9 @@ export interface AccountGroup extends AccountGroupRef {
   capacity: AccountGroupCapacity
   usage: AccountGroupUsage
   createdAt: string
+  createdAtDisplay: string
   updatedAt: string
+  updatedAtDisplay: string
 }
 
 export interface AccountGroupPageMeta {

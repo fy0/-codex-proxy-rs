@@ -14,20 +14,24 @@ mod personal_info {
     #[test]
     fn subscription_response_exposes_only_display_fields_and_preserves_unknowns() {
         let observed = Utc.with_ymd_and_hms(2026, 9, 14, 0, 0, 0).unwrap();
-        let response = AccountSubscriptionData::from(ProviderSubscription {
-            starts_at: None,
-            expires_at: observed,
-            will_renew: None,
-            billing_period: None,
-            billing_currency: Some("USD".to_owned()),
-            observed_at: observed,
-        });
+        let response = AccountSubscriptionData::from((
+            ProviderSubscription {
+                starts_at: None,
+                expires_at: observed,
+                will_renew: None,
+                billing_period: None,
+                billing_currency: Some("USD".to_owned()),
+                observed_at: observed,
+            },
+            gateway_api::TimePresenter::new(Default::default()),
+        ));
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             json!({
-                "startsAt": null, "expiresAt": "2026-09-14T00:00:00+00:00",
+                "startsAt": null, "startsAtDisplay": null,
+                "expiresAt": "2026-09-14T00:00:00+00:00", "expiresAtDisplay": "2026-09-14 08:00:00",
                 "willRenew": null, "billingPeriod": null, "billingCurrency": "USD",
-                "observedAt": "2026-09-14T00:00:00+00:00"
+                "observedAt": "2026-09-14T00:00:00+00:00", "observedAtDisplay": "2026-09-14 08:00:00"
             })
         );
     }
@@ -35,17 +39,20 @@ mod personal_info {
     #[test]
     fn personal_info_response_preserves_subscription_when_profile_fails() {
         let observed = Utc.with_ymd_and_hms(2026, 9, 14, 0, 0, 0).unwrap();
-        let response = AccountPersonalInfoData::from(AccountPersonalInfo {
-            profile: Err(AdminError::bad_gateway("上游服务请求失败")),
-            subscription: Some(ProviderSubscription {
-                starts_at: None,
-                expires_at: observed,
-                will_renew: None,
-                billing_period: None,
-                billing_currency: None,
-                observed_at: observed,
-            }),
-        });
+        let response = AccountPersonalInfoData::from((
+            AccountPersonalInfo {
+                profile: Err(AdminError::bad_gateway("上游服务请求失败")),
+                subscription: Some(ProviderSubscription {
+                    starts_at: None,
+                    expires_at: observed,
+                    will_renew: None,
+                    billing_period: None,
+                    billing_currency: None,
+                    observed_at: observed,
+                }),
+            },
+            gateway_api::TimePresenter::new(Default::default()),
+        ));
         let value = serde_json::to_value(response).unwrap();
         assert!(value["profile"].is_null());
         assert_eq!(value["profileError"], "上游服务请求失败");
@@ -58,10 +65,13 @@ mod personal_info {
 
     #[test]
     fn personal_info_response_preserves_unknown_subscription_and_profile_error() {
-        let response = AccountPersonalInfoData::from(AccountPersonalInfo {
-            profile: Err(AdminError::unavailable("Provider 服务暂不可用")),
-            subscription: None,
-        });
+        let response = AccountPersonalInfoData::from((
+            AccountPersonalInfo {
+                profile: Err(AdminError::unavailable("Provider 服务暂不可用")),
+                subscription: None,
+            },
+            gateway_api::TimePresenter::new(Default::default()),
+        ));
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             json!({
@@ -77,6 +87,34 @@ mod query {
     use gateway_admin::model::accounts::{AccountSortField, AccountStatus, SortDirection};
     use gateway_api::admin::accounts::ListQuery;
     use serde_json::json;
+
+    #[test]
+    fn account_query_should_filter_every_explicit_provider_id_literally() {
+        for provider in ["all", "ALL", "example"] {
+            let query: ListQuery = serde_json::from_value(json!({ "provider": provider })).unwrap();
+            assert_eq!(
+                query
+                    .validate()
+                    .unwrap()
+                    .provider_kind
+                    .as_ref()
+                    .map(|kind| kind.as_str()),
+                Some(provider)
+            );
+        }
+    }
+
+    #[test]
+    fn account_query_should_only_omit_empty_provider_filters() {
+        for value in [
+            json!({}),
+            json!({ "provider": "" }),
+            json!({ "provider": "  " }),
+        ] {
+            let query: ListQuery = serde_json::from_value(value).unwrap();
+            assert!(query.validate().unwrap().provider_kind.is_none());
+        }
+    }
 
     #[test]
     fn account_query_should_parse_provider_status_and_sort_once() {
@@ -156,39 +194,42 @@ mod profile_statistics {
 
     #[test]
     fn profile_statistics_response_preserves_nullable_official_fields() {
-        let response = AccountProfileStatisticsData::from(ProviderProfileStatistics {
-            display_name: Some("Ada".to_owned()),
-            username: Some("ada".to_owned()),
-            image_url: Some("https://example.test/avatar.png".to_owned()),
-            has_stats_error: false,
-            summary: ProviderProfileStatisticsSummary {
-                total_text_tokens: Some(409_500_000),
-                peak_tokens: Some(267_000_000),
-                longest_task_duration_ms: Some(51_900_000),
-                current_streak_days: Some(16),
-                longest_streak_days: Some(32),
-            },
-            daily_usage: Some(vec![ProviderProfileDailyUsage {
-                date: NaiveDate::from_ymd_opt(2026, 8, 25).expect("usage date"),
-                tokens: 42,
-            }]),
-            activity_insights: ProviderProfileActivityInsights {
-                fast_mode_percent: Some(0.0),
-                reasoning_effort: Some("high".to_owned()),
-                reasoning_effort_percent: Some(48.0),
-                skills_explored: Some(8),
-                total_skills_used: Some(61),
-                total_threads: Some(2_391),
-                invocations: Some(vec![ProviderProfileInvocation {
-                    invocation_type: "plugin".to_owned(),
-                    plugin_id: Some("plugin_1".to_owned()),
-                    plugin_name: Some("example".to_owned()),
-                    skill_id: None,
-                    skill_name: None,
-                    usage_count: Some(29),
+        let response = AccountProfileStatisticsData::from((
+            ProviderProfileStatistics {
+                display_name: Some("Ada".to_owned()),
+                username: Some("ada".to_owned()),
+                image_url: Some("https://example.test/avatar.png".to_owned()),
+                has_stats_error: false,
+                summary: ProviderProfileStatisticsSummary {
+                    total_text_tokens: Some(409_500_000),
+                    peak_tokens: Some(267_000_000),
+                    longest_task_duration_ms: Some(51_900_000),
+                    current_streak_days: Some(16),
+                    longest_streak_days: Some(32),
+                },
+                daily_usage: Some(vec![ProviderProfileDailyUsage {
+                    date: NaiveDate::from_ymd_opt(2026, 8, 25).expect("usage date"),
+                    tokens: 42,
                 }]),
+                activity_insights: ProviderProfileActivityInsights {
+                    fast_mode_percent: Some(0.0),
+                    reasoning_effort: Some("high".to_owned()),
+                    reasoning_effort_percent: Some(48.0),
+                    skills_explored: Some(8),
+                    total_skills_used: Some(61),
+                    total_threads: Some(2_391),
+                    invocations: Some(vec![ProviderProfileInvocation {
+                        invocation_type: "plugin".to_owned(),
+                        plugin_id: Some("plugin_1".to_owned()),
+                        plugin_name: Some("example".to_owned()),
+                        skill_id: None,
+                        skill_name: None,
+                        usage_count: Some(29),
+                    }]),
+                },
             },
-        });
+            gateway_api::TimePresenter::new(Default::default()),
+        ));
         let value = serde_json::to_value(response).expect("serialize profile statistics");
 
         assert_eq!(value["displayName"], "Ada");
@@ -372,7 +413,6 @@ mod batch_update {
             "accountId": "acct_test",
             "enabled": true,
             "concurrencyLimit": 4294967295_u64,
-            "bpsConcurrencyLimit": null,
             "weight": 100,
             "groupIds": []
         }))
@@ -383,17 +423,6 @@ mod batch_update {
             serde_json::from_value::<UpdateAccountRequest>(json!({
                 "accountId": "acct_test",
                 "enabled": true,
-                "bpsConcurrencyLimit": null,
-                "weight": 1,
-                "groupIds": []
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<UpdateAccountRequest>(json!({
-                "accountId": "acct_test",
-                "enabled": true,
-                "concurrencyLimit": null,
                 "weight": 1,
                 "groupIds": []
             }))
@@ -413,7 +442,7 @@ fn single_update_should_accept_optional_unicode_and_multiline_notes() {
         json!("备".repeat(500)),
     ] {
         let request: UpdateAccountRequest = serde_json::from_value(json!({
-            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null, "bpsConcurrencyLimit": null,
+            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null,
             "weight": 1, "groupIds": [], "notes": notes
         }))
         .unwrap();
@@ -431,7 +460,7 @@ fn single_update_should_reject_oversized_notes_and_control_characters() {
         "备注\u{001b}".to_owned(),
     ] {
         let request: UpdateAccountRequest = serde_json::from_value(json!({
-            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null, "bpsConcurrencyLimit": null,
+            "accountId": "acct_notes", "enabled": true, "concurrencyLimit": null,
             "weight": 1, "groupIds": [], "notes": notes
         }))
         .unwrap();
@@ -472,6 +501,7 @@ mod response {
             read_tokens: None,
             read_tokens_display: "-".to_owned(),
             last_used_at: None,
+            last_used_at_full_display: None,
             last_used_at_display: "-".to_owned(),
             cost_estimate_status: "unknown".to_owned(),
             known_cost_count: None,
@@ -513,7 +543,7 @@ mod actions {
         AccountDeletionRequest, AccountExportData, AccountExportQuery, AccountIdQuery,
         AccountImportData, AccountImportRequest, AccountMutationData, AccountRefreshRequest,
         AccountResetCreditConsumeRequest, AccountTestQuery, CompleteAccountAuthorizationRequest,
-        RotateAccountRequest, StartAccountAuthorizationRequest,
+        StartAccountAuthorizationRequest, UpdateAccountRequest,
     };
     use gateway_core::{
         account::ProviderAccountId, engine::probe::AccountProbeErrorSource,
@@ -613,42 +643,79 @@ mod actions {
     }
 
     #[test]
-    fn api_key_rotation_settings_must_target_the_same_account_and_remain_valid() {
+    fn account_update_validates_connection_and_settings_together() {
         let mut request = json!({
-            "provider": "openai",
             "accountId": "acct_api",
-            "baseUrl": "https://api.example.invalid/v1",
-            "transport": "http",
-            "settings": {
-                "accountId": "acct_api",
-                "enabled": true,
-                "concurrencyLimit": null,
-                "bpsConcurrencyLimit": null,
-                "weight": 1,
-                "groupIds": []
-            }
+            "connection": {
+                "baseUrl": "https://api.example.invalid/v1",
+                "transport": "http"
+            },
+            "enabled": true,
+            "concurrencyLimit": null,
+            "weight": 1,
+            "groupIds": []
         });
-        serde_json::from_value::<RotateAccountRequest>(request.clone())
+        serde_json::from_value::<UpdateAccountRequest>(request.clone())
             .expect("decode combined save")
             .validate()
-            .expect("blank replacement key preserves the existing key");
-        request["settings"]["accountId"] = json!("acct_other");
+            .expect("omitted replacement key preserves the existing key");
+        request["connection"]["apiKey"] = json!("");
         assert_eq!(
-            serde_json::from_value::<RotateAccountRequest>(request.clone())
+            serde_json::from_value::<UpdateAccountRequest>(request.clone())
                 .unwrap()
                 .validate()
                 .unwrap_err()
                 .field(),
-            "settings.accountId"
+            "connection.apiKey"
         );
-        request["settings"]["accountId"] = json!("acct_api");
-        request["settings"]["concurrencyLimit"] = json!(0);
+        request["connection"]["apiKey"] = json!("test-replacement-key");
+        request["concurrencyLimit"] = json!(0);
         assert!(
-            serde_json::from_value::<RotateAccountRequest>(request)
+            serde_json::from_value::<UpdateAccountRequest>(request)
                 .unwrap()
                 .validate()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn account_connection_update_rejects_invalid_fields_and_generic_credentials() {
+        let request = json!({
+            "accountId": "acct_api",
+            "enabled": true,
+            "concurrencyLimit": null,
+            "weight": 1,
+            "groupIds": [],
+            "connection": {"baseUrl": "https://api.example.invalid/v1", "transport": "http"}
+        });
+        for (field, value, expected) in [
+            ("baseUrl", "", "connection.baseUrl"),
+            ("transport", "websocket", "connection.transport"),
+            ("apiKey", "invalid key", "connection.apiKey"),
+        ] {
+            let mut invalid = request.clone();
+            invalid["connection"][field] = json!(value);
+            assert_eq!(
+                serde_json::from_value::<UpdateAccountRequest>(invalid)
+                    .unwrap()
+                    .validate()
+                    .unwrap_err()
+                    .field(),
+                expected
+            );
+        }
+        for field in [
+            "accountId",
+            "provider",
+            "accessToken",
+            "refreshToken",
+            "data",
+            "expectedCredentialRevision",
+        ] {
+            let mut invalid = request.clone();
+            invalid["connection"][field] = json!("unsupported");
+            assert!(serde_json::from_value::<UpdateAccountRequest>(invalid).is_err());
+        }
     }
 
     #[test]
@@ -666,25 +733,6 @@ mod actions {
                 "name": "reauthorize",
                 "accountId": "acct_1",
                 "expectedCredentialRevision": 1
-            }))
-            .is_err()
-        );
-
-        let rotation: RotateAccountRequest = serde_json::from_value(json!({
-            "provider": "openai",
-            "accountId": "acct_1",
-            "accessToken": "header.payload.signature",
-            "refreshToken": "refresh-token",
-            "idToken": "id-header.id-payload.id-signature"
-        }))
-        .expect("decode rotation");
-        assert!(rotation.validate().is_ok());
-        assert!(
-            serde_json::from_value::<RotateAccountRequest>(json!({
-                "provider": "openai",
-                "accountId": "acct_1",
-                "expectedCredentialRevision": 1,
-                "accessToken": "header.payload.signature"
             }))
             .is_err()
         );
@@ -827,7 +875,7 @@ mod actions {
 
     #[test]
     fn connection_test_events_should_preserve_the_existing_frontend_contract() {
-        let events = [
+        let mut events = [
             DomainConnectionTestEvent::Started {
                 model: "grok-4.5".to_owned(),
             },
@@ -853,7 +901,32 @@ mod actions {
                 upstream_body: Some(r#"{"error":{"type":"usage_limit_reached"}}"#.to_owned()),
             },
         ]
-        .map(|event| AccountConnectionTestEvent::from(event).data);
+        .map(|event| {
+            AccountConnectionTestEvent::from((
+                event,
+                gateway_api::TimePresenter::new(Default::default()),
+            ))
+            .data
+        });
+
+        let timezone = gateway_core::time::DeploymentTimeZone::default();
+        for event in &mut events {
+            let at = event["occurredAt"]
+                .as_str()
+                .unwrap()
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap();
+            let local = timezone.local(at);
+            assert_eq!(
+                event["occurredAtDisplay"],
+                local.format("%Y-%m-%d %H:%M:%S").to_string()
+            );
+            assert_eq!(event["timeDisplay"], local.format("%H:%M:%S").to_string());
+            let fields = event.as_object_mut().unwrap();
+            fields.remove("occurredAt");
+            fields.remove("occurredAtDisplay");
+            fields.remove("timeDisplay");
+        }
 
         assert_eq!(
             events,

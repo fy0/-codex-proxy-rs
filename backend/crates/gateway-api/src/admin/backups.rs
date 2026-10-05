@@ -40,16 +40,18 @@ pub struct BackupSettingsView {
     pub verified: bool,
     pub schedule_enabled: bool,
     pub cron_expression: Option<String>,
-    pub schedule_timezone: Option<String>,
     pub retention_days: u32,
     pub retention_count: u32,
     pub next_run_at: Option<DateTime<Utc>>,
+    pub next_run_at_display: Option<String>,
     pub last_verified_at: Option<DateTime<Utc>>,
+    pub last_verified_at_display: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub updated_at_display: String,
 }
 
-impl From<BackupSettings> for BackupSettingsView {
-    fn from(settings: BackupSettings) -> Self {
+impl From<(BackupSettings, crate::time::TimePresenter)> for BackupSettingsView {
+    fn from((settings, time): (BackupSettings, crate::time::TimePresenter)) -> Self {
         let verified = settings.storage_verified();
         Self {
             storage_revision: settings.storage_revision,
@@ -65,11 +67,19 @@ impl From<BackupSettings> for BackupSettingsView {
             verified,
             schedule_enabled: settings.schedule_enabled,
             cron_expression: settings.cron_expression,
-            schedule_timezone: settings.schedule_timezone,
             retention_days: settings.retention_days,
             retention_count: settings.retention_count,
+            next_run_at_display: settings
+                .next_run_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             next_run_at: settings.next_run_at,
+            last_verified_at_display: settings
+                .last_verified_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             last_verified_at: settings.last_verified_at,
+            updated_at_display: time.datetime(&settings.updated_at),
             updated_at: settings.updated_at,
         }
     }
@@ -95,7 +105,6 @@ pub struct UpdateBackupStorageRequest {
 pub struct UpdateBackupScheduleRequest {
     pub schedule_enabled: bool,
     pub cron_expression: String,
-    pub schedule_timezone: String,
     pub retention_days: u32,
     pub retention_count: u32,
 }
@@ -108,6 +117,7 @@ pub struct BackupRecordView {
     pub trigger_kind: String,
     pub status: String,
     pub scheduled_at: Option<DateTime<Utc>>,
+    pub scheduled_at_display: Option<String>,
     pub object_key: String,
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
@@ -115,18 +125,27 @@ pub struct BackupRecordView {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
+    pub started_at_display: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at_display: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at_display: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub created_at_display: String,
     pub updated_at: DateTime<Utc>,
+    pub updated_at_display: String,
 }
 
-impl From<BackupRecord> for BackupRecordView {
-    fn from(record: BackupRecord) -> Self {
+impl From<(BackupRecord, crate::time::TimePresenter)> for BackupRecordView {
+    fn from((record, time): (BackupRecord, crate::time::TimePresenter)) -> Self {
         Self {
             id: record.id,
             trigger_kind: record.trigger_kind.to_string(),
             status: record.status.to_string(),
+            scheduled_at_display: record
+                .scheduled_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             scheduled_at: record.scheduled_at,
             object_key: record.object_key,
             size_bytes: record.size_bytes,
@@ -134,10 +153,18 @@ impl From<BackupRecord> for BackupRecordView {
             attempt_count: record.attempt_count,
             error_code: record.error_code,
             error_message: record.error_message,
+            started_at_display: record.started_at.as_ref().map(|value| time.datetime(value)),
             started_at: record.started_at,
+            completed_at_display: record
+                .completed_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             completed_at: record.completed_at,
+            expires_at_display: record.expires_at.as_ref().map(|value| time.datetime(value)),
             expires_at: record.expires_at,
+            created_at_display: time.datetime(&record.created_at),
             created_at: record.created_at,
+            updated_at_display: time.datetime(&record.updated_at),
             updated_at: record.updated_at,
         }
     }
@@ -244,6 +271,7 @@ async fn backup_settings<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let settings = state
         .admin_services()
         .backups()
@@ -252,7 +280,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(BackupSettingsView::from(settings)),
+        AdminEnvelope::ok(BackupSettingsView::from((settings, time))),
     ))
 }
 
@@ -264,6 +292,7 @@ async fn update_backup_storage<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let command = UpdateBackupStorageCommand {
         endpoint: request.endpoint,
         region: request.region,
@@ -281,7 +310,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(BackupSettingsView::from(settings)),
+        AdminEnvelope::ok(BackupSettingsView::from((settings, time))),
     ))
 }
 
@@ -312,10 +341,10 @@ async fn update_backup_schedule<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let command = UpdateBackupScheduleCommand {
         schedule_enabled: request.schedule_enabled,
         cron_expression: request.cron_expression,
-        schedule_timezone: request.schedule_timezone,
         retention_days: request.retention_days,
         retention_count: request.retention_count,
     };
@@ -327,7 +356,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(BackupSettingsView::from(settings)),
+        AdminEnvelope::ok(BackupSettingsView::from((settings, time))),
     ))
 }
 
@@ -339,6 +368,7 @@ async fn backup_records<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let page_size = gateway_admin::model::PageSize::new(query.page_size.unwrap_or(20))
         .map_err(|_| AdminError::bad_request("pageSize 不合法"))?;
     let page = query.page.unwrap_or(1);
@@ -378,7 +408,7 @@ where
     let items: Vec<BackupRecordView> = page_result
         .items
         .into_iter()
-        .map(BackupRecordView::from)
+        .map(|value| BackupRecordView::from((value, time)))
         .collect();
     Ok(AdminResponse::new(
         StatusCode::OK,
@@ -394,6 +424,7 @@ async fn create_backup<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let expires_at = body
         .and_then(|body| body.0.expires_in_days)
         .filter(|&days| days > 0)
@@ -406,7 +437,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::ACCEPTED,
-        AdminEnvelope::ok(BackupRecordView::from(record)),
+        AdminEnvelope::ok(BackupRecordView::from((record, time))),
     ))
 }
 
@@ -445,6 +476,7 @@ async fn delete_backup<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let record = state
         .admin_services()
         .backups()
@@ -453,7 +485,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(BackupRecordView::from(record)),
+        AdminEnvelope::ok(BackupRecordView::from((record, time))),
     ))
 }
 

@@ -1,4 +1,12 @@
-import type { ApiKeyConfiguration } from '@/api'
+import type { Account, ApiKeyConfiguration } from '@/api'
+
+export function isOpenAiApiKeyAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
+  return account?.provider === 'openai' && account.authenticationKind === 'api_key'
+}
+
+export function isOpenAiOAuthAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
+  return account?.provider === 'openai' && account.authenticationKind === 'oauth'
+}
 
 export interface ApiKeyAccountForm extends ApiKeyConfiguration {
   name: string
@@ -7,6 +15,12 @@ export interface ApiKeyAccountForm extends ApiKeyConfiguration {
 
 export function emptyApiKeyAccountForm(): ApiKeyAccountForm {
   return { name: '', base_url: '', apiKey: '', transport: 'http' }
+}
+
+export function parseApiKeyConfiguration(value: Record<string, unknown> | undefined): ApiKeyConfiguration | undefined {
+  if (!value || typeof value.base_url !== 'string' || (value.transport !== 'http' && value.transport !== 'prefer_websocket'))
+    return undefined
+  return { base_url: value.base_url, transport: value.transport }
 }
 
 export function apiKeyAccountError(form: ApiKeyAccountForm, editing = false): string | undefined {

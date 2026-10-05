@@ -19,7 +19,7 @@ pub struct CodexSubscription {
 }
 
 impl CodexBackendClient {
-    /// 可选展示查询失败只返回未知，不改变凭据或额度状态，也不重试。
+    /// 可选展示查询失败只返回未知；自定义路由的 404 回退也计入同一查询预算。
     pub async fn fetch_subscription(
         &self,
         context: CodexRequestContext<'_>,
@@ -29,27 +29,31 @@ impl CodexBackendClient {
             return None;
         }
         tokio::time::timeout(Duration::from_secs(5), async {
-            let mut url = reqwest::Url::parse(&self.base_url).ok()?;
-            let base_path = url.path().trim_end_matches('/');
-            let subscription_path = if base_path.ends_with("/backend-api") {
-                format!("{base_path}/subscriptions")
-            } else {
-                "/backend-api/subscriptions".to_owned()
-            };
-            url.set_path(&subscription_path);
-            url.set_query(None);
-            url.set_fragment(None);
-            url.query_pairs_mut().append_pair("account_id", account_id);
-            let origin = url.origin().ascii_serialization();
             let headers = self.account_request_headers(context).ok()?;
+            let request = |base_url: &str| {
+                let mut url = reqwest::Url::parse(base_url).ok()?;
+                let base_path = url.path().trim_end_matches('/');
+                let subscription_path = if base_path.ends_with("/backend-api") {
+                    format!("{base_path}/subscriptions")
+                } else {
+                    "/backend-api/subscriptions".to_owned()
+                };
+                url.set_path(&subscription_path);
+                url.set_query(None);
+                url.set_fragment(None);
+                url.query_pairs_mut().append_pair("account_id", account_id);
+                let origin = url.origin().ascii_serialization();
+                Some(
+                    self.client
+                        .get(url)
+                        .headers(headers.clone())
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .header(reqwest::header::ORIGIN, &origin)
+                        .header(reqwest::header::REFERER, format!("{origin}/")),
+                )
+            };
             let response = self
-                .client
-                .get(url)
-                .headers(headers)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::ORIGIN, &origin)
-                .header(reqwest::header::REFERER, format!("{origin}/"))
-                .send()
+                .send_account_request(request(&self.base_url)?, request(&self.official_base_url)?)
                 .await
                 .ok()?;
             if !response.status().is_success() {

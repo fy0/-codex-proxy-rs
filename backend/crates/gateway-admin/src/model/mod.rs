@@ -4,6 +4,7 @@ use std::num::{NonZeroU16, NonZeroU64};
 
 pub mod account_groups;
 pub mod accounts;
+pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod client_distribution;
@@ -11,10 +12,15 @@ pub mod client_keys;
 pub mod import_tasks;
 pub mod key_usage;
 pub mod observability;
+pub mod plugin_client_keys;
+pub mod plugin_resources;
+pub mod plugins;
+pub mod pricing;
 pub mod provider_credentials;
 pub mod proxies;
 pub mod quota_forecast;
 pub mod quota_forecast_sampling;
+pub mod retention;
 pub mod settings;
 pub mod system;
 
@@ -103,7 +109,10 @@ impl AdminError {
 }
 
 /// PostgreSQL 中所有正整数 revision 的管理层表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct Revision(NonZeroU64);
 
 impl Revision {
@@ -152,7 +161,8 @@ impl PageSize {
 }
 
 /// 可审计管理写操作的发起者。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MutationActor {
     AdminSession { admin_user_id: String },
     AdminApiKey,
@@ -160,7 +170,8 @@ pub enum MutationActor {
 }
 
 /// 管理写操作必须携带的审计上下文。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MutationContext {
     pub actor: MutationActor,
     pub request_id: String,

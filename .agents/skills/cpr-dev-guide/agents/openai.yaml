@@ -1,0 +1,6 @@
+interface:
+  display_name: "cpr-dev-guide"
+  short_description: "仓库开发、修复、排查、代码审查与文档修改的流程入口"
+  default_prompt: "使用 $cpr-dev-guide 按当前任务定位问题与现有实现，完成已授权的开发或审查，并自审、验证和报告结果。"
+policy:
+  allow_implicit_invocation: true

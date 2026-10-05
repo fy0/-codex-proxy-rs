@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { Plus, Search, Trash2 } from '@lucide/vue'
+import { BaseButton, BaseInput } from '@codex-proxy/ui'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
+import { Plus, Search, Trash2 } from '@lucide/vue'
 
 defineProps<{
   batchDeleting: boolean

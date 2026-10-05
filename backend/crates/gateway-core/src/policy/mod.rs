@@ -8,10 +8,12 @@ pub use client_version::{
     ClientVersionRejection, CodexClientKind, CodexClientMinVersions, CodexClientVersion,
 };
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::account::scope::FrozenAccountScope;
+use crate::account::{OpaqueProviderData, scope::FrozenAccountScope};
+use crate::identity::ProviderKind;
 use crate::validation::{IdentifierError, PolicyError, validate_text};
 
 /// `client_api_keys.id` 的核心值对象。
@@ -89,7 +91,8 @@ impl fmt::Debug for PlaintextClientApiKey {
 }
 
 /// 零表示对应维度不额外限制。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimits {
     pub max_concurrency: u64,
     pub requests_per_minute: u64,
@@ -105,9 +108,18 @@ impl RateLimits {
     }
 }
 
+/// Key 自身的设置默认值；请求派生策略保留本值，不能把宿主默认或插件覆盖写回。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSettings {
+    pub request_profiles: BTreeMap<ProviderKind, OpaqueProviderData>,
+    pub disable_fast: bool,
+    pub limits: RateLimits,
+}
+
 /// 从 `client_api_keys` 冻结的公开准入事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPolicy {
+    defaults: Arc<ClientSettings>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     account_scope: Arc<FrozenAccountScope>,
@@ -117,7 +129,33 @@ pub struct ClientPolicy {
 
 impl ClientPolicy {
     #[must_use]
-    pub const fn new(
+    pub fn defaults(&self) -> &Arc<ClientSettings> {
+        &self.defaults
+    }
+
+    pub(crate) fn with_settings(
+        mut self,
+        profiles: &BTreeMap<ProviderKind, OpaqueProviderData>,
+        disable_fast: bool,
+        limits: RateLimits,
+    ) -> Self {
+        if self.account_scope.request_profiles() != profiles
+            || self.account_scope.disable_fast() != disable_fast
+        {
+            self.account_scope = Arc::new(
+                self.account_scope
+                    .as_ref()
+                    .clone()
+                    .with_request_profiles(profiles.clone())
+                    .with_disable_fast(disable_fast),
+            );
+        }
+        self.limits = limits;
+        self
+    }
+
+    #[must_use]
+    pub fn new(
         key_id: ClientApiKeyId,
         plaintext_key: PlaintextClientApiKey,
         account_scope: Arc<FrozenAccountScope>,
@@ -125,6 +163,11 @@ impl ClientPolicy {
         limits: RateLimits,
     ) -> Self {
         Self {
+            defaults: Arc::new(ClientSettings {
+                request_profiles: account_scope.request_profiles().clone(),
+                disable_fast: account_scope.disable_fast(),
+                limits,
+            }),
             key_id,
             plaintext_key,
             account_scope,

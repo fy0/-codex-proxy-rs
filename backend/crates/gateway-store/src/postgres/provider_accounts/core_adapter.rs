@@ -13,139 +13,6 @@ fn loaded_credential_from_record(
 
 #[async_trait]
 impl ProviderAccountStore for PgProviderAccountRepository {
-    async fn routing_cookies(
-        &self,
-    ) -> Result<Vec<gateway_core::account::RoutingCookie>, CoreStoreError> {
-        self.load_routing_cookies().await
-    }
-    async fn observe_routing_cookie(
-        &self,
-        observation: gateway_core::account::RoutingCookieObservation,
-    ) -> Result<(), CoreStoreError> {
-        self.record_routing_cookie(observation).await
-    }
-
-    async fn claim_turn_state_notifications(
-        &self,
-    ) -> Result<Vec<gateway_core::account::TurnStateNotification>, CoreStoreError> {
-        self.claim_state_notifications().await
-    }
-
-    async fn finish_turn_state_notification(
-        &self,
-        account: &CoreProviderAccountId,
-        model: &str,
-        issued_at: i64,
-        delivered: bool,
-    ) -> Result<(), CoreStoreError> {
-        if delivered {
-            sqlx::query("update account_turn_state_notifications set sent_at = extract(epoch from now())::bigint where account_id = $1 and model = $2 and issued_at = $3 and sent_at is null")
-                .bind(account.as_str()).bind(model).bind(issued_at).execute(&self.pool).await
-                .map_err(|_| CoreStoreError::new(gateway_core::error::StoreErrorKind::Unavailable))?;
-        }
-        Ok(())
-    }
-
-    async fn turn_state_buckets_for_model(
-        &self,
-        accounts: &[CoreProviderAccountId],
-        model: &str,
-    ) -> Result<Vec<gateway_core::account::TurnStateBucket>, CoreStoreError> {
-        self.load_turn_state_buckets_for_model(accounts, model)
-            .await
-    }
-
-    async fn claim_turn_state_probe(
-        &self,
-        account: &CoreProviderAccountId,
-        model: &str,
-    ) -> Result<bool, CoreStoreError> {
-        let result = sqlx::query("update account_turn_states set manual_probe_requested_at = null where account_id = $1 and model = $2 and manual_probe_requested_at is not null")
-            .bind(account.as_str()).bind(model).execute(&self.pool).await
-            .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
-        Ok(result.rows_affected() == 1)
-    }
-
-    async fn schedule_turn_state(
-        &self,
-        account: &CoreProviderAccountId,
-        model: &str,
-        next_probe_at: i64,
-    ) -> Result<(), CoreStoreError> {
-        sqlx::query("update account_turn_states set next_probe_at = $3 where account_id = $1 and model = $2 and ((config->>'enabled')::boolean or coalesce((config->>'cookieLockEnabled')::boolean, false))")
-            .bind(account.as_str()).bind(model).bind(next_probe_at)
-            .execute(&self.pool).await.map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
-        Ok(())
-    }
-    async fn turn_state_proxies(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<gateway_core::account::OutboundProxy>, CoreStoreError> {
-        let urls = sqlx::query_scalar::<_, String>(
-            "select proxy_url from outbound_proxies where id = any($1::text[]) order by id",
-        )
-        .bind(ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::Unavailable))?;
-        urls.into_iter()
-            .map(|url| {
-                gateway_core::account::OutboundProxy::parse(&url)
-                    .map_err(|_| CoreStoreError::new(CoreStoreErrorKind::InvalidData))
-            })
-            .collect()
-    }
-
-    async fn turn_state_buckets(
-        &self,
-    ) -> Result<Vec<gateway_core::account::TurnStateBucket>, CoreStoreError> {
-        self.load_turn_state_buckets().await
-    }
-
-    async fn turn_state_bucket(
-        &self,
-        account: &CoreProviderAccountId,
-        model: &str,
-    ) -> Result<Option<gateway_core::account::TurnStateBucket>, CoreStoreError> {
-        self.load_turn_state_bucket(account, model).await
-    }
-
-    async fn observe_turn_state(
-        &self,
-        observation: gateway_core::account::TurnStateObservation,
-        candidate: Option<gateway_core::account::TurnStateToken>,
-    ) -> Result<(), CoreStoreError> {
-        self.record_turn_state(observation, candidate).await
-    }
-
-    async fn install_turn_state(
-        &self,
-        account: &CoreProviderAccountId,
-        model: &str,
-    ) -> Result<bool, CoreStoreError> {
-        self.install_turn_state_candidate(account, model).await
-    }
-
-    async fn observe_installed_model(
-        &self,
-        account: &CoreProviderAccountId,
-        model: &str,
-        sent_state: &str,
-        reported_model: &str,
-        revoke_on_change: bool,
-        sent_cookie: Option<&gateway_core::account::RoutingCookie>,
-    ) -> Result<bool, CoreStoreError> {
-        self.note_installed_model(
-            account,
-            model,
-            sent_state,
-            reported_model,
-            revoke_on_change,
-            sent_cookie,
-        )
-        .await
-    }
-
     async fn create_account(&self, account: CoreNewProviderAccount) -> Result<(), CoreStoreError> {
         if account.account.revision().get() != 1 {
             return Err(CoreStoreError::new(CoreStoreErrorKind::InvalidData));
@@ -175,7 +42,6 @@ impl ProviderAccountStore for PgProviderAccountRepository {
             next_refresh_at: account.account.next_refresh_at().map(DateTime::<Utc>::from),
             enabled: account.account.enabled(),
             concurrency_limit: account.account.concurrency_limit(),
-            bps_concurrency_limit: account.account.bps_concurrency_limit(),
             weight: account.account.weight(),
             model_access: Some(
                 account
@@ -321,18 +187,18 @@ impl ProviderAccountStore for PgProviderAccountRepository {
                  has_refresh_token = $7, access_token_expires_at = $8,
                  next_refresh_at = $9,
                  credential_state = case
-                   when $10::text is not null and enabled
+                   when $10::text is not null
                    then $10 else credential_state end,
                  credential_observed_at = case
-                   when $10::text is not null and enabled
+                   when $10::text is not null
                    then $11 else credential_observed_at end,
                  last_error_reason = case
-                   when $10::text is not null and enabled
+                   when $10::text is not null
                    then $12 else last_error_reason end,
                  last_error_message = case
-                   when $10::text is not null and enabled
+                   when $10::text is not null
                    then $13 else last_error_message end,
-                 updated_at = greatest(now(), coalesce($11, now()))
+                 updated_at = greatest(now(), updated_at, $11)
              where id = $1 and credential_revision = $2
              returning credential_revision",
         )

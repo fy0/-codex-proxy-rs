@@ -1,5 +1,7 @@
 import type { Ref } from 'vue'
 import type { getApiKeys } from '@/api'
+import type { ProviderRequestProfile, ProviderRequestProfiles } from '@/api/modules/client-profiles'
+import { toast } from '@codex-proxy/ui'
 import { ref, shallowRef, watch } from 'vue'
 import {
   createApiKey,
@@ -9,7 +11,6 @@ import {
   revealApiKey,
   updateApiKey,
 } from '@/api'
-import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useCopyText } from '@/composables/useCopyText'
 import { useIdSet } from '@/composables/useIdSet'
@@ -17,6 +18,7 @@ import { useIdSet } from '@/composables/useIdSet'
 type ApiKeyRow = Awaited<ReturnType<typeof getApiKeys>>['items'][number]
 
 export interface ApiKeyFormValue {
+  providerRequestProfileOverrides: ProviderRequestProfiles
   customKey: string
   name: string
   label: string
@@ -41,6 +43,7 @@ export function useApiKeyMutations(options: {
   const createdKeyName = shallowRef('')
   const editingKey = shallowRef<ApiKeyRow | null>(null)
   const pendingDeleteKey = shallowRef<ApiKeyRow | null>(null)
+  const deleteCount = shallowRef(0)
   const savingKeyAction = useAsyncAction()
   const deletingKeyAction = useAsyncAction()
   const batchDeletingAction = useAsyncAction()
@@ -52,6 +55,10 @@ export function useApiKeyMutations(options: {
   const updatingStatusKeyIds = updatingStatusKeys.ids
   const revealingKeyIds = revealingKeys.ids
   const form = ref<ApiKeyFormValue>(emptyForm())
+  watch([showDeleteModal, batchDeleting], ([open, busy]) => {
+    if (open && !busy)
+      deleteCount.value = options.selectedIds.value.size
+  })
 
   function openCreate() {
     editingKey.value = null
@@ -62,6 +69,7 @@ export function useApiKeyMutations(options: {
   function openEdit(key: ApiKeyRow) {
     editingKey.value = key
     form.value = {
+      providerRequestProfileOverrides: cloneProfiles(key.providerRequestProfileOverrides),
       customKey: '',
       name: key.name,
       label: key.label ?? '',
@@ -106,11 +114,19 @@ export function useApiKeyMutations(options: {
         }
         const current = editingKey.value
         if (current) {
-          await updateApiKey({ id: current.id, ...payload })
+          await updateApiKey({
+            id: current.id,
+            ...payload,
+            providerRequestProfileOverrides: profileOverrideUpdates(
+              current.providerRequestProfileOverrides,
+              form.value.providerRequestProfileOverrides,
+            ),
+          })
         }
         else {
           const result = await createApiKey({
             ...payload,
+            providerRequestProfileOverrides: cloneProfiles(form.value.providerRequestProfileOverrides),
             customKey: form.value.customKey || undefined,
           })
           createdKey.value = result.plaintextKey
@@ -118,8 +134,6 @@ export function useApiKeyMutations(options: {
         }
 
         showFormModal.value = false
-        editingKey.value = null
-        form.value = emptyForm()
         await options.reload()
         if (current) {
           toast.success('API Key 已更新')
@@ -180,7 +194,6 @@ export function useApiKeyMutations(options: {
         remaining.delete(keyId)
         options.selectedIds.value = remaining
         showSingleDeleteModal.value = false
-        pendingDeleteKey.value = null
         await options.reload()
         toast.success('删除成功')
       },
@@ -249,18 +262,14 @@ export function useApiKeyMutations(options: {
       await copyToClipboard(key)
   }
 
-  watch(showKeyModal, (open) => {
-    if (!open) {
-      createdKey.value = ''
-      createdKeyName.value = ''
-    }
-  })
-  watch(showFormModal, (open) => {
-    if (!open && !savingKey.value) {
-      editingKey.value = null
-      form.value = emptyForm()
-    }
-  })
+  function clearCreatedKey() {
+    createdKey.value = ''
+    createdKeyName.value = ''
+  }
+
+  function clearCustomKey() {
+    form.value.customKey = ''
+  }
 
   return {
     showFormModal,
@@ -272,6 +281,7 @@ export function useApiKeyMutations(options: {
     createdKeyName,
     editingKey,
     pendingDeleteKey,
+    deleteCount,
     savingKey,
     deletingKey,
     batchDeleting,
@@ -280,6 +290,8 @@ export function useApiKeyMutations(options: {
     form,
     openCreate,
     openEdit,
+    clearCustomKey,
+    clearCreatedKey,
     requestSave,
     confirmAllAccountsScope,
     requestDeleteKey,
@@ -294,6 +306,7 @@ export function useApiKeyMutations(options: {
 
 function emptyForm(): ApiKeyFormValue {
   return {
+    providerRequestProfileOverrides: {},
     customKey: '',
     name: '',
     label: '',
@@ -303,6 +316,22 @@ function emptyForm(): ApiKeyFormValue {
     dailyLimitUsd: '',
     weeklyLimitUsd: '',
   }
+}
+
+function cloneProfiles(value: ProviderRequestProfiles): ProviderRequestProfiles {
+  return JSON.parse(JSON.stringify(value)) as ProviderRequestProfiles
+}
+
+function profileOverrideUpdates(
+  previous: ProviderRequestProfiles,
+  current: ProviderRequestProfiles,
+): Record<string, ProviderRequestProfile | null> {
+  const updates: Record<string, ProviderRequestProfile | null> = cloneProfiles(current)
+  for (const provider of Object.keys(previous)) {
+    if (!Object.hasOwn(current, provider))
+      updates[provider] = null
+  }
+  return updates
 }
 
 function limitInputValue(limit: string | number) {

@@ -39,6 +39,7 @@ fn account_profile_debug_redacts_identity_fields() {
 #[test]
 fn plaintext_provider_schema_round_trips_dynamic_cookie_data() {
     let data = CodexCredentialData::OAuth(CodexOAuthCredentialData {
+        transport: provider_openai::credential::ResponsesTransport::PreferWebsocket,
         schema_version: 1,
         principal: Some(CodexCredentialPrincipal {
             oauth_subject: "subject-private".to_owned(),

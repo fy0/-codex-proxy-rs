@@ -1,0 +1,6 @@
+interface:
+  display_name: "cpr-release"
+  short_description: "版本规划、中文发布说明、正式与预发行发布及失败恢复"
+  default_prompt: "使用 $cpr-release 按当前请求准备版本与中文说明、执行已授权的发版或恢复失败步骤，核对渠道与实际结果。"
+policy:
+  allow_implicit_invocation: true

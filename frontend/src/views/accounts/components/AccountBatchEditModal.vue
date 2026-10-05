@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import type { AccountGroup, AccountModelAccess } from '@/api'
 
-import BaseButton from '@/components/base/BaseButton.vue'
-import BaseModal from '@/components/base/BaseModal/index.vue'
+import { BaseButton, BaseModal } from '@codex-proxy/ui'
 import AccountSettingsFields from './AccountSettingsFields.vue'
 
 defineProps<{

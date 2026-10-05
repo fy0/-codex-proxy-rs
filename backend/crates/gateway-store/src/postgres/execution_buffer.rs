@@ -2,23 +2,25 @@
 
 use std::mem::size_of;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use futures::future::try_join_all;
 use gateway_core::engine::{
-    AttemptRecord, ExecutionStore, IntermediateFailure, ModelRequestFinalization, ModelRequestId,
-    NewModelRequest, ProbeFailure, RecoveryReport,
+    AttemptRecord, EntryRejection, ExecutionStore, IntermediateFailure, ModelRequestFinalization,
+    ModelRequestId, NewModelRequest, ProbeFailure, RecoveryReport,
 };
 use gateway_core::error::{ProviderError, StoreError};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::task::{DaemonTask, WorkerTaskError};
 use gateway_core::upstream::UpstreamSendState;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 const DEFAULT_QUEUE_CAPACITY: usize = 4_096;
 const DEFAULT_QUEUE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+const PERSISTENCE_LANES: usize = 4;
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 执行观测缓冲区的进程内累计状态。
@@ -39,6 +41,7 @@ pub struct ExecutionBufferStats {
 }
 
 struct ExecutionBufferState {
+    maximum_queued_items: usize,
     maximum_queued_bytes: usize,
     queued_items: AtomicUsize,
     queued_bytes: AtomicUsize,
@@ -46,11 +49,13 @@ struct ExecutionBufferState {
     dropped_total: AtomicU64,
     persisted_total: AtomicU64,
     write_failure_total: AtomicU64,
+    idle: Notify,
 }
 
 impl ExecutionBufferState {
-    fn new(maximum_queued_bytes: NonZeroUsize) -> Self {
+    fn new(maximum_queued_items: NonZeroUsize, maximum_queued_bytes: NonZeroUsize) -> Self {
         Self {
+            maximum_queued_items: maximum_queued_items.get(),
             maximum_queued_bytes: maximum_queued_bytes.get(),
             queued_items: AtomicUsize::new(0),
             queued_bytes: AtomicUsize::new(0),
@@ -58,11 +63,19 @@ impl ExecutionBufferState {
             dropped_total: AtomicU64::new(0),
             persisted_total: AtomicU64::new(0),
             write_failure_total: AtomicU64::new(0),
+            idle: Notify::new(),
         }
     }
 
-    fn reserve(&self, bytes: usize) -> bool {
-        let reserved = self
+    fn reserve(&self, bytes: usize) -> Result<(), ReservationFailure> {
+        self.queued_items
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(1)
+                    .filter(|next| *next <= self.maximum_queued_items)
+            })
+            .map_err(|_| ReservationFailure::ItemCapacity)?;
+        let bytes_reserved = self
             .queued_bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
@@ -70,15 +83,22 @@ impl ExecutionBufferState {
                     .filter(|next| *next <= self.maximum_queued_bytes)
             })
             .is_ok();
-        if reserved {
-            self.queued_items.fetch_add(1, Ordering::Relaxed);
+        if !bytes_reserved {
+            self.release_item();
+            return Err(ReservationFailure::ByteCapacity);
         }
-        reserved
+        Ok(())
     }
 
     fn release(&self, bytes: usize) {
         self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
-        self.queued_items.fetch_sub(1, Ordering::AcqRel);
+        self.release_item();
+    }
+
+    fn release_item(&self) {
+        if self.queued_items.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_waiters();
+        }
     }
 
     fn record_enqueued(&self) {
@@ -112,6 +132,21 @@ impl ExecutionBufferState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservationFailure {
+    ItemCapacity,
+    ByteCapacity,
+}
+
+impl ReservationFailure {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::ItemCapacity => "item_capacity",
+            Self::ByteCapacity => "byte_capacity",
+        }
+    }
+}
+
 fn saturating_increment(counter: &AtomicU64, increment: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(increment))
@@ -124,7 +159,10 @@ fn saturating_increment(counter: &AtomicU64, increment: u64) {
 /// 等待 PostgreSQL，也不会看到 Store 错误。启动恢复仍直接访问底层 Store。
 pub struct BufferedExecutionStore<S: ?Sized> {
     inner: Arc<S>,
-    sender: mpsc::Sender<QueuedExecutionObservation>,
+    // lane transport 本身没有独立容量；所有发送只能经 `enqueue` 的全局 item/byte
+    // 预留进入，`QueuedExecutionObservation::drop` 负责归还，不能增加旁路发送入口。
+    senders: Box<[mpsc::UnboundedSender<QueuedExecutionObservation>]>,
+    next_unkeyed_lane: AtomicUsize,
     state: Arc<ExecutionBufferState>,
 }
 
@@ -156,17 +194,20 @@ impl<S: ?Sized> BufferedExecutionStore<S> {
         capacity: NonZeroUsize,
         maximum_queued_bytes: NonZeroUsize,
     ) -> (Self, ExecutionObservationWriter<S>) {
-        let (sender, receiver) = mpsc::channel(capacity.get());
-        let state = Arc::new(ExecutionBufferState::new(maximum_queued_bytes));
+        let lane_count = PERSISTENCE_LANES.min(capacity.get());
+        let (senders, receivers): (Vec<_>, Vec<_>) =
+            (0..lane_count).map(|_| mpsc::unbounded_channel()).unzip();
+        let state = Arc::new(ExecutionBufferState::new(capacity, maximum_queued_bytes));
         (
             Self {
                 inner: Arc::clone(&inner),
-                sender,
+                senders: senders.into_boxed_slice(),
+                next_unkeyed_lane: AtomicUsize::new(0),
                 state: Arc::clone(&state),
             },
             ExecutionObservationWriter {
                 inner,
-                receiver: Mutex::new(receiver),
+                receivers: receivers.into_iter().map(Mutex::new).collect(),
                 state,
             },
         )
@@ -182,29 +223,30 @@ impl<S: ?Sized> BufferedExecutionStore<S> {
             .estimated_bytes()
             .saturating_add(write.request_id().map_or(0, str::len))
             .max(1);
-        if !self.state.reserve(estimated_bytes) {
+        if let Err(failure) = self.state.reserve(estimated_bytes) {
             self.state.record_dropped(1);
             let stats = self.state.snapshot();
             tracing::warn!(
                 operation = write.operation(),
                 request_id = ?write.request_id(),
-                reason = "byte_capacity",
+                reason = failure.reason(),
                 estimated_bytes,
+                maximum_queued_items = self.state.maximum_queued_items,
                 maximum_queued_bytes = self.state.maximum_queued_bytes,
+                queued_items = stats.queued_items,
+                queued_bytes = stats.queued_bytes,
                 dropped_total = stats.dropped_total,
-                "执行观测队列字节预算不足，已丢弃本次写入"
+                "执行观测队列容量不足，已丢弃本次写入"
             );
             return;
         }
         let queued =
             QueuedExecutionObservation::new(write, estimated_bytes, Arc::clone(&self.state));
-        match self.sender.try_send(queued) {
+        let lane = self.lane(queued.request_id());
+        match self.senders[lane].send(queued) {
             Ok(()) => self.state.record_enqueued(),
             Err(error) => {
-                let (reason, queued) = match error {
-                    mpsc::error::TrySendError::Full(queued) => ("full", queued),
-                    mpsc::error::TrySendError::Closed(queued) => ("closed", queued),
-                };
+                let queued = error.0;
                 let operation = queued.operation();
                 let request_id = queued.request_id().map(ToOwned::to_owned);
                 drop(queued);
@@ -213,7 +255,8 @@ impl<S: ?Sized> BufferedExecutionStore<S> {
                 tracing::warn!(
                     operation,
                     request_id = ?request_id,
-                    reason,
+                    reason = "closed",
+                    lane,
                     queued_items = stats.queued_items,
                     queued_bytes = stats.queued_bytes,
                     dropped_total = stats.dropped_total,
@@ -222,6 +265,23 @@ impl<S: ?Sized> BufferedExecutionStore<S> {
             }
         }
     }
+
+    fn lane(&self, request_id: Option<&str>) -> usize {
+        request_id.map_or_else(
+            || self.next_unkeyed_lane.fetch_add(1, Ordering::Relaxed) % self.senders.len(),
+            |request_id| request_lane(request_id, self.senders.len()),
+        )
+    }
+}
+
+fn request_lane(request_id: &str, lane_count: usize) -> usize {
+    // request ID 由 Core 生成，不含用户选择的散列输入；固定散列只用于进程内顺序亲和。
+    let hash = request_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    usize::try_from(hash % u64::try_from(lane_count).unwrap_or(u64::MAX)).unwrap_or(0)
 }
 
 #[async_trait]
@@ -298,6 +358,13 @@ where
         Ok(())
     }
 
+    async fn record_entry_rejection(&self, rejection: EntryRejection) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::EntryRejection(Box::new(
+            rejection,
+        )));
+        Ok(())
+    }
+
     async fn record_probe_failure(&self, failure: ProbeFailure) -> Result<(), StoreError> {
         self.enqueue(ExecutionObservationWrite::ProbeFailure(Box::new(failure)));
         Ok(())
@@ -316,10 +383,16 @@ where
     }
 }
 
-/// 由 Host 监督的单消费者，保证同一请求的观测命令按入队顺序落库。
+/// 由 Host 监督的固定并行写泵；同一 request ID 固定落在一个 lane 并按入队顺序落库。
+///
+/// lane transport 共享 Store 的全局 item/byte 预留，正在写入的项目同样计入总上限。
 pub struct ExecutionObservationWriter<S: ?Sized> {
     inner: Arc<S>,
-    receiver: Mutex<mpsc::Receiver<QueuedExecutionObservation>>,
+    receivers: Box<[Mutex<mpsc::UnboundedReceiver<QueuedExecutionObservation>>]>,
+    state: Arc<ExecutionBufferState>,
+}
+
+pub(crate) struct ExecutionBufferIdle {
     state: Arc<ExecutionBufferState>,
 }
 
@@ -327,6 +400,47 @@ impl<S: ?Sized> ExecutionObservationWriter<S> {
     #[must_use]
     pub fn stats(&self) -> ExecutionBufferStats {
         self.state.snapshot()
+    }
+
+    /// 等待所有已接收写入结束一次持久化尝试。
+    ///
+    /// 队列计数包含正在写入的项目；失败沿用现有 fail-open 计数且不会由本方法重试。
+    /// 返回 `false` 表示到达截止时间时仍有排队或正在写入的项目。
+    pub async fn wait_until_idle(&self, deadline: Instant) -> bool {
+        self.idle().wait_until(deadline).await
+    }
+
+    pub(crate) fn idle(&self) -> ExecutionBufferIdle {
+        ExecutionBufferIdle {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl ExecutionBufferIdle {
+    /// 等待所有已接收写入结束一次持久化尝试；队列计数包含正在写入的项目，
+    /// 写入失败沿用现有 fail-open 计数且不在关闭路径重试。
+    pub(crate) async fn wait_until(&self, deadline: Instant) -> bool {
+        loop {
+            if self.state.queued_items.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            let idle = self.state.idle.notified();
+            tokio::pin!(idle);
+            let _ = idle.as_mut().enable();
+            // 在订阅前后各检查一次，覆盖最后一个写入恰好在注册等待时结束的竞态。
+            if self.state.queued_items.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero()
+                || tokio::time::timeout(remaining, idle.as_mut())
+                    .await
+                    .is_err()
+            {
+                return false;
+            }
+        }
     }
 }
 
@@ -339,26 +453,88 @@ where
         cancellation: CancellationToken,
     ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
         Box::pin(async move {
-            let mut receiver = self.receiver.lock().await;
-            loop {
-                let queued = tokio::select! {
-                    () = cancellation.cancelled() => {
-                        drain_on_shutdown(
-                            &mut receiver,
-                            self.inner.as_ref(),
-                            self.state.as_ref(),
-                        ).await;
-                        return Ok(());
-                    },
-                    queued = receiver.recv() => queued,
-                };
-                let Some(queued) = queued else {
-                    return Err(WorkerTaskError::safe("execution observation queue closed"));
-                };
-                persist_queued(queued, self.inner.as_ref()).await;
-            }
+            let shutdown_deadline = OnceLock::new();
+            try_join_all(self.receivers.iter().enumerate().map(|(lane, receiver)| {
+                run_lane(
+                    lane,
+                    receiver,
+                    self.inner.as_ref(),
+                    self.state.as_ref(),
+                    cancellation.clone(),
+                    &shutdown_deadline,
+                )
+            }))
+            .await?;
+            Ok(())
         })
     }
+}
+
+async fn run_lane<S>(
+    lane: usize,
+    receiver: &Mutex<mpsc::UnboundedReceiver<QueuedExecutionObservation>>,
+    store: &S,
+    state: &ExecutionBufferState,
+    cancellation: CancellationToken,
+    shutdown_deadline: &OnceLock<Instant>,
+) -> Result<(), WorkerTaskError>
+where
+    S: ExecutionStore + ?Sized,
+{
+    let mut receiver = receiver.lock().await;
+    loop {
+        let queued = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                drain_on_shutdown(
+                    lane,
+                    &mut receiver,
+                    store,
+                    state,
+                    shared_shutdown_deadline(shutdown_deadline),
+                ).await;
+                return Ok(());
+            },
+            queued = receiver.recv() => queued,
+        };
+        let Some(queued) = queued else {
+            return Err(WorkerTaskError::safe(
+                "execution observation queue lane closed",
+            ));
+        };
+        let operation = queued.operation();
+        let request_id = queued.request_id().map(ToOwned::to_owned);
+        let mut persistence = Box::pin(persist_queued(queued, store));
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                let deadline = shared_shutdown_deadline(shutdown_deadline);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero()
+                    || tokio::time::timeout(remaining, &mut persistence).await.is_err()
+                {
+                    state.record_dropped(1);
+                    let stats = state.snapshot();
+                    tracing::warn!(
+                        operation,
+                        request_id = ?request_id,
+                        lane,
+                        dropped_total = stats.dropped_total,
+                        drain_timeout_ms = u64::try_from(SHUTDOWN_DRAIN_TIMEOUT.as_millis())
+                            .unwrap_or(u64::MAX),
+                        "执行观测队列关闭时当前写入未在期限内完成，已停止等待"
+                    );
+                }
+                drain_on_shutdown(lane, &mut receiver, store, state, deadline).await;
+                return Ok(());
+            },
+            () = &mut persistence => {},
+        }
+    }
+}
+
+fn shared_shutdown_deadline(deadline: &OnceLock<Instant>) -> Instant {
+    *deadline.get_or_init(|| Instant::now() + SHUTDOWN_DRAIN_TIMEOUT)
 }
 
 async fn persist_queued<S>(mut queued: QueuedExecutionObservation, store: &S)
@@ -396,19 +572,20 @@ where
 }
 
 async fn drain_on_shutdown<S>(
-    receiver: &mut mpsc::Receiver<QueuedExecutionObservation>,
+    lane: usize,
+    receiver: &mut mpsc::UnboundedReceiver<QueuedExecutionObservation>,
     store: &S,
     state: &ExecutionBufferState,
+    deadline: Instant,
 ) where
     S: ExecutionStore + ?Sized,
 {
     receiver.close();
     let queued_at_shutdown = receiver.len();
-    let started_at = Instant::now();
     let mut dropped = 0_usize;
 
     while let Some(queued) = receiver.recv().await {
-        let remaining = SHUTDOWN_DRAIN_TIMEOUT.saturating_sub(started_at.elapsed());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             drop(queued);
             dropped = dropped.saturating_add(1);
@@ -431,6 +608,7 @@ async fn drain_on_shutdown<S>(
         state.record_dropped(dropped);
         let stats = state.snapshot();
         tracing::warn!(
+            lane,
             queued_at_shutdown,
             dropped,
             dropped_total = stats.dropped_total,
@@ -439,7 +617,7 @@ async fn drain_on_shutdown<S>(
             "执行观测队列关闭排空超时，剩余写入已丢弃"
         );
     } else if queued_at_shutdown > 0 {
-        tracing::info!(queued_at_shutdown, "执行观测队列已在关闭前排空");
+        tracing::info!(lane, queued_at_shutdown, "执行观测队列已在关闭前排空");
     }
 }
 
@@ -506,6 +684,7 @@ enum ExecutionObservationWrite {
     },
     IntermediateFailure(Box<IntermediateFailure>),
     ProbeFailure(Box<ProbeFailure>),
+    EntryRejection(Box<EntryRejection>),
     Finalize(Box<ModelRequestFinalization>),
 }
 
@@ -520,6 +699,7 @@ impl ExecutionObservationWrite {
             Self::RecordClientStatus { .. } => "record_client_status",
             Self::IntermediateFailure(_) => "record_intermediate_failure",
             Self::ProbeFailure(_) => "record_probe_failure",
+            Self::EntryRejection(_) => "record_entry_rejection",
             Self::Finalize(_) => "finalize_model_request",
         }
     }
@@ -533,7 +713,7 @@ impl ExecutionObservationWrite {
             | Self::MarkDownstreamCommitted { request_id, .. }
             | Self::RecordClientStatus { request_id, .. } => Some(request_id.as_str()),
             Self::IntermediateFailure(failure) => Some(failure.request_id.as_str()),
-            Self::ProbeFailure(_) => None,
+            Self::ProbeFailure(_) | Self::EntryRejection(_) => None,
             Self::Finalize(finalization) => Some(finalization.request_id.as_str()),
         }
     }
@@ -559,6 +739,14 @@ impl ExecutionObservationWrite {
                 failure.upstream_request_id.as_deref(),
             ])
             .saturating_add(provider_error_bytes(&failure.error)),
+            Self::EntryRejection(rejection) => text_bytes([
+                Some(rejection.request_id.as_str()),
+                Some(rejection.client_key_id.as_str()),
+                Some(rejection.error.client_message()),
+                rejection.error.client_error_code(),
+                rejection.error.client_error_type(),
+            ])
+            .saturating_add(size_of::<EntryRejection>()),
             Self::ProbeFailure(failure) => text_bytes([
                 Some(failure.provider_kind.as_str()),
                 Some(failure.account_id.as_str()),
@@ -628,6 +816,7 @@ impl ExecutionObservationWrite {
             }
             Self::IntermediateFailure(failure) => store.record_intermediate_failure(*failure).await,
             Self::ProbeFailure(failure) => store.record_probe_failure(*failure).await,
+            Self::EntryRejection(rejection) => store.record_entry_rejection(*rejection).await,
             Self::Finalize(finalization) => store.finalize_model_request(*finalization).await,
         }
     }

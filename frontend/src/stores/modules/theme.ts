@@ -5,12 +5,9 @@ import type {
   ThemeColorId,
   ThemeCustomization,
   ThemeMode,
-} from '@/theme'
+} from '@codex-proxy/ui/theme'
 
-import { usePreferredDark, usePreferredReducedMotion, useTimeoutFn } from '@vueuse/core'
-import { defineStore } from 'pinia'
-import { computed, ref, shallowRef, watch } from 'vue'
-
+import { normalizeHexColor } from '@codex-proxy/ui'
 import {
   applyResolvedTheme,
   DEFAULT_CUSTOM_THEME_COLOR,
@@ -21,8 +18,11 @@ import {
   normalizeThemeCustomization,
   resolveTheme,
   resolveThemeName,
-} from '@/theme'
-import { normalizeHexColor } from '@/utils/color'
+} from '@codex-proxy/ui/theme'
+import { usePreferredDark, usePreferredReducedMotion, useTimeoutFn } from '@vueuse/core'
+
+import { defineStore } from 'pinia'
+import { computed, ref, shallowRef, watch } from 'vue'
 
 interface ThemeTransitionOrigin {
   x: number

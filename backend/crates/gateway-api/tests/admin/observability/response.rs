@@ -1,207 +1,7 @@
 //! 响应 DTO 与固定 wire 形状的合同测试。
 
-use chrono::{TimeZone, Utc};
-use gateway_admin::model::observability::DesktopReleaseStatus;
-use gateway_api::admin::observability::{
-    BillingView, CostCoverageView, DashboardAccountRequestBucketView, DashboardAccountUsageView,
-    DashboardDesktopReleaseStatusView, DashboardWireAttributeView, DashboardWireProfileView,
-    DashboardWireTargetView, PageData, TokenDetailsView, TrendData, TrendKind, TrendPointView,
-    TrendSummaryView,
-};
+use chrono::Utc;
 use serde_json::json;
-
-#[test]
-fn usage_page_should_keep_terminal_camel_case_shape() {
-    let data = PageData {
-        items: vec![json!({"id": "request_1"})],
-        current_page: 129,
-        page_size: 10,
-        total: 1287,
-    };
-    let value = serde_json::to_value(data).unwrap();
-    assert_eq!(value["currentPage"], 129);
-    assert_eq!(value["pageSize"], 10);
-    assert_eq!(value["total"], 1287);
-    assert!(value.get("nextCursor").is_none());
-}
-
-#[test]
-fn dashboard_wire_profiles_should_keep_provider_specific_attributes() {
-    let value = serde_json::to_value(DashboardWireProfileView {
-        provider: "xai".to_owned(),
-        product: "Grok Build".to_owned(),
-        version: "0.2.106".to_owned(),
-        build: None,
-        target: DashboardWireTargetView {
-            os_type: "linux".to_owned(),
-            os_version: "—".to_owned(),
-            arch: "x86_64".to_owned(),
-            terminal: "headless".to_owned(),
-        },
-        user_agent: "grok-shell/0.2.106 (linux; x86_64)".to_owned(),
-        attributes: vec![DashboardWireAttributeView {
-            label: "客户端标识".to_owned(),
-            value: "grok-shell".to_owned(),
-        }],
-        verified_at: None,
-        release: None,
-    })
-    .expect("dashboard profile");
-
-    assert_eq!(value["provider"], "xai");
-    assert_eq!(value["version"], "0.2.106");
-    assert_eq!(value["attributes"][0]["label"], "客户端标识");
-    assert!(value.get("release").is_none());
-    assert!(value.get("verifiedAt").is_none());
-}
-
-#[test]
-fn dashboard_account_usage_should_keep_daily_request_timeline() {
-    let bucket_start = Utc.timestamp_opt(0, 0).single().unwrap();
-    let value = serde_json::to_value(DashboardAccountUsageView {
-        id: "account_1".to_owned(),
-        provider: "xai".to_owned(),
-        authentication_kind: "oauth".to_owned(),
-        email: "account@example.com".to_owned(),
-        plan_type: Some("free".to_owned()),
-        plan_type_display: "Free".to_owned(),
-        tokens: "—".to_owned(),
-        request_count: 3,
-        request_buckets: vec![DashboardAccountRequestBucketView {
-            bucket_start,
-            request_count: 3,
-        }],
-        quota_used_percent: None,
-        usage_window: None,
-        metric_label: "次数".to_owned(),
-        metric_value: "3".to_owned(),
-        last_used: "刚刚".to_owned(),
-    })
-    .expect("dashboard account usage");
-
-    assert_eq!(value["requestCount"], 3);
-    assert_eq!(
-        value["requestBuckets"][0]["bucketStart"],
-        "1970-01-01T00:00:00Z"
-    );
-    assert_eq!(value["requestBuckets"][0]["requestCount"], 3);
-}
-
-#[test]
-fn trend_wire_should_serialize_kind_and_values_without_store_types() {
-    let now = Utc.timestamp_opt(0, 0).single().unwrap();
-    let data = TrendData {
-        kind: TrendKind::Usage,
-        points: vec![TrendPointView {
-            time: "08:00".to_owned(),
-            bucket: now,
-            label: "01-01 08:00".to_owned(),
-            requests: "1".to_owned(),
-            requests_value: 1,
-            input_tokens: "2".to_owned(),
-            input_tokens_value: 2,
-            output_tokens: "3".to_owned(),
-            output_tokens_value: 3,
-            cached_tokens: "0".to_owned(),
-            cached_tokens_value: 0,
-            cache_hit_rate_value: 0.0,
-            tokens_value: 5,
-            errors: "0".to_owned(),
-            errors_value: 0,
-            latency: "1 ms".to_owned(),
-            latency_value: Some(1),
-            max_latency: "1 ms".to_owned(),
-            max_latency_value: Some(1),
-            min_latency: "1 ms".to_owned(),
-            min_latency_value: Some(1),
-            success_rate: "100.0%".to_owned(),
-            success_rate_value: Some(100.0),
-            first_token_p50_ms: Some(1.0),
-            first_token_p95_ms: Some(2.0),
-            latency_p95_ms: Some(3.0),
-            output_throughput_p50: Some(50),
-            admission_decision_p95_ms: Some(4.0),
-            account_selection_wait_p95_ms: Some(5.0),
-            capacity_utilization: Some(0.7),
-        }],
-        summary: vec![TrendSummaryView {
-            label: "输入".to_owned(),
-            value: "2".to_owned(),
-            ratio: None,
-        }],
-    };
-    let value = serde_json::to_value(data).unwrap();
-    assert_eq!(value["kind"], "usage");
-    assert_eq!(value["points"][0]["requestsValue"], 1);
-}
-
-#[test]
-fn sensitive_response_views_do_not_require_debug_or_add_secret_fields() {
-    let coverage = CostCoverageView {
-        known: 1,
-        partial: 0,
-        unknown: 0,
-        not_billable: 0,
-    };
-    let token_details = TokenDetailsView {
-        input_tokens: Some(1),
-        output_tokens: Some(2),
-        cached_tokens: None,
-        cache_write_tokens: None,
-        reasoning_tokens: None,
-        image_input_tokens: None,
-        image_output_tokens: None,
-        total_tokens: Some(3),
-        input_tokens_display: "1".to_owned(),
-        output_tokens_display: "2".to_owned(),
-        cached_tokens_display: "-".to_owned(),
-        cache_write_tokens_display: "-".to_owned(),
-        reasoning_tokens_display: "-".to_owned(),
-        image_input_tokens_display: "-".to_owned(),
-        image_output_tokens_display: "-".to_owned(),
-        total_tokens_display: "3".to_owned(),
-    };
-    let value = serde_json::to_value((&coverage, &token_details)).unwrap();
-    assert!(value.to_string().contains("known"));
-    assert!(!value.to_string().contains("secret"));
-}
-
-#[test]
-fn billing_view_should_preserve_the_original_detail_contract() {
-    let value = serde_json::to_value(BillingView {
-        input_amount_display: "$0.03".to_owned(),
-        output_amount_display: "$0.00".to_owned(),
-        cache_read_amount_display: "$0.14".to_owned(),
-        cache_write_amount_display: "$0.00".to_owned(),
-        standard_amount_display: "$0.17".to_owned(),
-        total_amount_display: "$0.17".to_owned(),
-        input_price_display: "$10.0000 / 1M Token".to_owned(),
-        output_price_display: "$60.0000 / 1M Token".to_owned(),
-        cache_read_price_display: "$1.0000 / 1M Token".to_owned(),
-        cache_write_price_display: "$12.5000 / 1M Token".to_owned(),
-        service_tier_display: "Fast".to_owned(),
-        multiplier_display: "1.00x".to_owned(),
-    })
-    .expect("billing view");
-
-    assert_eq!(value["inputAmountDisplay"], "$0.03");
-    assert_eq!(value["cacheReadPriceDisplay"], "$1.0000 / 1M Token");
-    assert_eq!(value["serviceTierDisplay"], "Fast");
-    assert_eq!(value["multiplierDisplay"], "1.00x");
-}
-
-#[test]
-fn desktop_release_status_should_preserve_the_existing_dashboard_wire_values() {
-    for (domain, expected) in [
-        (DesktopReleaseStatus::Unchecked, "unchecked"),
-        (DesktopReleaseStatus::Current, "aligned"),
-        (DesktopReleaseStatus::UpdateAvailable, "review_required"),
-        (DesktopReleaseStatus::Failed, "check_failed"),
-    ] {
-        let status = DashboardDesktopReleaseStatusView::from(domain);
-        assert_eq!(serde_json::to_value(status).unwrap(), expected);
-    }
-}
 
 #[tokio::test]
 async fn dashboard_summary_should_include_quota_exhaustion_in_unavailable_headline_count() {
@@ -357,14 +157,14 @@ async fn dashboard_summary_should_use_lifetime_totals_for_card_footers() {
 }
 
 #[tokio::test]
-async fn dashboard_summary_should_default_to_current_china_day() {
+async fn dashboard_summary_should_default_to_current_deployment_day() {
     use axum::{
         body::Body,
         http::{Request, StatusCode, header},
     };
     use chrono::{Duration, Utc};
     use gateway_admin::model::observability::{
-        AccountPoolMetrics, DashboardObservation, TimeRange, china_day_start,
+        AccountPoolMetrics, DashboardObservation, TimeRange,
     };
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
@@ -406,7 +206,12 @@ async fn dashboard_summary_should_default_to_current_china_day() {
         .expect("recorded dashboard summary range");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(range.start, china_day_start(range.end));
+    assert_eq!(
+        range.start,
+        gateway_core::time::DeploymentTimeZone::default()
+            .day_start(range.end)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -630,6 +435,7 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
         .lock()
         .expect("ops errors")
         .push(OpsError {
+            client_api_key_name: Some("Production".to_owned()),
             source: "model_request".to_owned(),
             event_id: "err_snapshot".to_owned(),
             request_id: Some("req_err".to_owned()),
@@ -646,6 +452,8 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
             provider_account_ref: Some("acct_err".to_owned()),
             provider_account_name: None,
             provider_account_email: Some("err@example.invalid".to_owned()),
+            provider_account_plan_type: Some("pro".to_owned()),
+            provider_account_plan_type_display: Some("Pro".to_owned()),
             provider_account_authentication_kind: Some("api_key".to_owned()),
             upstream_model_id: Some("upstream-err".to_owned()),
             upstream_transport: Some("http_sse".to_owned()),
@@ -700,6 +508,7 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
         .await
         .expect("ops errors body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("ops errors JSON");
+    assert_eq!(value["data"]["items"][0]["clientApiKeyName"], "Production");
     assert_eq!(
         serde_json::json!({
             "provider": value["data"]["items"][0]["provider"],
@@ -707,6 +516,8 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
             "kind": value["data"]["items"][0]["kind"],
             "accountId": value["data"]["items"][0]["accountId"],
             "accountLabel": value["data"]["items"][0]["metadata"]["accountLabel"],
+            "accountPlanType": value["data"]["items"][0]["accountPlanType"],
+            "accountPlanTypeDisplay": value["data"]["items"][0]["accountPlanTypeDisplay"],
             "clientStatusCode": value["data"]["items"][0]["clientStatusCode"],
             "route": value["data"]["items"][0]["route"],
             "requestedModel": value["data"]["items"][0]["requestedModel"],
@@ -726,6 +537,8 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
             "kind": "model_request",
             "accountId": "acct_err",
             "accountLabel": "err@example.invalid",
+            "accountPlanType": "pro",
+            "accountPlanTypeDisplay": "Pro",
             "clientStatusCode": 502,
             "route": "/v1/responses",
             "requestedModel": "gpt-5.4",
@@ -748,7 +561,9 @@ async fn diagnostics_should_keep_stable_key_and_display_name_contract() {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
-    use gateway_admin::model::observability::{CostCoverage, DiagnosticObservation};
+    use gateway_admin::model::observability::{
+        CostCoverage, DiagnosticObservation, DiagnosticsObservation,
+    };
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
 
@@ -756,26 +571,28 @@ async fn diagnostics_should_keep_stable_key_and_display_name_contract() {
 
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
-    fixture
-        .diagnostics
-        .lock()
-        .expect("diagnostics")
-        .push(DiagnosticObservation {
+    *fixture.diagnostics.lock().expect("diagnostics") = DiagnosticsObservation {
+        total_request_count: 4,
+        items: vec![DiagnosticObservation {
             key: "acct_diag".to_owned(),
+            account_provider_kind: Some("openai".to_owned()),
+            account_plan_type: Some("pro".to_owned()),
             name: "diag@example.invalid".to_owned(),
             request_count: 2,
             success_count: 2,
             failure_count: 0,
-            attempt_count: 2,
+            attempt_count: 5,
             total_tokens: 200,
             average_latency_ms: Some(100),
             latency_p95_ms: Some(3800),
             first_token_p95_ms: Some(1200),
             non_completion_count: 0,
-            retry_count: 0,
+            retry_count: 3,
+            retried_request_count: 1,
             cost_coverage: CostCoverage::default(),
             costs: Vec::new(),
-        });
+        }],
+    };
     let response = observability::router::<AdminTestState>()
         .with_state(fixture.state())
         .oneshot(
@@ -793,6 +610,12 @@ async fn diagnostics_should_keep_stable_key_and_display_name_contract() {
         .await
         .expect("diagnostics body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("diagnostics JSON");
+    assert!(value["data"]["items"][0].get("impactScore").is_none());
+    assert_eq!(value["data"]["items"][0]["requestShare"], 0.5);
+    assert_eq!(value["data"]["items"][0]["retryCount"], 3);
+    assert_eq!(value["data"]["items"][0]["retryRate"], 0.5);
+    assert_eq!(value["data"]["items"][0]["accountPlanType"], "pro");
+    assert_eq!(value["data"]["items"][0]["accountPlanTypeDisplay"], "Pro");
     assert_eq!(
         (
             &value["data"]["items"][0]["key"],
@@ -953,6 +776,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            client_api_key_name: Some("Production".to_owned()),
             id: "request_endpoint".to_owned(),
             endpoint: "/v1/responses".to_owned(),
             client_transport: "websocket".to_owned(),
@@ -961,6 +785,9 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             provider_account_ref: Some("acct_snapshot".to_owned()),
             provider_account_name: Some("Snapshot Alpha".to_owned()),
             provider_account_email: Some("alpha@example.invalid".to_owned()),
+            provider_account_notes: Some("Team workspace".to_owned()),
+            provider_account_plan_type: Some("supergrok_plus".to_owned()),
+            provider_account_plan_type_display: None,
             provider_account_authentication_kind: Some("oauth".to_owned()),
             upstream_model_id: Some("grok-4.5".to_owned()),
             upstream_transport: Some("http_sse".to_owned()),
@@ -979,6 +806,9 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             cost_currency: None,
             billing: Some(UsageBilling::Calculated(Box::new(
                 CalculatedBillingBreakdown {
+                    long_context_billing_applied: true,
+                    custom_multiplier_bps: 10_000,
+                    image: None,
                     input_amount: usd("0.03"),
                     output_amount: usd("0.07"),
                     cache_read_amount: usd("0.00"),
@@ -1048,6 +878,24 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .expect("usage response body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("usage response JSON");
 
+    assert_eq!(value["data"]["items"][0]["clientApiKeyName"], "Production");
+    assert_eq!(value["data"]["items"][0]["accountNotes"], "Team workspace");
+    assert_eq!(
+        value["data"]["items"][0]["accountPlanType"],
+        "supergrok_plus"
+    );
+    assert_eq!(
+        value["data"]["items"][0]["accountPlanTypeDisplay"],
+        "SupergrokPlus"
+    );
+    assert_eq!(
+        value["data"]["items"][0]["billing"]["longContextBillingApplied"],
+        true
+    );
+    assert_eq!(
+        value["data"]["items"][1]["billing"]["longContextBillingApplied"],
+        false
+    );
     assert_eq!(
         value["data"]["items"][0]["billing"]["inputPriceDisplay"],
         "$10 / 1M Token"
@@ -1137,4 +985,148 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         value["data"]["items"][2]["billing"]["totalAmountDisplay"],
         "$0.007"
     );
+}
+
+#[tokio::test]
+async fn calendar_queries_and_display_follow_deployment_timezone_with_one_anchor() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use gateway_admin::model::observability::{CalendarPeriod, DashboardObservation, TimeRange};
+    use gateway_api::admin::observability;
+    use gateway_core::time::DeploymentTimeZone;
+    use tower::ServiceExt as _;
+
+    for (name, anchor, start, display, slots) in [
+        (
+            "Asia/Shanghai",
+            "2026-10-01T00:00:00Z",
+            "2026-09-30T16:00:00Z",
+            "2026-10-01 08:00:00",
+            96,
+        ),
+        (
+            "UTC",
+            "2026-10-01T00:00:00Z",
+            "2026-10-01T00:00:00Z",
+            "2026-10-01 00:00:00",
+            96,
+        ),
+        (
+            "Asia/Kathmandu",
+            "2026-10-01T00:00:00Z",
+            "2026-09-30T18:15:00Z",
+            "2026-10-01 05:45:00",
+            96,
+        ),
+        (
+            "America/New_York",
+            "2026-03-09T03:59:00Z",
+            "2026-03-08T05:00:00Z",
+            "2026-03-08 23:59:00",
+            92,
+        ),
+        (
+            "America/New_York",
+            "2026-11-02T04:59:00Z",
+            "2026-11-01T04:00:00Z",
+            "2026-11-01 23:59:00",
+            100,
+        ),
+    ] {
+        let timezone: DeploymentTimeZone = name.parse().unwrap();
+        let end: chrono::DateTime<Utc> = anchor.parse().unwrap();
+        let range = TimeRange::calendar_at(CalendarPeriod::Today, end, timezone).unwrap();
+        let fixture = AdminTestFixture::with_timezone(timezone).await;
+        fixture.auth.insert_session("valid-session");
+        *fixture.dashboard_observation.lock().unwrap() = Some(DashboardObservation {
+            range,
+            totals: Default::default(),
+            provider_accounts: Default::default(),
+            trend: Vec::new(),
+            account_usage: Vec::new(),
+            recent_requests: Vec::new(),
+        });
+        let router = observability::router::<AdminTestState>().with_state(fixture.state());
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/admin/dashboard/summary?period=today&asOf={}",
+                        end.timestamp_millis()
+                    ))
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .header("x-request-id", "req_timezone_calendar")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{name}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let queried = fixture.dashboard_summary_range.lock().unwrap().unwrap();
+        assert_eq!(
+            queried.start,
+            start.parse::<chrono::DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(queried.end, end);
+        assert_eq!(value["data"]["asOf"], anchor);
+        assert_eq!(value["data"]["asOfDisplay"], display);
+        let points = value["data"]["healthTimeline"]["points"]
+            .as_array()
+            .unwrap();
+        assert_eq!(points.len(), slots);
+        let labels = points
+            .iter()
+            .map(|p| p["time"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(labels.len(), slots, "fold labels remain distinct");
+        let invalid = router.oneshot(Request::builder()
+            .uri(format!("/api/admin/dashboard/summary?period=today&asOf={}&startTime=2026-01-01T00%3A00%3A00Z", end.timestamp_millis()))
+            .header(header::COOKIE, "cpr_session=valid-session")
+            .header("x-request-id", "req_timezone_mixed_range")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn calendar_query_rejects_an_anchor_outside_the_local_calendar() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use gateway_api::admin::observability;
+    use tower::ServiceExt as _;
+
+    let fixture = AdminTestFixture::with_timezone(Default::default()).await;
+    fixture.auth.insert_session("valid-session");
+    let response = observability::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/admin/dashboard/summary?period=today&asOf={}",
+                    chrono::DateTime::<chrono::Utc>::MAX_UTC.timestamp_millis()
+                ))
+                .header(header::COOKIE, "cpr_session=valid-session")
+                .header("x-request-id", "req_timezone_out_of_range")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(fixture.dashboard_summary_range.lock().unwrap().is_none());
 }

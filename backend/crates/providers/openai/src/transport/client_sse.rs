@@ -46,6 +46,16 @@ use crate::transport::{
 use super::client::*;
 
 impl CodexBackendClient {
+    pub(crate) const fn profile_state(&self) -> &CodexWireProfileState {
+        &self.profile
+    }
+
+    /// 请求只持有自己的画像副本；连接池和 HTTP client 继续共享既有资源。
+    pub fn with_request_profile(mut self, profile: super::profile::CodexWireProfile) -> Self {
+        self.profile = CodexWireProfileState::new(profile);
+        self
+    }
+
     /// 构造客户端。
     pub fn new(
         client: Client,
@@ -54,13 +64,17 @@ impl CodexBackendClient {
     ) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
+            timezone: Default::default(),
+            connection_budget: None,
+            response_control: None,
             direct_client: client.clone(),
             client,
             websocket_origin_key: websocket_origin_key(&base_url),
             outbound_proxy: None,
             egress_key: String::new(),
-            turn_state_observer: None,
+            middleware_headers: Vec::new(),
             base_url,
+            official_base_url: crate::OFFICIAL_CODEX_BASE_URL.to_owned(),
             protocol: OpenAiUpstreamProtocol::Codex,
             profile,
             websocket_pool: None,
@@ -71,6 +85,16 @@ impl CodexBackendClient {
     /// 为 Responses WebSocket 请求启用连接池。
     pub fn with_websocket_pool(mut self, pool: Arc<CodexWebSocketPool>) -> Self {
         self.websocket_pool = Some(pool);
+        self
+    }
+
+    /// 附加当前 attempt 经 Core 复核的业务请求头。
+    #[must_use]
+    pub(crate) fn with_middleware_headers(
+        mut self,
+        middleware_headers: Vec<gateway_core::engine::middleware::MiddlewareHeader>,
+    ) -> Self {
+        self.middleware_headers = middleware_headers;
         self
     }
 
@@ -113,7 +137,8 @@ impl CodexBackendClient {
                 .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
         trace.capture("upstream.request.body", &body);
-        let mut outbound = self.client.post(endpoint).headers(headers);
+        let client = self.http_opening_client()?;
+        let mut outbound = client.post(endpoint).headers(headers);
         let body = if self.protocol == OpenAiUpstreamProtocol::Codex {
             outbound = outbound.header(CONTENT_ENCODING, HeaderValue::from_static("zstd"));
             zstd::stream::encode_all(std::io::Cursor::new(body), 3)
@@ -121,29 +146,8 @@ impl CodexBackendClient {
         } else {
             body
         };
-        let response = outbound.body(body).send().await;
-        let headers_elapsed = headers_started_at.elapsed();
-        self.observe_turn_state(super::TurnStateResponse {
-            status: response
-                .as_ref()
-                .ok()
-                .map(|response| response.status().as_u16()),
-            value: response
-                .as_ref()
-                .ok()
-                .and_then(|response| response.headers().get("x-codex-turn-state"))
-                .map(|value| value.as_bytes().to_vec()),
-            reported_model: response
-                .as_ref()
-                .ok()
-                .and_then(|response| response_meta::reported_model(response.headers())),
-            elapsed_ms: u64::try_from(headers_elapsed.as_millis()).unwrap_or(u64::MAX),
-            transport_error: response.is_err(),
-            source: "http_headers",
-        })
-        .await;
-        let response = response?;
-        let upstream_headers_ms = elapsed_duration_millis(headers_elapsed);
+        let response = outbound.body(body).send().await?;
+        let upstream_headers_ms = elapsed_duration_millis(headers_started_at.elapsed());
         let http_version = http_version_name(response.version()).to_string();
         let status = response.status();
         trace.headers(
@@ -282,6 +286,7 @@ impl CodexBackendClient {
         )
         .map_err(CodexClientError::WebSocketEncode)?;
         websocket_create.connection.outbound_proxy = self.outbound_proxy.clone();
+        websocket_create.connection.connection_budget = self.connection_budget.clone();
         context.trace.cloned().unwrap_or_default().headers(
             "upstream.request.headers",
             serde_json::json!({"transport": "websocket", "phase": "prepared_opening"}),
@@ -299,11 +304,13 @@ impl CodexBackendClient {
                 websocket_create.connection().opening_audit_snapshot(),
                 websocket_payload_audit_snapshot(&websocket_request),
             );
-            if let Err(error) = write_websocket_audit_artifact_from_env(&artifact).await {
+            if let Err(error) =
+                write_websocket_audit_artifact_from_env(&artifact, self.timezone).await
+            {
                 tracing::warn!(error = %error, "Failed to write Codex WebSocket audit artifact");
             }
         }
-        let connection_profile = websocket_connection_profile(&headers);
+        let connection_profile = websocket_connection_profile(&headers, &self.middleware_headers);
         let pool_key =
             self.websocket_pool_key(request, context, pool_account_id, &connection_profile);
         let pool_log_context = pool_key.as_ref().map(WebSocketPoolLogContext::from_key);
@@ -329,14 +336,6 @@ impl CodexBackendClient {
             Some(DEFAULT_STREAM_IDLE_TIMEOUT),
         )
         .await;
-        if let Err(error) = &prepared
-            && let Some(observation) = super::TurnStateResponse::websocket_failure(
-                error,
-                u64::try_from(prepare_started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            )
-        {
-            self.observe_turn_state(observation).await;
-        }
         let prepared = match prepared {
             Ok(WebSocketFastPath::Ready(prepared)) => prepared,
             Ok(WebSocketFastPath::Missed) => {
@@ -455,27 +454,18 @@ impl CodexBackendClient {
                     request: websocket_request,
                     prepared,
                 } = *route;
-                let exchange_started_at = Instant::now();
-                let exchange = execute_prepared_response_create_request_stream(
+                let mut exchange = execute_prepared_response_create_request_stream(
                     &websocket_request,
                     prepared,
+                    self.response_control.clone(),
                     context
                         .trace
                         .cloned()
                         .unwrap_or_default()
                         .exchange("websocket"),
                 )
-                .await;
-                if let Err(error) = &exchange
-                    && let Some(observation) = super::TurnStateResponse::websocket_failure(
-                        error,
-                        u64::try_from(exchange_started_at.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
-                    )
-                {
-                    self.observe_turn_state(observation).await;
-                }
-                let mut exchange = exchange.map_err(websocket_exchange_error_to_client_error)?;
+                .await
+                .map_err(websocket_exchange_error_to_client_error)?;
                 if requirement.allows_connection_restart() {
                     match await_websocket_delivery_boundary(&mut exchange).await {
                         Ok(DeliveryBoundary::Ready) => {}
@@ -491,18 +481,6 @@ impl CodexBackendClient {
                         }
                     }
                 }
-                self.observe_turn_state(super::TurnStateResponse {
-                    status: exchange.diagnostics.status_code,
-                    value: exchange
-                        .turn_state
-                        .as_ref()
-                        .map(|value| value.as_bytes().to_vec()),
-                    reported_model: exchange.response_metadata.effective_model.clone(),
-                    elapsed_ms: metrics.upstream_headers_ms.unwrap_or_default().max(0) as u64,
-                    transport_error: false,
-                    source: "websocket_start",
-                })
-                .await;
                 Ok(CodexBackendStreamingResponse {
                     body: Box::pin(
                         exchange
@@ -541,8 +519,7 @@ impl CodexBackendClient {
             .or(request.previous_response_id())?;
         let mut key = CodexWebSocketPoolKey::new(&self.base_url, account_id, conversation_id)
             .with_egress_key(&self.egress_key)
-            .with_connection_profile(connection_profile)
-            .with_routing_cookie(routing_cookie_profile(context.cookie_header));
+            .with_connection_profile(connection_profile);
         if let Some(connection_id) = request.downstream_websocket_connection_id.as_deref() {
             key = key.with_downstream_connection_id(connection_id);
         }
@@ -638,12 +615,11 @@ async fn await_websocket_delivery_boundary(
             }
             Some(Err(error)) => return Err(error),
             None => {
-                return Err(CodexWebSocketExchangeError::closed_before_terminal_on(
-                    exchange.websocket_connection_id,
-                    None,
-                    None,
-                    None,
-                ));
+                return Err(CodexWebSocketExchangeError::StreamEndedBeforeTerminal {
+                    reason: "stream_eof",
+                    timeout: None,
+                    last_event_type: None,
+                });
             }
         }
     }
@@ -676,14 +652,15 @@ async fn read_model_catalog_body(response: ReqwestResponse) -> CodexClientResult
     Ok(body)
 }
 
-fn websocket_connection_profile(headers: &HeaderMap) -> String {
-    // turn-state 在握手头中发送且连接级绑定；纳入画像防止账号覆盖值变更后
-    // 复用到携带旧握手状态的池化连接。逐轮值仍由帧 metadata 覆盖。
-    [
+fn websocket_connection_profile(
+    headers: &HeaderMap,
+    middleware_headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+) -> String {
+    let mut profile = [
         "originator",
         "user-agent",
+        "version",
         X_OPENAI_MEMGEN_REQUEST_HEADER,
-        "x-codex-turn-state",
     ]
     .map(|name| {
         headers
@@ -691,32 +668,21 @@ fn websocket_connection_profile(headers: &HeaderMap) -> String {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
     })
-    .join("\0")
-}
+    .join("\0");
+    if !middleware_headers.is_empty() {
+        use sha2::{Digest, Sha256};
 
-fn routing_cookie_profile(header: Option<&str>) -> String {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    let mut found = false;
-    for cookie in header
-        .unwrap_or_default()
-        .split(';')
-        .map(str::trim)
-        .filter(|cookie| cookie.starts_with("__oailb=") || cookie.starts_with("__oai_lb="))
-    {
-        digest.update(cookie.as_bytes());
-        digest.update([0]);
-        found = true;
+        let mut digest = Sha256::new();
+        for header in middleware_headers {
+            digest.update(header.name().len().to_le_bytes());
+            digest.update(header.name().as_bytes());
+            digest.update(header.value().len().to_le_bytes());
+            digest.update(header.value());
+        }
+        profile.push('\0');
+        profile.push_str(&hex::encode(digest.finalize()));
     }
-    if !found {
-        return String::new();
-    }
-    // 只保存摘要，调试输出不包含路由凭证正文。
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    profile
 }
 
 fn http_sse_stream(

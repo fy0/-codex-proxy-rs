@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
-import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import { BaseFormItem, BaseInput, BaseSegmented } from '@codex-proxy/ui'
 
 defineProps<{ disabled?: boolean, editing?: boolean }>()
 const form = defineModel<ApiKeyAccountForm>({ required: true })

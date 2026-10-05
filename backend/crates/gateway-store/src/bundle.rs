@@ -10,9 +10,12 @@ pub struct StoreBundle {
     admin_ports: AdminStorePorts,
     core_ports: CoreStorePorts,
     provider_ports: ProviderStorePorts,
+    retention: Arc<dyn gateway_admin::ports::retention::RetentionStore>,
     worker_leader_lease: Arc<dyn WorkerLeaderLeasePort>,
     health_probes: Vec<Arc<dyn HealthProbe>>,
     worker_contributions: Vec<WorkerContribution>,
+    command_writers: Option<CommandStoreWriters>,
+    command_drain: Option<CommandStoreDrain>,
 }
 
 impl StoreBundle {
@@ -32,6 +35,11 @@ impl StoreBundle {
     }
 
     #[must_use]
+    pub fn retention(&self) -> Arc<dyn gateway_admin::ports::retention::RetentionStore> {
+        Arc::clone(&self.retention)
+    }
+
+    #[must_use]
     pub fn worker_leader_lease(&self) -> Arc<dyn WorkerLeaderLeasePort> {
         Arc::clone(&self.worker_leader_lease)
     }
@@ -44,14 +52,62 @@ impl StoreBundle {
     pub fn take_worker_contributions(&mut self) -> Vec<WorkerContribution> {
         std::mem::take(&mut self.worker_contributions)
     }
+
+    /// 在插件命令真正执行前启动四个必要写泵；不注册任何后台业务 Worker。
+    pub fn start_command_line_writes(&mut self) -> Result<(), CommandStoreDrainError> {
+        if self.command_drain.is_some() {
+            return Err(CommandStoreDrainError);
+        }
+        let writers = self.command_writers.take().ok_or(CommandStoreDrainError)?;
+        self.command_drain = Some(writers.start());
+        Ok(())
+    }
+
+    /// 命令成功、失败或取消后有界排空账本、Key 使用与准入释放。
+    pub async fn shutdown_command_line_writes(&mut self) -> Result<(), CommandStoreDrainError> {
+        match self.command_drain.take() {
+            Some(drain) => drain.shutdown().await,
+            None if self.command_writers.is_some() => Ok(()),
+            None => Err(CommandStoreDrainError),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StoreMode {
+    Runtime,
+    CommandLine,
 }
 
 /// 在返回 Bundle 前完成全部 Store 启动屏障。
-pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
+pub async fn initialize(config: StoreConfig) -> StoreResult<StoreBundle> {
+    connect(config, false, StoreMode::Runtime).await
+}
+
+/// CLI 命令使用同一有界写队列，但不贡献恢复、保留、leader 或维护 Worker。
+pub async fn initialize_command_line(config: StoreConfig) -> StoreResult<StoreBundle> {
+    connect(config, false, StoreMode::CommandLine).await
+}
+
+/// 读取现有安装描述，不迁移数据库；该 Bundle 的 PostgreSQL 连接默认只读。
+pub async fn initialize_read_only(config: StoreConfig) -> StoreResult<StoreBundle> {
+    connect(config, true, StoreMode::Runtime).await
+}
+
+async fn connect(
+    mut config: StoreConfig,
+    read_only: bool,
+    mode: StoreMode,
+) -> StoreResult<StoreBundle> {
     const REDIS_NAMESPACE: &str = "codex-proxy-rs";
 
     config.validate_resolved()?;
-    let pool = postgres::connect_and_migrate(&config.database_url()?, config.pool).await?;
+    let database_url = config.database_url()?;
+    let pool = if read_only {
+        postgres::connect_read_only(&database_url, config.pool).await?
+    } else {
+        postgres::connect_and_migrate(&database_url, config.pool).await?
+    };
     let observability_query_budget = postgres::ObservabilityQueryBudget::try_new(
         config.pool.observability_max_connections(),
         config.pool.acquire_timeout(),
@@ -79,7 +135,9 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
     let provider_leases = Arc::new(redis::RedisProviderLeaseCoordinator::new(
         credential_leases.clone(),
     ));
-    let provider_session_affinity = Arc::new(redis::RedisProviderSessionAffinityRepository::new(
+    let provider_session_affinity: Arc<
+        dyn gateway_core::provider_ports::ProviderSessionAffinityPort,
+    > = Arc::new(redis::RedisProviderSessionAffinityRepository::new(
         redis_connection.clone(),
         REDIS_NAMESPACE,
     )?);
@@ -97,6 +155,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         REDIS_NAMESPACE,
     )?);
 
+    let plugins = Arc::new(postgres::PgPluginStore::new(pool.clone()));
     let admin_ports = AdminStorePorts::new(
         AdminAccountStorePorts::new(
             Arc::new(postgres::PgAdminAccountStore::new(
@@ -105,7 +164,10 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
                 observability_query_budget.clone(),
             )),
             admin_account_runtime,
-            Arc::new(postgres::PgAccountGroupRepository::new(pool.clone())),
+            Arc::new(
+                postgres::PgAccountGroupRepository::new(pool.clone())
+                    .with_timezone(config.timezone),
+            ),
             Arc::new(postgres::PgProxyRepository::new(pool.clone())),
         ),
         Arc::new(AuthStoreAdapter {
@@ -115,16 +177,22 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             state: redis::RedisAuthStateRepository::new(redis_connection.clone(), REDIS_NAMESPACE)?,
         }),
         Arc::new(postgres::PgAdminClientKeyStore::new(pool.clone())),
-        Arc::new(postgres::PgAdminObservabilityStore::new(
-            pool.clone(),
-            Some(credential_leases.clone()),
-            Some(Arc::clone(&cooldowns) as Arc<dyn ProviderCooldownPort>),
-            observability_query_budget,
-        )),
+        Arc::new(
+            postgres::PgAdminObservabilityStore::new(
+                pool.clone(),
+                Some(credential_leases.clone()),
+                Some(Arc::clone(&cooldowns) as Arc<dyn ProviderCooldownPort>),
+                observability_query_budget,
+            )
+            .with_timezone(config.timezone),
+        ),
         Arc::new(AdminSettingsStoreAdapter {
             control_plane: postgres::PgControlPlaneRepository::new(pool.clone()),
         }),
         backup_ports(pool.clone(), &config)?,
+        plugins.clone(),
+        plugins.clone(),
+        plugins,
     );
 
     let execution_repository = Arc::new(postgres::PgExecutionStore::new(pool.clone()));
@@ -137,12 +205,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
     let admissions: Arc<dyn gateway_core::engine::admission::ClientAdmissionPort> = Arc::new(
         redis::RedisClientAdmissionRepository::new(redis_connection.clone(), REDIS_NAMESPACE)?,
     );
-    let circuits: Arc<dyn gateway_core::engine::execution::ProviderCircuitPort> =
-        Arc::new(redis::RedisProviderCircuitRepository::new(
-            redis_connection.clone(),
-            REDIS_NAMESPACE,
-            gateway_core::engine::execution::ProviderCircuitPolicy::default(),
-        )?);
     // Continuation affinity 是下一轮请求的路由事实，Core 必须直接等待 Redis 确认。
     let continuation: Arc<dyn gateway_core::engine::continuation::NativeContinuationPort> =
         Arc::new(redis::RedisNativeContinuationRepository::new(
@@ -151,7 +213,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         )?);
     let (admissions, admission_release_writer) =
         redis::BufferedClientAdmissionPort::new(admissions);
-    let (circuits, circuit_feedback_writer) = redis::BufferedProviderCircuitPort::new(circuits);
     let core_ports = CoreStorePorts::new(
         execution,
         (
@@ -160,7 +221,6 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
                 pool.clone(),
             )),
         ),
-        Arc::new(circuits),
         continuation,
         (
             Arc::new(postgres::PgRuntimeSnapshotRepository::new(pool.clone())),
@@ -171,7 +231,10 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         ),
         Arc::new(client_key_usage),
     )
-    .with_budget(Arc::new(postgres::PgClientBudgetStore::new(pool.clone())));
+    .with_budget(Arc::new(
+        postgres::PgClientBudgetStore::new(pool.clone()).with_timezone(config.timezone),
+    ))
+    .with_session_affinity(Arc::clone(&provider_session_affinity));
 
     let provider_ports = ProviderStorePorts::new(
         account_store,
@@ -200,21 +263,35 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             connection: redis_connection,
         }),
     ];
-    let worker_contributions = store_worker_contributions(
-        execution_repository,
-        execution_writer,
-        client_key_usage_writer,
-        admission_release_writer,
-        circuit_feedback_writer,
-        retention,
-    )?;
+    let (worker_contributions, command_writers) = match mode {
+        StoreMode::Runtime => (
+            store_worker_contributions(
+                execution_repository,
+                execution_writer,
+                client_key_usage_writer,
+                admission_release_writer,
+            )?,
+            None,
+        ),
+        StoreMode::CommandLine => (
+            Vec::new(),
+            Some(CommandStoreWriters {
+                execution: execution_writer,
+                client_key_usage: client_key_usage_writer,
+                admission_release: admission_release_writer,
+            }),
+        ),
+    };
     Ok(StoreBundle {
         admin_ports,
         core_ports,
         provider_ports,
+        retention,
         worker_leader_lease,
         health_probes,
         worker_contributions,
+        command_writers,
+        command_drain: None,
     })
 }
 

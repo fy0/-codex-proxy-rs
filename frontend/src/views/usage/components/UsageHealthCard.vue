@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import type { BarSeriesOption, EChartsOption, LineSeriesOption } from 'echarts'
 import type { getUsageRecordInsightsOverview } from '@/api'
+import { BaseCard, BaseEmpty } from '@codex-proxy/ui'
+
 import { BarChart } from 'echarts/charts'
 import { use } from 'echarts/core'
-
 import { computed } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { useChartPalette } from '@/composables/useChartPalette'
-import { formatLocalizedCompactNumber as formatCompactNumber } from '@/utils/number'
+import { formatLocalizedCompactNumber as formatCompactNumber } from '@/utils/format'
 
 import {
   tooltipIndex,

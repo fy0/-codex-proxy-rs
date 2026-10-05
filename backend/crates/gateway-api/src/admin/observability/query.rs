@@ -12,6 +12,8 @@ pub const MAX_PAGE_SIZE: u16 = 100;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DashboardQuery {
     pub kind: Option<String>,
+    pub period: Option<String>,
+    pub as_of: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
 }
@@ -43,6 +45,8 @@ pub struct UsageQuery {
     pub response_id: Option<String>,
     pub upstream_request_id: Option<String>,
     pub search: Option<String>,
+    pub period: Option<String>,
+    pub as_of: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
 }
@@ -81,6 +85,8 @@ impl DetailQuery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DiagnosticsQuery {
     pub dimension: Option<String>,
+    pub period: Option<String>,
+    pub as_of: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub provider: Option<String>,
@@ -116,6 +122,8 @@ pub struct OpsQuery {
     pub response_id: Option<String>,
     pub upstream_request_id: Option<String>,
     pub search: Option<String>,
+    pub period: Option<String>,
+    pub as_of: Option<i64>,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
 }
@@ -279,19 +287,21 @@ pub(crate) fn request_outcome(
 pub(crate) fn usage_range(
     start: Option<&str>,
     end: Option<&str>,
+    period: Option<&str>,
+    as_of: Option<i64>,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> Result<domain::TimeRange, WireValidationError> {
-    let end = parse_datetime(end)?.unwrap_or_else(Utc::now);
-    let start = parse_datetime(start)?.unwrap_or(end - Duration::days(7));
-    domain::TimeRange::new(start, end).map_err(|_| WireValidationError::new("timeRange"))
+    crate::time::query_range(start, end, period, as_of, timezone, "7d")
 }
 
 pub(crate) fn dashboard_today_range(
     start: Option<&str>,
     end: Option<&str>,
+    period: Option<&str>,
+    as_of: Option<i64>,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> Result<domain::TimeRange, WireValidationError> {
-    let end = parse_datetime(end)?.unwrap_or_else(Utc::now);
-    let start = parse_datetime(start)?.unwrap_or_else(|| domain::china_day_start(end));
-    domain::TimeRange::new(start, end).map_err(|_| WireValidationError::new("timeRange"))
+    crate::time::query_range(start, end, period, as_of, timezone, "today")
 }
 
 pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, WireValidationError> {
@@ -320,19 +330,31 @@ pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, Wi
     })
 }
 
-pub(crate) fn usage_command(query: &UsageQuery) -> Result<domain::UsageQuery, WireValidationError> {
+pub(crate) fn usage_command(
+    query: &UsageQuery,
+    timezone: gateway_core::time::DeploymentTimeZone,
+) -> Result<domain::UsageQuery, WireValidationError> {
     let (current_page, page_size) = query.validate_pagination()?;
     let page_size_value =
         DomainPageSize::new(page_size).map_err(|_| WireValidationError::new("pageSize"))?;
     Ok(domain::UsageQuery {
-        range: usage_range(query.start_time.as_deref(), query.end_time.as_deref())?,
+        range: usage_range(
+            query.start_time.as_deref(),
+            query.end_time.as_deref(),
+            query.period.as_deref(),
+            query.as_of,
+            timezone,
+        )?,
         filter: usage_filter(query)?,
         current_page,
         page_size: page_size_value,
     })
 }
 
-pub(crate) fn ops_command(query: &OpsQuery) -> Result<domain::OpsErrorQuery, WireValidationError> {
+pub(crate) fn ops_command(
+    query: &OpsQuery,
+    timezone: gateway_core::time::DeploymentTimeZone,
+) -> Result<domain::OpsErrorQuery, WireValidationError> {
     let (current_page, page_size) = query.validate_pagination()?;
     let page_size_value =
         DomainPageSize::new(page_size).map_err(|_| WireValidationError::new("pageSize"))?;
@@ -343,7 +365,13 @@ pub(crate) fn ops_command(query: &OpsQuery) -> Result<domain::OpsErrorQuery, Wir
             .or(query.status_code),
     )?;
     Ok(domain::OpsErrorQuery {
-        range: usage_range(query.start_time.as_deref(), query.end_time.as_deref())?,
+        range: usage_range(
+            query.start_time.as_deref(),
+            query.end_time.as_deref(),
+            query.period.as_deref(),
+            query.as_of,
+            timezone,
+        )?,
         filter: domain::OpsErrorFilter {
             client_api_key_ref: non_empty(query.client_api_key_id.clone()),
             request_id: non_empty(query.request_id.clone()),

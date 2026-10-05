@@ -135,16 +135,18 @@ pub(crate) async fn request_metric_series(
     pool: &PgPool,
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
-    request_metric_series_inner(pool, range, filter, true).await
+    request_metric_series_inner(pool, range, filter, true, timezone).await
 }
 
 pub(crate) async fn dashboard_request_metric_series(
     pool: &PgPool,
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
-    request_metric_series_inner(pool, range, filter, false).await
+    request_metric_series_inner(pool, range, filter, false, timezone).await
 }
 
 async fn request_metric_series_inner(
@@ -152,16 +154,17 @@ async fn request_metric_series_inner(
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
     load_costs: bool,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
     filter.validate()?;
     let granularity = granularity_for(range);
     // 与 request_metrics 同一契约：结果计数覆盖全部请求，用量/延迟/成本
     // 聚合仅统计用量事实。
     let fact = completed_usage_fact_predicate("mr");
-    let mut query = QueryBuilder::<Postgres>::new("select date_bin(");
-    query.push_bind(granularity.sql_interval());
+    let mut query = QueryBuilder::<Postgres>::new("select ");
+    push_metric_bucket(&mut query, range, granularity, timezone)?;
     query.push(format!(
-        "::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00') as bucket_start,
+        " as bucket_start,
                 count(*)::bigint as request_count,
                 count(*) filter (where outcome = 'succeeded')::bigint as success_count,
                 count(*) filter (where outcome = 'failed')::bigint as failure_count,
@@ -273,33 +276,35 @@ async fn request_metric_series_inner(
         );
     }
     if load_costs {
-        let bucket_costs = request_costs_by_bucket(pool, range, filter, granularity).await?;
+        let bucket_costs =
+            request_costs_by_bucket(pool, range, filter, granularity, timezone).await?;
         for (bucket, costs) in bucket_costs {
             if let Some(point) = points.get_mut(&bucket) {
                 point.costs = costs;
             }
         }
     }
-    fill_metric_gaps(range, granularity, points)
+    fill_metric_gaps(range, granularity, points, timezone)
 }
 
 pub(crate) fn calculated_usage_billing_facts(
     pool: &PgPool,
     range: ObservabilityRange,
     filter: UsageRecordFilter,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> futures::stream::BoxStream<'_, StoreResult<CalculatedUsageBillingFact>> {
     use futures::TryStreamExt;
 
     Box::pin(async_stream::try_stream! {
         filter.validate()?;
         let granularity = granularity_for(range);
-        let mut query = QueryBuilder::<Postgres>::new("select date_bin(");
-        query.push_bind(granularity.sql_interval());
+        let mut query = QueryBuilder::<Postgres>::new("select ");
+        push_metric_bucket(&mut query, range, granularity, timezone)?;
         query.push(
-            "::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00') as bucket_start,
+            " as bucket_start,
                     mr.provider_kind, mr.upstream_model_id, mr.service_tier,
                     mr.input_tokens, mr.output_tokens, mr.cached_tokens, mr.cache_write_tokens,
-                    mr.cost_currency, mr.cost_amount::text as amount
+                    mr.billing_snapshot_json, mr.cost_currency, mr.cost_amount::text as amount
              from model_requests mr where mr.started_at >= ",
         );
         query.push_bind(range.start);
@@ -328,11 +333,12 @@ pub(crate) async fn request_costs_by_bucket(
     range: ObservabilityRange,
     filter: &UsageRecordFilter,
     granularity: ObservationGranularity,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> StoreResult<BTreeMap<DateTime<Utc>, Vec<CurrencyCostTotal>>> {
-    let mut query = QueryBuilder::<Postgres>::new("select date_bin(");
-    query.push_bind(granularity.sql_interval());
+    let mut query = QueryBuilder::<Postgres>::new("select ");
+    push_metric_bucket(&mut query, range, granularity, timezone)?;
     query.push(
-        "::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00') as bucket_start,
+        " as bucket_start,
                 mr.cost_currency, sum(mr.cost_amount)::text as amount
          from model_requests mr
          where mr.started_at >= ",
@@ -636,11 +642,26 @@ pub(crate) fn fill_metric_gaps(
     range: ObservabilityRange,
     granularity: ObservationGranularity,
     mut points: BTreeMap<DateTime<Utc>, RequestMetricPoint>,
+    timezone: gateway_core::time::DeploymentTimeZone,
 ) -> StoreResult<Vec<RequestMetricPoint>> {
+    if granularity == ObservationGranularity::Day {
+        return Ok(calendar_buckets(range, timezone)?
+            .into_iter()
+            .map(|bucket| {
+                points.remove(&bucket).unwrap_or(RequestMetricPoint {
+                    bucket_start: bucket,
+                    granularity,
+                    metrics: RequestMetrics::default(),
+                    cost_coverage: CostCoverage::default(),
+                    costs: Vec::new(),
+                })
+            })
+            .collect());
+    }
     let seconds = granularity.seconds();
-    let start_epoch = range.start.timestamp().div_euclid(seconds) * seconds;
-    let mut bucket = DateTime::from_timestamp(start_epoch, 0)
-        .ok_or_else(|| invalid("metric range start is outside supported timestamps"))?;
+    let mut bucket =
+        DateTime::from_timestamp(range.start.timestamp().div_euclid(seconds) * seconds, 0)
+            .ok_or_else(|| invalid("invalid metric start"))?;
     let step = TimeDelta::seconds(seconds);
     let mut result = Vec::new();
     while bucket < range.end {
@@ -653,7 +674,48 @@ pub(crate) fn fill_metric_gaps(
         }));
         bucket = bucket
             .checked_add_signed(step)
-            .ok_or_else(|| invalid("metric range exceeds supported timestamps"))?;
+            .ok_or_else(|| invalid("invalid next metric bucket"))?;
+    }
+    Ok(result)
+}
+
+// 将同一组 UTC 日界交给请求、费用和空桶补齐，避免数据库另用一套时区规则。
+fn push_metric_bucket(
+    query: &mut QueryBuilder<Postgres>,
+    range: ObservabilityRange,
+    granularity: ObservationGranularity,
+    timezone: gateway_core::time::DeploymentTimeZone,
+) -> StoreResult<()> {
+    if granularity == ObservationGranularity::Day {
+        let boundaries = calendar_buckets(range, timezone)?;
+        query
+            .push("(")
+            .push_bind(boundaries.clone())
+            .push("::timestamptz[])[width_bucket(mr.started_at, ")
+            .push_bind(boundaries)
+            .push("::timestamptz[])]");
+    } else {
+        query
+            .push("date_bin(")
+            .push_bind(granularity.sql_interval())
+            .push("::interval, mr.started_at, timestamptz '1970-01-01 00:00:00+00')");
+    }
+    Ok(())
+}
+
+fn calendar_buckets(
+    range: ObservabilityRange,
+    timezone: gateway_core::time::DeploymentTimeZone,
+) -> StoreResult<Vec<DateTime<Utc>>> {
+    let mut day = timezone
+        .day_start(range.start)
+        .ok_or_else(|| invalid("invalid calendar day"))?;
+    let mut result = Vec::new();
+    while day < range.end {
+        result.push(day);
+        day = timezone
+            .days_after(day, 1)
+            .ok_or_else(|| invalid("invalid next calendar day"))?;
     }
     Ok(result)
 }

@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import type { AccountRow } from '../../constants'
-import { RefreshCw, UserRound } from '@lucide/vue'
+import { BaseEmpty, BaseIconButton } from '@codex-proxy/ui'
 
-import { computed, shallowRef } from 'vue'
-import BaseEmpty from '@/components/base/BaseEmpty.vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
+import { ChartNoAxesCombined, RefreshCw, UserRound } from '@lucide/vue'
+import { computed, shallowRef, watch } from 'vue'
+import { formatProviderLabel } from '@/utils/providers'
 import { groupedAccountQuotaWindows, orderedPanelQuotaWindows } from '../../constants'
 import AccountPlanBadge from '../AccountPlanBadge.vue'
 import AccountProfileModal from '../AccountProfileModal/index.vue'
+import AccountQuotaForecastModal from '../AccountQuotaForecastModal/index.vue'
 import AccountQuotaPanelEntry from './Entry.vue'
 import AccountResetCredits from './ResetCredits.vue'
 
@@ -17,14 +18,23 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  refreshQuota: [accountId: string]
   accountUpdated: [account: AccountRow]
+  refreshQuota: [accountId: string]
+  quotaReset: [accountId: string]
 }>()
 
 const quotaEntries = computed(() => groupedAccountQuotaWindows(
   orderedPanelQuotaWindows(props.account.quota.windows),
 ))
 const profileOpen = shallowRef(false)
+const forecastOpen = shallowRef(false)
+const hasForecast = computed(() => props.account.authenticationKind !== 'api_key')
+const hasPersonalInfo = computed(() => props.account.capabilities.profile || props.account.capabilities.subscription)
+const hasActions = computed(() => hasPersonalInfo.value || hasForecast.value || props.account.capabilities.quotaRefresh || props.account.capabilities.resetCredits)
+watch(hasPersonalInfo, (available) => {
+  if (!available)
+    profileOpen.value = false
+})
 </script>
 
 <template>
@@ -35,11 +45,11 @@ const profileOpen = shallowRef(false)
           账号额度
         </h3>
         <p
-          v-if="account.authenticationKind !== 'api_key'"
+          v-if="account.capabilities.quota || quotaEntries.length > 0"
           class="m-0 mt-1 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
         >
-          <span>{{ account.provider === 'xai' ? 'xAI 用量窗口' : 'Codex 额度' }}</span>
-          <template v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'">
+          <span>{{ account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }} 额度</span>
+          <template v-if="account.planType">
             <span>·</span>
             <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
           </template>
@@ -47,9 +57,9 @@ const profileOpen = shallowRef(false)
           <span>最近刷新: {{ account.quota.refreshedAtDisplay }}</span>
         </p>
       </div>
-      <div v-if="account.authenticationKind !== 'api_key'" class="flex shrink-0 items-center gap-0.5">
+      <div v-if="hasActions" class="flex shrink-0 items-center gap-0.5 [&_svg]:size-3.5 [&_svg]:stroke-2">
         <BaseIconButton
-          v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'"
+          v-if="hasPersonalInfo"
           label="查看个人信息"
           size="sm"
           variant="ghost"
@@ -59,11 +69,23 @@ const profileOpen = shallowRef(false)
           <UserRound class="size-3.5" />
         </BaseIconButton>
         <AccountResetCredits
-          v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'"
+          v-if="account.capabilities.resetCredits"
           :account="account"
-          @account-updated="emit('accountUpdated', $event)"
+          @consumed="emit('quotaReset', $event)"
         />
         <BaseIconButton
+          v-if="hasForecast"
+          label="预测周/月额度"
+          size="sm"
+          variant="ghost"
+          aria-haspopup="dialog"
+          :pressed="forecastOpen"
+          @click="forecastOpen = true"
+        >
+          <ChartNoAxesCombined class="size-3.5" />
+        </BaseIconButton>
+        <BaseIconButton
+          v-if="account.capabilities.quotaRefresh"
           variant="ghost"
           size="sm"
           label="刷新额度"
@@ -79,7 +101,7 @@ const profileOpen = shallowRef(false)
       </div>
     </div>
 
-    <div v-if="account.authenticationKind === 'api_key'" class="grid flex-1 place-items-center">
+    <div v-if="!account.capabilities.quota && quotaEntries.length === 0" class="grid flex-1 place-items-center">
       <BaseEmpty title="暂不支持查询上游额度" surface="none" />
     </div>
     <div v-else class="grid min-h-0 gap-3">
@@ -96,8 +118,14 @@ const profileOpen = shallowRef(false)
   </section>
 
   <AccountProfileModal
-    v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'"
+    v-if="hasPersonalInfo"
     v-model="profileOpen"
     :account="account"
+  />
+  <AccountQuotaForecastModal
+    v-if="hasForecast"
+    v-model="forecastOpen"
+    :account="account"
+    @account-updated="emit('accountUpdated', $event)"
   />
 </template>

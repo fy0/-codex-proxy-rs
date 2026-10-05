@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { AccountSubscription } from '@/api'
 import { computed } from 'vue'
-import { formatDateTime } from '@/utils/date'
 
 const props = defineProps<{
   subscription: AccountSubscription
@@ -23,8 +22,8 @@ const billingPeriod = computed(() => {
 })
 const billing = computed(() => [billingPeriod.value, props.subscription?.billingCurrency].filter(Boolean).join(' · ') || '未知')
 const dates = computed(() => [
-  { label: '订阅开始', value: props.subscription?.startsAt },
-  { label: '订阅结束', value: props.subscription?.expiresAt },
+  { label: '订阅开始', value: props.subscription?.startsAt, display: props.subscription?.startsAtDisplay },
+  { label: '订阅结束', value: props.subscription?.expiresAt, display: props.subscription?.expiresAtDisplay },
 ])
 </script>
 
@@ -36,7 +35,7 @@ const dates = computed(() => [
           {{ date.label }}
         </dt>
         <dd class="m-0 mt-1.5 font-mono text-cp-sm leading-relaxed tabular-nums text-cp-text">
-          <time v-if="date.value" :datetime="date.value">{{ formatDateTime(date.value, '未知', 'Asia/Shanghai') }}</time>
+          <time v-if="date.value" :datetime="date.value">{{ date.display ?? '未知' }}</time>
           <span v-else>未知</span>
         </dd>
       </div>

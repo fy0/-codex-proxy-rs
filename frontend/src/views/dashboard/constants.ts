@@ -1,5 +1,5 @@
 import type { MetricTone } from './composables/useDashboard'
-import { formatInteger } from '@/utils/number'
+import { formatInteger } from '@/utils/format'
 
 // tone 到 Tailwind 类的唯一映射；仪表盘各卡片共用。
 export const metricToneIconClasses: Record<MetricTone, string> = {
@@ -22,6 +22,7 @@ export type HealthStatus
   = 'future' | 'no_data' | 'unavailable' | 'unstable' | 'low_sample' | 'stable'
 
 export interface HealthTimelinePoint {
+  bucketStart: string
   time: string
   status: HealthStatus
   reliabilityDisplay: string

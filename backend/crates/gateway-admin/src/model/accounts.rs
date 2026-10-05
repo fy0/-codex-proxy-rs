@@ -18,13 +18,16 @@ pub use gateway_core::account::{
     QuotaState, resolve_account_status,
 };
 
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnStateProbePreview {
-    pub user_agent: String,
-    pub version: String,
-    pub timezone: String,
-    pub current_date: String,
+/// 账号可用的管理操作。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAccountCapabilities {
+    pub quota: bool,
+    pub quota_refresh: bool,
+    pub profile: bool,
+    pub subscription: bool,
+    pub avatar: bool,
+    pub reset_credits: bool,
+    pub consume_reset_credit: bool,
 }
 
 /// 导入时统一应用的账号备注、调度与分组设置；缺省时保留原有导入语义。
@@ -107,12 +110,6 @@ pub struct AccountRecord {
     pub groups: Vec<AccountGroupRef>,
     pub name: String,
     pub notes: Option<String>,
-    /// 管理员配置的 x-codex-turn-state 强制覆盖；`None` 表示不覆盖。
-    pub turn_state_override: Option<String>,
-    /// 管理员开启的 Basis Points 上游通道；仅对 OAuth 认证的 OpenAI 账号生效。
-    pub basispoints_enabled: bool,
-    /// 账号内 BPS 子池上限；`None` 时 BPS 请求只受账号总并发约束。
-    pub bps_concurrency_limit: Option<AccountConcurrencyLimit>,
     pub email: Option<String>,
     pub upstream_user_id: Option<String>,
     pub upstream_account_id: Option<String>,
@@ -226,6 +223,16 @@ pub struct AccountPage {
 pub struct AccountPageItem {
     pub account: AccountRecord,
     pub projection: AccountStatusProjection,
+    pub capacity: AccountCapacity,
+}
+
+/// 网关配置的账号并发上限与查询时的占用，不包含排队请求或上游隐藏限制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountCapacity {
+    /// 实时租约读取失败时为 `None`，不能当作空闲。
+    pub used_slots: Option<u64>,
+    /// 应用账号覆盖或全局默认值后的上限；`None` 表示不限。
+    pub total_slots: Option<u64>,
 }
 
 /// 统一账号目录的全局状态计数，不受当前筛选和分页影响。
@@ -253,12 +260,6 @@ pub struct UpdateAccount {
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
-    /// `None` 保留原值；`Some("")` 清除覆盖。
-    pub turn_state_override: Option<String>,
-    /// `None` 保留原值。
-    pub basispoints_enabled: Option<bool>,
-    /// 账号内 BPS 子池上限；整体替换语义，`None` 清除上限。
-    pub bps_concurrency_limit: Option<AccountConcurrencyLimit>,
 }
 
 /// 账号更新结果。
@@ -278,19 +279,6 @@ pub struct BatchUpdateAccounts {
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<gateway_core::routing::AccountGroupId>>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
-    /// `None` 不修改；`Some("")` 清除覆盖。
-    pub turn_state_override: Option<String>,
-    /// `None` 不修改。
-    pub basispoints_enabled: Option<bool>,
-    /// `None` 不修改；`Some(None)` 清除 BPS 子池上限。
-    pub bps_concurrency_limit: Option<Option<AccountConcurrencyLimit>>,
-}
-
-/// 单账号 turn state 强制覆盖命令；`None` 清除覆盖。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetAccountTurnStateOverride {
-    pub account_id: String,
-    pub turn_state: Option<String>,
 }
 
 /// 批量账号更新结果。

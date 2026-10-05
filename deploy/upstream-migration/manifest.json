@@ -1,0 +1,367 @@
+{
+  "source_commit": "1f099463c858bf97cf59ed6c60e9b1ef26ae47d4",
+  "target_commit": "fef52b3717019513108733549508377a309f129d",
+  "target_tag": "v3.19.0",
+  "shared_through": 15,
+  "legacy": [
+    {
+      "file": "0001_initial.sql",
+      "version": 1,
+      "description": "initial",
+      "sha256": "b7d3df7b48d835a00a3b74cbefc958a039d38fea5529cdad04bfbc703dca72aa",
+      "sha384": "66daf12a89a1ec11a81110c1ce6289f110bf65beaa432f2668a2bddc6fd246933138dba2d70a60a3d29c6aa6b2e631c1"
+    },
+    {
+      "file": "0002_client_key_budgets.sql",
+      "version": 2,
+      "description": "client key budgets",
+      "sha256": "78c427c17d8b5759405f1629a80ceb624012cb6b31371b762078b000266d86c6",
+      "sha384": "9c29e6c73340926f312b58af3b58b5be43b021ccc77797b4ebbf016cac6da802948d99f8e4a324cd1113184698e7ae8a"
+    },
+    {
+      "file": "0003_account_outbound_proxy.sql",
+      "version": 3,
+      "description": "account outbound proxy",
+      "sha256": "46f493ff410cf77550114542e0418475876ee2b2c975436290f0f72440e098c4",
+      "sha384": "8a0ed3ad9db3132dfefe7bc60dc78558c6e1fc687575ec8f21c0a0e27c5aa0866fd1fbdaaa66a6ad82be0816ae41efc8"
+    },
+    {
+      "file": "0004_remove_client_charge_reconciliation.sql",
+      "version": 4,
+      "description": "remove client charge reconciliation",
+      "sha256": "5e4bfd0b47a4de5e99b7ae1d89e0294de61856a40fba3480572db765147c3b3a",
+      "sha384": "5379ecf2efdcc4c68c48a083284f38cef3be3e27cba46bf86d919649ab1622b4f86e4bbdae031758da1db56b2dd73860"
+    },
+    {
+      "file": "0005_managed_outbound_proxies.sql",
+      "version": 5,
+      "description": "managed outbound proxies",
+      "sha256": "2741fabb6ec23e7a19962e364ffdc054f81584c868e24453e33644b96ccca19b",
+      "sha384": "a0691a7cb853a9e03abc94b0e3564384dedecfe8e6b68deaba4d059a7a9863764b28daa6dadacf24b53775c8cdeaa9b6"
+    },
+    {
+      "file": "0006_custom_client_keys.sql",
+      "version": 6,
+      "description": "custom client keys",
+      "sha256": "393968715af911bb09f6738472678fbedcdc0a0967c39711610f52b9a2994c3f",
+      "sha384": "1318527338be047862132d597ea2cb4e241a4de71eb408325635a33f7f8bd1a547b7acfef1fd896edbf239bf890449af"
+    },
+    {
+      "file": "0007_account_notes.sql",
+      "version": 7,
+      "description": "account notes",
+      "sha256": "18e8c1b71c896a9d576d9e4ef9701506f654f55383af908898195b9eb2980fde",
+      "sha384": "c4833587df037fbd3475b14431c6159404fe315953c7c0bdc35da8d359922259417e3a998454327ea079f399e19c9a9f"
+    },
+    {
+      "file": "0008_concurrency_queues.sql",
+      "version": 8,
+      "description": "concurrency queues",
+      "sha256": "36b720c9d3e6bf0bdb799b9b6a89b81638c642ac866992a880bd82357012a208",
+      "sha384": "1bb51e09f04ddecf09072359e162e0cc464b966573aa263c550e1b3f455e4d3c1123d75d5804bdfc24d6d39914a7a103"
+    },
+    {
+      "file": "0009_account_model_access.sql",
+      "version": 9,
+      "description": "account model access",
+      "sha256": "161df9ae43da34d51b340bbf95d71c61a8c1a2aa142382f693a9d127c834630d",
+      "sha384": "975ccd8651930dc68ab1880023700358b38788d6a6ff7e47c0ee655e043bd6b39ada118ae11b8df15ec1bfbb501ac8f7"
+    },
+    {
+      "file": "0010_account_auto_freeze.sql",
+      "version": 10,
+      "description": "account auto freeze",
+      "sha256": "3751a802e80b5d538abc5619a2397aa4bf13f52076068a489892f664907adf49",
+      "sha384": "65239a803454864d6c3bc9cd12ad8a144119a1d3e66701c91a5f39a3b310060b830cf6d7eebc2882db12a72d1c05762e"
+    },
+    {
+      "file": "0011_proxy_request_location.sql",
+      "version": 11,
+      "description": "proxy request location",
+      "sha256": "ae7f7acb3014f0a60d979dd9c04b3065322b206e42eb6256505baf78caf9dd22",
+      "sha384": "53f2e8ed90475d91e06f47f42b7c0b255758d6d87ea97eb7d9922ca947f132249951ec0d329c4a2967111e275200e2e2"
+    },
+    {
+      "file": "0012_upstream_response_model.sql",
+      "version": 12,
+      "description": "upstream response model",
+      "sha256": "b20e425c0b062b72d35fdebe294e023eb17ceb44ac93083ff3d48400715bf430",
+      "sha384": "56c34c788d3ce23da2db8f2f8075806d7412c3d5c1f575e55a926c2570b918762cbe3a22487a7b0aadca9093dc3421ad"
+    },
+    {
+      "file": "0013_responses_decompression_limit.sql",
+      "version": 13,
+      "description": "responses decompression limit",
+      "sha256": "6e23fceef1096b50c1af3584cb1687eded2ad37e31e65391397ec984bf78c7e3",
+      "sha384": "80700f493b474ea4680dcd0c1743b25b5d26bc88ef66ecbb9fdc73e4fa15d1bcf9ba576c77e1660437530cfc489bc94a"
+    },
+    {
+      "file": "0014_disable_fast.sql",
+      "version": 14,
+      "description": "disable fast",
+      "sha256": "12a540be31d65c4925cbe63dab42ea2d4ec2864fecf71a6dd4ee942e71726857",
+      "sha384": "3237650cf0b58bd3fd3ae4d406ff669e392c24480b04ef890a39e9d1027952cb46d128606487adf43f8c21d32a88351b"
+    },
+    {
+      "file": "0015_proxy_dual_stack_exit.sql",
+      "version": 15,
+      "description": "proxy dual stack exit",
+      "sha256": "9bd37bd314b6864816c43cb4fd1869fb415920d4f10f766976e344334a1f60fc",
+      "sha384": "51b9b0f1a0a393bbcb85ed2247356be4c3fb3156abc60cbb6fd67bac31bbd329b027cb49117467d12aa3871d368e41e6"
+    },
+    {
+      "file": "0016_account_turn_state_override.sql",
+      "version": 16,
+      "description": "account turn state override",
+      "sha256": "5126bc123a9fdd6e1b40c6f0a66863f6aa45bc3b363d1cd6bf95dbdf432a6417",
+      "sha384": "a30b84afa32e510a7c905ecc973904258c8d6433937129fde02028633f5651baaf75a9ba1bd61b82082e56239c398a6e"
+    },
+    {
+      "file": "0017_account_turn_state_rotation.sql",
+      "version": 17,
+      "description": "account turn state rotation",
+      "sha256": "3e8d0715730d279962a06bea2d851bb27894391641e94ab062cd4203ad675c12",
+      "sha384": "8e5828603665ddeaae9e9f4c44ad0b8e88df8af7bb55f27d81750510057f3c66bb652ccec3fe4007ad3e80e71b192b81"
+    },
+    {
+      "file": "0018_turn_state_manual_probe.sql",
+      "version": 18,
+      "description": "turn state manual probe",
+      "sha256": "ba924ad595f512f1db00f7eeedb70e1228bd6b3d78f0bf78a697293d310b107e",
+      "sha384": "2902f0f8b23344c6fe4dcfca09e97f2df1107953f93f4a6a2517bc97277e0ad45af1afae341fa8731eb7584d6f0fb7c5"
+    },
+    {
+      "file": "0019_turn_state_notifications.sql",
+      "version": 19,
+      "description": "turn state notifications",
+      "sha256": "0608f731cab57d07fb2b8d45766744495a2929457d8700153b7dcf87f58ef7dc",
+      "sha384": "4734c51476f38a65e52190da148726fc82759a0c5961fa69f126134d70431f204cc12626e3280500138789c8373faecf"
+    },
+    {
+      "file": "0020_turn_state_short_ttl.sql",
+      "version": 20,
+      "description": "turn state short ttl",
+      "sha256": "13a1f987ccbf07982ad352dd5c01c64a62648d5c0d198fd398e941692df2bbfc",
+      "sha384": "03dda44cbe95ff536282b1f8bbb51b100d6ace26a7f278ee8c2faeb1fc757e81a57acb2b16456ee64b546d1a11e21a03"
+    },
+    {
+      "file": "0021_turn_state_attached_model.sql",
+      "version": 21,
+      "description": "turn state attached model",
+      "sha256": "d5bc4e4315adf1ab1d36680031f2d6551b735c77b0e8710eceb7dad0dd447f00",
+      "sha384": "25b853fd2eca86aca5ccca164fb315a6f0429992513509076c0962cbe8f58dff5b0320e167a1f5399349eab35b742d4b"
+    },
+    {
+      "file": "0022_routing_cookie_pool.sql",
+      "version": 22,
+      "description": "routing cookie pool",
+      "sha256": "5bd4e6b7d307230ad58155dc95508194de49b9d0f22ccce7707efc5695c70067",
+      "sha384": "4a45e3cb6cc8010ad87121534d407d3fb2993a5dbf0118dc0c270b27aa09cad71d03c5fb9ef5e048390eaaab0d3360bc"
+    },
+    {
+      "file": "0023_turn_state_cookie_override.sql",
+      "version": 23,
+      "description": "turn state cookie override",
+      "sha256": "03040b0b7bc2213fc3120aa68d1e0942fb22f648d59c711a057614f1d6df8ccf",
+      "sha384": "d4e66d49ef8739af05eaf6f76de750c864df0a99398ff7e6d26cd3357e2b5c9a6ec4cadbb3ce102712dedeba499f20d2"
+    },
+    {
+      "file": "0024_turn_state_cookie_override_issued_at.sql",
+      "version": 24,
+      "description": "turn state cookie override issued at",
+      "sha256": "7c6c12f463aaad89f37647d26b731846258d71e5931b6fd560b79e4b527a1ea3",
+      "sha384": "c0595f06e8533544505c6576d415124f3f0aaa8b321c1b44d11a18eb5846f62e95de16e9e56295c27cc778eae5218d08"
+    },
+    {
+      "file": "0025_turn_state_cookie_record_override.sql",
+      "version": 25,
+      "description": "turn state cookie record override",
+      "sha256": "165369c2dc0d2c6d95b1944190a00e51d7c1d0ba8b3b0d6555550b60102c493e",
+      "sha384": "5021b473c82219c449e87045a75406c705dc8f83b0ed531a17cd602ad5f9104f93ec3481a1af5efa150ae78a3640f1f6"
+    },
+    {
+      "file": "0026_turn_state_cookie_observation.sql",
+      "version": 26,
+      "description": "turn state cookie observation",
+      "sha256": "444d6ef438ad1494bb444a71c3d1bcf8fe74af3b59389d1c2883198852c1a720",
+      "sha384": "daec700fa6a78bfc19ff1404c992a2b7599b7e21705c786fbfb0b45e80d2693319885ec02ee86ae6096eab6bf01ba2f2"
+    },
+    {
+      "file": "0027_provider_account_basispoints.sql",
+      "version": 27,
+      "description": "provider account basispoints",
+      "sha256": "b6f81963cea661b7e2e01828b581aa12b9bf9962f87f56e26e50faece404a4cf",
+      "sha384": "2e43be74fa63ba4eaa81baefcc9ee81976f0c2147e076339d38557892c57affa3aafb101d9ba8ddbb742b9a50ef78bfc"
+    },
+    {
+      "file": "0028_runtime_settings_bps_models.sql",
+      "version": 28,
+      "description": "runtime settings bps models",
+      "sha256": "13b052ec05aac34c89d18e63ab323dca93ce6e92d16862324bcda72d3557b655",
+      "sha384": "9c0d88295b3de0cd2403eeca94082204ef188deb3294bdd7753b8662cd2ea4befdb6e4cd9eae085019d0055a830201e5"
+    },
+    {
+      "file": "0029_provider_account_bps_concurrency.sql",
+      "version": 29,
+      "description": "provider account bps concurrency",
+      "sha256": "1da28efdf80111849ad5d8e16e4dd39165619331fae54b4afc234eff865cade3",
+      "sha384": "daf2336518c6f22a5407bf7174552f1ccd2667e0d138d4a66ab9fc065c4e703dc1b896e410b5877aa35a17b04dba4d6c"
+    },
+    {
+      "file": "0030_turn_state_mint_pairs.sql",
+      "version": 30,
+      "description": "turn state mint pairs",
+      "sha256": "f4a8c324bf929f4badafd963f8e1f4a1dbd9207e61db42f7313708c5a64b7e93",
+      "sha384": "c661026095344dd0df63a1729f87ebd0a347e860e1d7fbe355958b939879729da49b260414d0517aef5f4c5520e6d767"
+    }
+  ],
+  "official": [
+    {
+      "file": "0001_initial.sql",
+      "version": 1,
+      "description": "initial",
+      "sha256": "b7d3df7b48d835a00a3b74cbefc958a039d38fea5529cdad04bfbc703dca72aa",
+      "sha384": "66daf12a89a1ec11a81110c1ce6289f110bf65beaa432f2668a2bddc6fd246933138dba2d70a60a3d29c6aa6b2e631c1"
+    },
+    {
+      "file": "0002_client_key_budgets.sql",
+      "version": 2,
+      "description": "client key budgets",
+      "sha256": "78c427c17d8b5759405f1629a80ceb624012cb6b31371b762078b000266d86c6",
+      "sha384": "9c29e6c73340926f312b58af3b58b5be43b021ccc77797b4ebbf016cac6da802948d99f8e4a324cd1113184698e7ae8a"
+    },
+    {
+      "file": "0003_account_outbound_proxy.sql",
+      "version": 3,
+      "description": "account outbound proxy",
+      "sha256": "46f493ff410cf77550114542e0418475876ee2b2c975436290f0f72440e098c4",
+      "sha384": "8a0ed3ad9db3132dfefe7bc60dc78558c6e1fc687575ec8f21c0a0e27c5aa0866fd1fbdaaa66a6ad82be0816ae41efc8"
+    },
+    {
+      "file": "0004_remove_client_charge_reconciliation.sql",
+      "version": 4,
+      "description": "remove client charge reconciliation",
+      "sha256": "5e4bfd0b47a4de5e99b7ae1d89e0294de61856a40fba3480572db765147c3b3a",
+      "sha384": "5379ecf2efdcc4c68c48a083284f38cef3be3e27cba46bf86d919649ab1622b4f86e4bbdae031758da1db56b2dd73860"
+    },
+    {
+      "file": "0005_managed_outbound_proxies.sql",
+      "version": 5,
+      "description": "managed outbound proxies",
+      "sha256": "2741fabb6ec23e7a19962e364ffdc054f81584c868e24453e33644b96ccca19b",
+      "sha384": "a0691a7cb853a9e03abc94b0e3564384dedecfe8e6b68deaba4d059a7a9863764b28daa6dadacf24b53775c8cdeaa9b6"
+    },
+    {
+      "file": "0006_custom_client_keys.sql",
+      "version": 6,
+      "description": "custom client keys",
+      "sha256": "393968715af911bb09f6738472678fbedcdc0a0967c39711610f52b9a2994c3f",
+      "sha384": "1318527338be047862132d597ea2cb4e241a4de71eb408325635a33f7f8bd1a547b7acfef1fd896edbf239bf890449af"
+    },
+    {
+      "file": "0007_account_notes.sql",
+      "version": 7,
+      "description": "account notes",
+      "sha256": "18e8c1b71c896a9d576d9e4ef9701506f654f55383af908898195b9eb2980fde",
+      "sha384": "c4833587df037fbd3475b14431c6159404fe315953c7c0bdc35da8d359922259417e3a998454327ea079f399e19c9a9f"
+    },
+    {
+      "file": "0008_concurrency_queues.sql",
+      "version": 8,
+      "description": "concurrency queues",
+      "sha256": "36b720c9d3e6bf0bdb799b9b6a89b81638c642ac866992a880bd82357012a208",
+      "sha384": "1bb51e09f04ddecf09072359e162e0cc464b966573aa263c550e1b3f455e4d3c1123d75d5804bdfc24d6d39914a7a103"
+    },
+    {
+      "file": "0009_account_model_access.sql",
+      "version": 9,
+      "description": "account model access",
+      "sha256": "161df9ae43da34d51b340bbf95d71c61a8c1a2aa142382f693a9d127c834630d",
+      "sha384": "975ccd8651930dc68ab1880023700358b38788d6a6ff7e47c0ee655e043bd6b39ada118ae11b8df15ec1bfbb501ac8f7"
+    },
+    {
+      "file": "0010_account_auto_freeze.sql",
+      "version": 10,
+      "description": "account auto freeze",
+      "sha256": "3751a802e80b5d538abc5619a2397aa4bf13f52076068a489892f664907adf49",
+      "sha384": "65239a803454864d6c3bc9cd12ad8a144119a1d3e66701c91a5f39a3b310060b830cf6d7eebc2882db12a72d1c05762e"
+    },
+    {
+      "file": "0011_proxy_request_location.sql",
+      "version": 11,
+      "description": "proxy request location",
+      "sha256": "ae7f7acb3014f0a60d979dd9c04b3065322b206e42eb6256505baf78caf9dd22",
+      "sha384": "53f2e8ed90475d91e06f47f42b7c0b255758d6d87ea97eb7d9922ca947f132249951ec0d329c4a2967111e275200e2e2"
+    },
+    {
+      "file": "0012_upstream_response_model.sql",
+      "version": 12,
+      "description": "upstream response model",
+      "sha256": "b20e425c0b062b72d35fdebe294e023eb17ceb44ac93083ff3d48400715bf430",
+      "sha384": "56c34c788d3ce23da2db8f2f8075806d7412c3d5c1f575e55a926c2570b918762cbe3a22487a7b0aadca9093dc3421ad"
+    },
+    {
+      "file": "0013_responses_decompression_limit.sql",
+      "version": 13,
+      "description": "responses decompression limit",
+      "sha256": "6e23fceef1096b50c1af3584cb1687eded2ad37e31e65391397ec984bf78c7e3",
+      "sha384": "80700f493b474ea4680dcd0c1743b25b5d26bc88ef66ecbb9fdc73e4fa15d1bcf9ba576c77e1660437530cfc489bc94a"
+    },
+    {
+      "file": "0014_disable_fast.sql",
+      "version": 14,
+      "description": "disable fast",
+      "sha256": "12a540be31d65c4925cbe63dab42ea2d4ec2864fecf71a6dd4ee942e71726857",
+      "sha384": "3237650cf0b58bd3fd3ae4d406ff669e392c24480b04ef890a39e9d1027952cb46d128606487adf43f8c21d32a88351b"
+    },
+    {
+      "file": "0015_proxy_dual_stack_exit.sql",
+      "version": 15,
+      "description": "proxy dual stack exit",
+      "sha256": "9bd37bd314b6864816c43cb4fd1869fb415920d4f10f766976e344334a1f60fc",
+      "sha384": "51b9b0f1a0a393bbcb85ed2247356be4c3fb3156abc60cbb6fd67bac31bbd329b027cb49117467d12aa3871d368e41e6"
+    },
+    {
+      "file": "0016_client_profiles_and_model_pricing.sql",
+      "version": 16,
+      "description": "client profiles and model pricing",
+      "sha256": "a1e23b8535ed41de27861833cd2d5ee7498a9bb0e523156ba3f011f9c6b3966b",
+      "sha384": "6cb43e8906126bef733dc30049560d070b3516bf45aaddb0db5301351f73c0b75091cb979c028482d5880c6e24b6eb87"
+    },
+    {
+      "file": "0017_unlimited_default_account_concurrency.sql",
+      "version": 17,
+      "description": "unlimited default account concurrency",
+      "sha256": "fcfae912ddefd54551ebf8e7e733442519d2862d2977134d548ebc1e75c1dc34",
+      "sha384": "ef9237262fa8af0ceba54d25a0cd40eb48fb9a2b74176c0c61d5c7b58a0fbfb3735ffc18509dcfce045f7595383eb1ac"
+    },
+    {
+      "file": "0018_plugins.sql",
+      "version": 18,
+      "description": "plugins",
+      "sha256": "229c70296764b94fe69c3f19889e566fa290c6c44c64970efe96d7fd2a0008d5",
+      "sha384": "fcd1405df2f2e5178ad363a9bf0e9b249ee418af7c29f8c20a8992f52eb15895f7b025036bf73510aadb9ba433c5af2e"
+    },
+    {
+      "file": "0019_plugin_resources.sql",
+      "version": 19,
+      "description": "plugin resources",
+      "sha256": "40a4d4b16e6ec2c2c659980d416b089fc170acd2255aaaf751c4a04c3790a941",
+      "sha384": "1d564b11efda148812d6582b50e7c34722f28fe9e2ae8ad40ba5051e246f7e63344fdb40aa5043556abddcc4a44036ea"
+    },
+    {
+      "file": "0020_plugin_trust.sql",
+      "version": 20,
+      "description": "plugin trust",
+      "sha256": "e8c1339166ac02fb2d4a077424ee5f64f6dc20eb4d3f8ec4fcb09c0f2a0e61f6",
+      "sha384": "0e674b705b653e49384d51fb8e998696cbac58e8cc6e10bd5c86df970c2bfcc4e9eb0be45cd86502915ef46520f4005c"
+    },
+    {
+      "file": "0021_runtime_scheduling.sql",
+      "version": 21,
+      "description": "runtime scheduling",
+      "sha256": "22faf2646168275150b1786c0f463f9ff2ca52463a272479e4fcc6f46c8cfa37",
+      "sha384": "0fbcde03f0607aa735e0273444d443bac8dc6584ad73a21602635c2460a66a2be37721d3f79b69c1282cef5720797271"
+    }
+  ]
+}

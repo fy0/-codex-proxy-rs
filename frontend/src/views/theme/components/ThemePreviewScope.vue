@@ -1,7 +1,7 @@
 <script setup lang="ts">
+import type { ThemeName } from '@codex-proxy/ui/theme'
 import type { CSSProperties } from 'vue'
 import type { ThemeColorTokens } from '@/composables/useThemeColor'
-import type { ThemeName } from '@/theme'
 
 import { computed, onMounted, shallowRef, useTemplateRef } from 'vue'
 

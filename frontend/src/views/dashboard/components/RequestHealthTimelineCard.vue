@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import type { HealthTimeline, HealthTimelinePoint } from '../constants'
+import { BaseCard, BasePopover } from '@codex-proxy/ui'
+
 import { usePreferredReducedMotion } from '@vueuse/core'
 import { gsap } from 'gsap'
-
 import { computed, onBeforeUnmount, shallowRef, useTemplateRef, watch } from 'vue'
-import BaseCard from '@/components/base/BaseCard.vue'
-import BasePopover from '@/components/base/BasePopover.vue'
 import { formatHealthCount, healthLegend, healthReliabilityValueClass, healthStatusMeta } from '../constants'
 import HealthTimelinePointPopover from './HealthTimelinePointPopover.vue'
 
@@ -25,7 +24,7 @@ const points = computed(() => props.timeline.points)
 const activePoint = shallowRef<HealthTimelinePoint>()
 const activeAnchor = shallowRef<HTMLElement | null>(null)
 const popoverOpen = shallowRef(false)
-const highlightedPointTime = shallowRef<string>()
+const highlightedPointBucket = shallowRef<string>()
 let wavedCellIndexes = new Set<number>()
 
 function observedRequests(point: HealthTimelinePoint) {
@@ -37,7 +36,7 @@ function isInteractivePoint(point: HealthTimelinePoint) {
 }
 
 function isActivePoint(point: HealthTimelinePoint) {
-  return popoverOpen.value && highlightedPointTime.value === point.time
+  return popoverOpen.value && highlightedPointBucket.value === point.bucketStart
 }
 
 function activatePoint(point: HealthTimelinePoint, pointIndex: number, event: Event) {
@@ -51,7 +50,7 @@ function activatePoint(point: HealthTimelinePoint, pointIndex: number, event: Ev
   activePoint.value = point
   activeAnchor.value = event.currentTarget
   popoverOpen.value = true
-  highlightedPointTime.value = point.time
+  highlightedPointBucket.value = point.bucketStart
   animatePointWave(pointIndex)
 }
 
@@ -61,7 +60,7 @@ function closePointPopover() {
 }
 
 function resetPointInteraction() {
-  highlightedPointTime.value = undefined
+  highlightedPointBucket.value = undefined
   activePoint.value = undefined
   activeAnchor.value = null
   releasePointWave()
@@ -224,10 +223,13 @@ onBeforeUnmount(() => {
           class="min-w-0 w-full"
         >
           <template #trigger>
-            <div ref="timelineGrid" class="grid w-full grid-cols-48 items-end gap-x-0.5 gap-y-1 sm:grid-cols-96">
+            <div
+              ref="timelineGrid" class="grid w-full grid-cols-[repeat(var(--timeline-columns),minmax(0,1fr))] items-end gap-x-0.5 gap-y-1 sm:grid-cols-[repeat(var(--timeline-columns-wide),minmax(0,1fr))]"
+              :style="{ '--timeline-columns': Math.max(1, Math.ceil(points.length / 2)), '--timeline-columns-wide': Math.max(1, points.length) }"
+            >
               <button
                 v-for="(point, pointIndex) in points"
-                :key="point.time"
+                :key="point.bucketStart"
                 data-health-timeline-point
                 type="button"
                 :aria-disabled="!isInteractivePoint(point)"

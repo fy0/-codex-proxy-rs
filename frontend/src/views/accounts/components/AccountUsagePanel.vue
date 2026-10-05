@@ -1,22 +1,14 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
 
-import { ChartNoAxesCombined, Sigma } from '@lucide/vue'
-import { computed, ref } from 'vue'
-import BaseIconButton from '@/components/base/BaseIconButton.vue'
-import { defineTableColumns } from '@/components/base/BaseTable/columns'
-import BaseTable from '@/components/base/BaseTable/index.vue'
+import { BaseTable, defineTableColumns } from '@codex-proxy/ui'
+import { Sigma } from '@lucide/vue'
+import { computed } from 'vue'
 import { modelSuccessRateTextClass } from '../constants'
-import AccountQuotaForecastModal from './AccountQuotaForecastModal/index.vue'
 
 const props = defineProps<{
   account: AccountRow
 }>()
-
-const emit = defineEmits<{
-  accountUpdated: [account: AccountRow]
-}>()
-const forecastOpen = ref(false)
 
 type AccountModelUsage = AccountRow['usage']['models'][number]
 
@@ -40,7 +32,7 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
 <template>
   <section class="grid gap-4 rounded-lg bg-cp-bg-container p-4 shadow-cp-tertiary xl:min-h-0 xl:grid-cols-[0.52fr_1.48fr]">
     <div class="xl:flex xl:min-h-0 xl:flex-col">
-      <div class="mb-3 flex shrink-0 items-baseline justify-between gap-3">
+      <div class="mb-3 flex shrink-0 items-center justify-between gap-3">
         <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
           Tokens 结构
         </h3>
@@ -82,20 +74,9 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
 
     <div class="min-w-0 pt-4 xl:flex xl:min-h-0 xl:flex-col xl:pt-0 xl:pl-4">
       <div class="mb-3 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2">
-        <div class="flex shrink-0 items-center gap-1">
-          <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
-            模型使用排行
-          </h3>
-          <BaseIconButton
-            v-if="account.authenticationKind !== 'api_key'"
-            label="预测周/月额度"
-            size="sm"
-            aria-haspopup="dialog"
-            @click="forecastOpen = true"
-          >
-            <ChartNoAxesCombined class="size-3.5" :stroke-width="1.75" />
-          </BaseIconButton>
-        </div>
+        <h3 class="m-0 shrink-0 text-cp-lg font-heavy text-cp-text">
+          模型使用排行
+        </h3>
 
         <div class="ml-auto flex items-baseline gap-4">
           <div v-if="hasUsageSummary" class="flex items-baseline gap-1.5 whitespace-nowrap">
@@ -135,11 +116,4 @@ const modelUsageColumns = defineTableColumns<AccountModelUsage>([
       </div>
     </div>
   </section>
-
-  <AccountQuotaForecastModal
-    v-if="account.authenticationKind !== 'api_key'"
-    v-model="forecastOpen"
-    :account="account"
-    @account-updated="emit('accountUpdated', $event)"
-  />
 </template>

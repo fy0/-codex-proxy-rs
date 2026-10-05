@@ -1,57 +1,37 @@
 <script setup lang="ts">
-import type { AccountCreateProvider } from './model'
-import { Openai, Xai } from '@boxicons/vue'
+import type { AccountCreateSource } from './model'
+import { BaseSegmented } from '@codex-proxy/ui'
 import { LayoutGrid } from '@lucide/vue'
-import BaseSegmented from '@/components/base/BaseSegmented.vue'
-import { PROVIDER_DISPLAY_NAMES } from '@/utils/providers'
+import { computed } from 'vue'
+import { formatProviderLabel, PROVIDER_IDS, providerIcon } from '@/utils/providers'
 
-withDefaults(
-  defineProps<{
-    disabled?: boolean
-    selected?: AccountCreateProvider | ''
-  }>(),
-  {
-    disabled: false,
-  },
-)
-
-const emit = defineEmits<{
-  select: [provider: 'openai' | 'xai' | 'batch']
-}>()
-
-const providers = [
-  {
-    value: 'batch' as const,
-    label: '批量导入',
-    icon: LayoutGrid,
-  },
-  {
-    value: 'openai' as const,
-    label: PROVIDER_DISPLAY_NAMES.openai,
-    icon: Openai,
-  },
-  {
-    value: 'xai' as const,
-    label: PROVIDER_DISPLAY_NAMES.xai,
-    icon: Xai,
-  },
+defineProps<{ disabled: boolean }>()
+const source = defineModel<AccountCreateSource | null>({ required: true })
+const options = [
+  { value: 'bundle', label: '批量导入', icon: LayoutGrid },
+  ...PROVIDER_IDS.map(provider => ({
+    value: `provider:${provider}`,
+    label: formatProviderLabel(provider),
+    icon: providerIcon(provider),
+  })),
 ]
-
-function selectProvider(value: string) {
-  const provider = providers.find(provider => provider.value === value)
-  if (provider)
-    emit('select', provider.value)
-}
+const selected = computed({
+  get: () => source.value?.kind === 'provider' ? `provider:${source.value.id}` : source.value?.kind ?? '',
+  set: (value: string) => {
+    if (!options.some(option => option.value === value))
+      return
+    source.value = value === 'bundle' ? { kind: 'bundle' } : { kind: 'provider', id: value.slice('provider:'.length) }
+  },
+})
 </script>
 
 <template>
   <BaseSegmented
-    :model-value="selected ?? ''"
+    v-model="selected"
+    class="w-full"
     label="选择账号平台"
-    :options="providers"
+    :options="options"
     :disabled="disabled"
     size="lg"
-    class="w-full"
-    @update:model-value="selectProvider"
   />
 </template>

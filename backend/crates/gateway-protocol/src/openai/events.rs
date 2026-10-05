@@ -766,7 +766,8 @@ fn parse_credits_from_lookup(headers: &BTreeMap<String, &str>) -> Option<Credits
     })
 }
 
-fn parse_credits_from_object(value: &Value) -> Option<CreditsSnapshot> {
+/// 从额度查询或流式事件中提取同一份点数事实，缺失字段不推断为零余额。
+pub fn parse_credits_from_object(value: &Value) -> Option<CreditsSnapshot> {
     Some(CreditsSnapshot {
         has_credits: value.get("has_credits")?.as_bool()?,
         unlimited: value.get("unlimited")?.as_bool()?,

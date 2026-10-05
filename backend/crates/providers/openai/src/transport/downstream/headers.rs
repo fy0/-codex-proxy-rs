@@ -6,7 +6,7 @@
 /// 不包括整个 OpenAI SDK 生态。名单中的字段可能是合法 HTTP 字段，
 /// 过滤表示网关不继承下游环境，不代表官方服务端必然拒绝该字段。
 /// 按已知来源命名空间覆盖扩展；其他未知业务头不因源码中未出现而被过滤。
-pub(in crate::transport) fn is_non_codex_request_header(name: &str) -> bool {
+pub(super) fn is_non_codex_request_header(name: &str) -> bool {
     // Cloudflare 链路信息及 Access 认证不跨到上游；cf-* 不只包含诊断字段。
     name.starts_with("cf-")
         // 反代记录的是客户端到网关这一段地址、协议和路由。
@@ -18,10 +18,6 @@ pub(in crate::transport) fn is_non_codex_request_header(name: &str) -> bool {
         // 和页面请求上下文，不能当作网关连接上游时的环境。
         || name.starts_with("sec-ch-ua")
         || name.starts_with("sec-fetch-")
-        // Grok 官方客户端的认证和路由头不属于 Codex 协议；
-        // 例如 x-grok-model-override 与 X-XAI-Token-Auth。
-        || name.starts_with("x-grok-")
-        || name.starts_with("x-xai-")
         || matches!(
             name,
             // Forwarded、Via、CDN-Loop 有 RFC 定义；剥离是本应用重建

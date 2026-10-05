@@ -1,6 +1,6 @@
 //! Client API Key 的 Command、Result 与安全秘密类型。
 
-use std::{fmt, num::NonZeroU16};
+use std::{collections::BTreeMap, fmt, num::NonZeroU16};
 
 use chrono::{DateTime, Utc};
 
@@ -10,7 +10,15 @@ use gateway_core::{
     routing::{AccountGroupId, ProviderKind},
 };
 
-use super::{AdminModelError, Revision, account_groups::AccountGroupRef};
+use super::{
+    AdminModelError, Revision, account_groups::AccountGroupRef,
+    plugin_resources::PluginResourceOwner,
+};
+
+pub type ProviderRequestProfileOverrides =
+    BTreeMap<ProviderKind, gateway_core::account::OpaqueProviderData>;
+pub type ProviderRequestProfileOverrideUpdates =
+    BTreeMap<ProviderKind, Option<gateway_core::account::OpaqueProviderData>>;
 
 /// Client Key 列表保持旧 HTTP 合同允许的完整非零 `u16` 页大小。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -86,6 +94,7 @@ pub struct ClientKeyListQuery {
 /// 不含完整明文 Key 的管理投影。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientKeyRecord {
+    pub request_profile_overrides: ProviderRequestProfileOverrides,
     pub id: ClientApiKeyId,
     pub name: String,
     pub label: Option<String>,
@@ -109,7 +118,7 @@ pub struct ClientKeyPage {
     pub next_cursor: Option<ClientKeyCursor>,
 }
 
-/// 仅在创建或显式 reveal 时跨越管理边界的明文 Key。
+/// 仅在创建或显式读取密钥配置时返回的明文 Key；Debug 隐去明文。
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClientKeySecret {
     pub record: ClientKeyRecord,
@@ -144,6 +153,7 @@ impl fmt::Debug for ClientKeySecret {
 /// API 提交的 Client Key 创建命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateClientKey {
+    pub request_profile_overrides: ProviderRequestProfileOverrides,
     pub custom_key: Option<PlaintextClientApiKey>,
     pub name: String,
     pub label: Option<String>,
@@ -155,6 +165,7 @@ pub struct CreateClientKey {
 /// 管理用例生成 ID 与明文后的持久化命令。
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewClientKey {
+    pub request_profile_overrides: ProviderRequestProfileOverrides,
     pub id: ClientApiKeyId,
     pub name: String,
     pub label: Option<String>,
@@ -179,6 +190,7 @@ impl fmt::Debug for NewClientKey {
 /// 修改 Client Key 的公开策略字段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateClientKey {
+    pub request_profile_override_updates: ProviderRequestProfileOverrideUpdates,
     pub id: ClientApiKeyId,
     pub name: String,
     pub label: Option<String>,
@@ -193,6 +205,36 @@ pub struct UpdateClientKey {
 pub struct SetClientKeyEnabled {
     pub id: ClientApiKeyId,
     pub enabled: bool,
+}
+
+/// 管理员选择的金额重置范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientKeyBudgetPeriod {
+    Daily,
+    Weekly,
+    All,
+}
+
+/// 清零所选窗口已用金额，保留限额、到期时间与历史费用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetClientKeyBudget {
+    pub id: ClientApiKeyId,
+    pub period: ClientKeyBudgetPeriod,
+}
+
+/// 仅更新指定金额上限；省略的周期保持不变，不修改已用金额或窗口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateClientKeyBudgetLimits {
+    pub id: ClientApiKeyId,
+    pub daily_limit_usd: Option<gateway_core::metering::Decimal>,
+    pub weekly_limit_usd: Option<gateway_core::metering::Decimal>,
+}
+
+/// 预算变更的调用来源；插件身份由 Runtime 给出，不能从插件请求反序列化。
+#[derive(Debug, Clone)]
+pub enum ClientKeyBudgetMutationOrigin {
+    Admin,
+    Plugin(PluginResourceOwner),
 }
 
 /// 删除 Client Key。

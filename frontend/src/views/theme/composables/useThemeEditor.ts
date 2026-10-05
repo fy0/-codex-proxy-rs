@@ -7,12 +7,9 @@ import type {
   ThemeName,
   ThemeSeedOverrides,
   ThemeTokenName,
-} from '@/theme'
+} from '@codex-proxy/ui/theme'
 
-import { storeToRefs } from 'pinia'
-import { computed, ref, shallowRef, watch } from 'vue'
-
-import { useThemeStore } from '@/stores/modules/theme'
+import { normalizeHexColor } from '@codex-proxy/ui'
 import {
   DEFAULT_CUSTOM_THEME_COLOR,
   DEFAULT_THEME_COLOR,
@@ -21,8 +18,11 @@ import {
   isThemeMode,
   normalizeThemeCustomization,
   resolveTheme,
-} from '@/theme'
-import { normalizeHexColor } from '@/utils/color'
+} from '@codex-proxy/ui/theme'
+
+import { storeToRefs } from 'pinia'
+import { computed, ref, shallowRef, watch } from 'vue'
+import { useThemeStore } from '@/stores/modules/theme'
 
 export type ThemeEditorScope = 'global' | 'component'
 export type ThemeEditorGlobalCategory = 'color' | 'size' | 'style'

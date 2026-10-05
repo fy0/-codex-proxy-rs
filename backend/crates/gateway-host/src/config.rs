@@ -35,16 +35,21 @@ pub fn load_config<T: LoadableConfig>() -> Result<T, ConfigError> {
         .build()
         .map_err(|_| ConfigError::InvalidDocument { path: path.clone() })?;
     let mut unused = std::collections::BTreeSet::new();
-    let mut value: T = serde_ignored::deserialize(document, |field| {
+    let mut ignored = |field: serde_ignored::Path<'_>| {
         unused.insert(field.to_string());
-    })
-    .map_err(|error| match missing_config_field(&error) {
-        Some(field) => ConfigError::MissingField {
-            path: path.clone(),
-            field,
-        },
-        None => ConfigError::InvalidDocument { path: path.clone() },
-    })?;
+    };
+    let mut value: T =
+        serde_path_to_error::deserialize(serde_ignored::Deserializer::new(document, &mut ignored))
+            .map_err(|error| match missing_config_field(error.inner()) {
+                Some(field) => ConfigError::MissingField {
+                    path: path.clone(),
+                    field,
+                },
+                None => ConfigError::InvalidValue {
+                    path: path.clone(),
+                    field: error.path().to_string(),
+                },
+            })?;
     // 此时日志尚未初始化；只报告字段路径，不回显可能包含凭据的配置值。
     for field in unused {
         if !T::EXTERNAL_SECTIONS.contains(&field.as_str()) {
@@ -69,6 +74,8 @@ fn missing_config_field(error: &config::ConfigError) -> Option<String> {
 /// Host 唯一拥有的进程配置。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HostConfig {
+    #[serde(default)]
+    pub timezone: gateway_core::time::DeploymentTimeZone,
     pub listen: ListenConfig,
     pub runtime_data_dir: PathBuf,
     pub logging: LoggingConfig,
@@ -216,6 +223,8 @@ pub struct FileLoggingConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("配置文件 {path} 的字段 {field:?} 不合法")]
+    InvalidValue { path: PathBuf, field: String },
     #[error("current directory is unavailable")]
     CurrentDirectory,
     #[error("deploy/config.yaml was not found")]
