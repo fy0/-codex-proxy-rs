@@ -123,8 +123,9 @@ class PostgreSQLTests(unittest.TestCase):
         with connection, connection.cursor() as cursor:
             cursor.execute("""
                 INSERT INTO admin_users VALUES ('fixture-admin','synthetic-hash',now(),now());
-                INSERT INTO runtime_settings (id, config_revision, admin_api_key, updated_at)
-                    VALUES (1, 17, 'synthetic-admin-key', now());
+                -- 0001 已创建单例，测试只能更新它，不能重复插入同一主键。
+                UPDATE runtime_settings SET config_revision = 17,
+                    admin_api_key = 'synthetic-admin-key', updated_at = now() WHERE id = 1;
                 INSERT INTO client_api_keys (id,name,key,created_at,updated_at)
                     VALUES ('fixture-key','fixture','sk_' || repeat('x',43),now(),now());
                 INSERT INTO provider_accounts
