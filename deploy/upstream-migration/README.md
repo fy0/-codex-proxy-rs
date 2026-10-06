@@ -31,9 +31,15 @@ Redis 与 `.runtime/data` 中的其他文件应按[常规备份说明](../README
 迁移必须停机运行。检测到其他数据库客户端会拒绝转换，包括遗留网关副本、管理工具和手动 SQL 会话；
 迁移时不要重新启动旧网关，也不要允许其他维护程序更改数据库。
 
-## 构建过渡镜像
+## 获取过渡镜像
 
-在本仓库根目录、具备 Docker 的构建机执行。此操作只构建镜像，不连接部署数据库：
+本 fork 的 `main` 推送在 CI 中构建并验证 `linux/amd64`、`linux/arm64`，全部所需 CI 任务成功后，
+`publish-edge` 才把同一批已验证镜像发布到 `ghcr.io/fy0/codex-proxy-rs:edge`，同时保留
+`sha-<完整提交号>` 标签。镜像的 `org.opencontainers.image.revision` 标签记录来源提交。
+必须确认 `publish-edge` 成功；仅有构建成功不代表仓库中的 `edge` 已更新。
+
+部署机直接拉取镜像，不需要本机构建或运行测试。自行构建时，在本仓库根目录、具备 Docker 的
+构建机执行以下命令；此操作只构建镜像，不连接部署数据库：
 
 ```bash
 docker build -f deploy/Dockerfile --target runtime \
@@ -48,8 +54,8 @@ docker build -f deploy/Dockerfile --target runtime \
 docker build -f deploy/Dockerfile --target migration-tests .
 ```
 
-仓库的普通 CI 构建不发布镜像。部署机与构建机不同时，先通过自己的镜像仓库或 `docker save/load`
-传送构建结果；不要把官方 release 工作流误用于发布本 fork 的过渡镜像。
+PR、定时安全扫描和非本 fork 的工作流不发布 `edge`。不要用官方 release 工作流发布本 fork
+的过渡镜像；已有版本标签和官方镜像不由此流程更新。
 
 ## 更新镜像并自动转换
 
@@ -60,10 +66,11 @@ docker build -f deploy/Dockerfile --target migration-tests .
 保留现有 `deploy/config.yaml`、Compose 自定义设置以及全部 `.runtime` 数据。对比官方部署模板并合并
 必要配置，不要用模板覆盖现有配置或重新运行初始化来代替迁移。数据库与 Redis 服务保持运行。
 单实例更新时先停止旧容器再启动新容器；多副本部署必须先停止全部旧网关和其他数据库客户端，
-不能使用新旧副本并行的滚动更新。下列命令从部署根目录执行，镜像须已构建或拉取到部署机：
+不能使用新旧副本并行的滚动更新。下列命令从部署根目录执行：
 
 ```bash
-export CPR_IMAGE=codex-proxy-rs:upstream-migration
+export CPR_IMAGE=ghcr.io/fy0/codex-proxy-rs:edge
+docker compose -f deploy/compose.yaml pull codex-proxy-rs &&
 docker compose -f deploy/compose.yaml up -d --no-deps --no-build codex-proxy-rs
 docker compose -f deploy/compose.yaml logs -f --tail=100 codex-proxy-rs
 ```

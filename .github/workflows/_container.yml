@@ -14,10 +14,20 @@ permissions:
 
 jobs:
   container:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
     env:
-      CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}
+      CPR_IMAGE: codex-proxy-rs:ci-${{ inputs.ref }}-${{ matrix.arch }}
       TRIVY_QUIET: 'true'
       TRIVY_SKIP_VERSION_CHECK: 'true'
     steps:
@@ -48,7 +58,7 @@ jobs:
           operation: restore
           builder: ${{ steps.buildx.outputs.name }}
           path: ${{ runner.temp }}/container-cargo
-          architecture: amd64
+          architecture: ${{ matrix.arch }}
 
       - name: Build runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -56,20 +66,29 @@ jobs:
           context: .
           file: deploy/Dockerfile
           target: runtime
+          platforms: ${{ matrix.platform }}
           load: true
           tags: ${{ env.CPR_IMAGE }}
+          build-args: |
+            CPR_GIT_SHA=${{ inputs.ref }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.ref }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            io.codex-proxy.migration.target=3.19.0
           no-cache-filters: |
             runtime-base
             runtime
-          cache-from: type=gha,scope=runtime-ci
-          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=runtime-ci' || '' }}
+          cache-from: |
+            type=gha,scope=runtime-ci-${{ matrix.arch }}
+            type=gha,scope=runtime-ci
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=gha,mode=max,scope=runtime-ci-{0}', matrix.arch) || '' }}
 
       - name: Verify runtime image
         uses: ./.github/actions/verify-container
         with:
           image: ${{ env.CPR_IMAGE }}
-          platform: linux/amd64
-          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+          platform: ${{ matrix.platform }}
+          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
 
       # 构建层命中时 mount 仍可能为空，只有实际检查过内容的快照才允许保存。
       - name: Export Cargo snapshot
@@ -82,7 +101,7 @@ jobs:
           operation: snapshot
           builder: ${{ steps.buildx.outputs.name }}
           path: ${{ runner.temp }}/container-cargo
-          architecture: amd64
+          architecture: ${{ matrix.arch }}
 
       - name: Save Cargo snapshot
         if: steps.cargo-snapshot.outputs.usable == 'true' && steps.cargo-cache.outputs.cache-hit != 'true'
@@ -90,3 +109,36 @@ jobs:
         with:
           path: ${{ runner.temp }}/container-cargo
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      # 只传递已经通过迁移测试和运行时验证的镜像；发布任务不再重新构建。
+      - name: Export verified edge image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'fy0/-codex-proxy-rs'
+        shell: bash
+        env:
+          EXPECTED_REVISION: ${{ inputs.ref }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          docker image inspect "$CPR_IMAGE" | jq -e --arg revision "$EXPECTED_REVISION" --arg arch "$IMAGE_ARCH" '
+            .[0] | .Architecture == $arch and
+            .Config.Labels["org.opencontainers.image.revision"] == $revision and
+            .Config.Entrypoint == ["python3", "/app/deploy/upstream-migration/migrate.py"]'
+          docker run --rm --entrypoint python3 "$CPR_IMAGE" -c '
+          import sys
+          sys.path.insert(0, "/app/deploy/upstream-migration")
+          import migrate
+          assert migrate.load_bundle()["target_tag"] == "v3.19.0"
+          assert (migrate.BASE / "tests-passed").is_file()
+          '
+          docker save "$CPR_IMAGE" | gzip -1 > "$RUNNER_TEMP/edge-image-${IMAGE_ARCH}.tar.gz"
+
+      - name: Upload verified edge image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'fy0/-codex-proxy-rs'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: edge-image-${{ inputs.ref }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/edge-image-${{ matrix.arch }}.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7

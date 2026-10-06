@@ -147,3 +147,85 @@ jobs:
         run: |
           git diff --exit-code -- frontend/package.json frontend/pnpm-lock.yaml backend/Cargo.lock
           git -C modules/plugins diff --exit-code -- examples/workbench/frontend/package.json examples/workbench/frontend/pnpm-lock.yaml examples/workbench/backend/Cargo.lock
+
+  # 写包权限仅授予最终发布任务；PR 和定时安全扫描不会更新 edge。
+  publish-edge:
+    needs: [container, quality, source-development]
+    if: >-
+      always() && !cancelled() &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.repository == 'fy0/-codex-proxy-rs' &&
+      needs.container.result == 'success' && needs.quality.result == 'success' &&
+      (needs.source-development.result == 'success' || needs.source-development.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GHCR_IMAGE: ghcr.io/fy0/codex-proxy-rs
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download verified images
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: edge-image-${{ github.sha }}-*
+          path: ${{ runner.temp }}/edge-images
+          merge-multiple: true
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish verified multi-platform edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 防止旧提交的重跑在新提交之后覆盖浮动标签。
+          current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current" != "$GITHUB_SHA" ]; then
+            echo '::notice::A newer main commit exists; edge publication skipped.'
+            exit 0
+          fi
+          sources=()
+          for arch in amd64 arm64; do
+            gzip -dc "$RUNNER_TEMP/edge-images/edge-image-${arch}.tar.gz" | docker load
+            local_image="codex-proxy-rs:ci-${GITHUB_SHA}-${arch}"
+            docker image inspect "$local_image" | jq -e --arg revision "$GITHUB_SHA" --arg arch "$arch" '
+              .[0] | .Architecture == $arch and
+              .Config.Labels["org.opencontainers.image.revision"] == $revision and
+              .Config.Entrypoint == ["python3", "/app/deploy/upstream-migration/migrate.py"]'
+            remote_image="${GHCR_IMAGE}:sha-${GITHUB_SHA}-${arch}"
+            docker tag "$local_image" "$remote_image"
+            docker push "$remote_image"
+            digest="$(docker image inspect "$remote_image" --format '{{range .RepoDigests}}{{println .}}{{end}}' |
+              grep -F "${GHCR_IMAGE}@sha256:" | head -n 1)"
+            test -n "$digest"
+            sources+=("$digest")
+          done
+          docker buildx imagetools create -t "${GHCR_IMAGE}:sha-${GITHUB_SHA}" "${sources[@]}"
+          current="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current" != "$GITHUB_SHA" ]; then
+            echo '::notice::A newer main commit exists; only the commit-specific image was published.'
+            exit 0
+          fi
+          docker buildx imagetools create -t "${GHCR_IMAGE}:edge" "${GHCR_IMAGE}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect --raw "${GHCR_IMAGE}:sha-${GITHUB_SHA}" > "$RUNNER_TEMP/edge-expected.json"
+          docker buildx imagetools inspect --raw "${GHCR_IMAGE}:edge" > "$RUNNER_TEMP/edge-published.json"
+          cmp "$RUNNER_TEMP/edge-expected.json" "$RUNNER_TEMP/edge-published.json"
+          jq -e '[.manifests[].platform | .os + "/" + .architecture] | sort == ["linux/amd64", "linux/arm64"]' \
+            "$RUNNER_TEMP/edge-published.json"
+          docker buildx imagetools inspect "${GHCR_IMAGE}:edge"
+          {
+            echo '### Published transition image'
+            echo "- ${GHCR_IMAGE}:edge"
+            echo "- ${GHCR_IMAGE}:sha-${GITHUB_SHA}"
+            echo "- Source commit: ${GITHUB_SHA}"
+            echo '- Both platforms passed migration tests and runtime verification before publication.'
+          } >> "$GITHUB_STEP_SUMMARY"
