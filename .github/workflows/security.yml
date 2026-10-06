@@ -62,7 +62,22 @@ jobs:
         run: pnpm --dir frontend install --frozen-lockfile
 
       - name: Run pnpm audit
-        run: pnpm --dir frontend audit --prod --audit-level=high
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/frontend-audit.log"
+          if pnpm --dir frontend audit --prod --audit-level=high > "$log" 2>&1; then
+            cat "$log"
+          else
+            status=$?
+            cat "$log"
+            # 保留原始失败码，将有界诊断写入检查注释，避免只有通用退出码。
+            message="$(tail -c 12000 "$log")"
+            message="${message//'%'/'%25'}"
+            message="${message//$'\r'/'%0D'}"
+            message="${message//$'\n'/'%0A'}"
+            echo "::error file=frontend/pnpm-lock.yaml,title=Frontend dependency audit failed::$message"
+            exit "$status"
+          fi
 
   container-security:
     if: github.event_name == 'schedule'
