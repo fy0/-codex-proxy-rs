@@ -461,8 +461,9 @@ OAuth 恢复开关为 `host.logging.oauth_recovery`，默认关闭，与普通�
 
 ## 镜像升级与源码构建
 
-从本 fork 的 `legacy` 分支切换官方镜像时，先完成[一次性数据库转换](upstream-migration/README.md)。
-`0016` 起的迁移编号与官方冲突，不能直接执行下面的普通镜像升级步骤；迁移目标固定为官方 `3.19.0`。
+从本 fork 的 `legacy` 分支切换官方镜像时，先更新到[过渡镜像](upstream-migration/README.md)。
+过渡镜像默认在启动时自动备份并转换数据库，成功后再换官方 `3.19.0`，无需手动开启迁移变量。
+`0016` 起的迁移编号与官方冲突，不能跳过过渡镜像直接执行下面的普通镜像升级步骤。
 
 每个 Release 独立提供 `config.example.yaml`、默认镜像固定到该版本的 `compose.yaml` 和校验和；
 各平台归档也包含 `deploy/config.example.yaml`。配置模板来自构建该版本的同一提交。

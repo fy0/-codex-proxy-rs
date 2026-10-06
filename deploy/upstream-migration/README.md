@@ -51,37 +51,41 @@ docker build -f deploy/Dockerfile --target migration-tests .
 仓库的普通 CI 构建不发布镜像。部署机与构建机不同时，先通过自己的镜像仓库或 `docker save/load`
 传送构建结果；不要把官方 release 工作流误用于发布本 fork 的过渡镜像。
 
-## 停机、检查和转换
+## 更新镜像并自动转换
+
+过渡镜像**默认在启动服务前自动迁移**。更新镜像并重建容器即可，不需要设置迁移环境变量，
+也不需要手动运行 `--migrate-only`。识别到已知 legacy 库后，先备份、再转换，成功后启动官方代码；
+已转换的库直接启动，不重复生成备份。未知历史、备份失败或转换失败都会阻止服务启动。
 
 保留现有 `deploy/config.yaml`、Compose 自定义设置以及全部 `.runtime` 数据。对比官方部署模板并合并
-必要配置，不要用模板覆盖现有配置或重新运行初始化来代替迁移。下列命令在部署根目录执行；
-数据库与 Redis 服务应保持运行，只停止网关及其他数据库客户端。
+必要配置，不要用模板覆盖现有配置或重新运行初始化来代替迁移。数据库与 Redis 服务保持运行。
+单实例更新时先停止旧容器再启动新容器；多副本部署必须先停止全部旧网关和其他数据库客户端，
+不能使用新旧副本并行的滚动更新。下列命令从部署根目录执行，镜像须已构建或拉取到部署机：
 
 ```bash
 export CPR_IMAGE=codex-proxy-rs:upstream-migration
-docker compose -f deploy/compose.yaml stop codex-proxy-rs
-
-# 只识别历史，不执行转换；已知旧库应显示 legacy。
-docker compose -f deploy/compose.yaml run --rm --no-deps \
-  codex-proxy-rs --check
-
-# 明确授权的一次性转换；成功后退出，不启动 HTTP 服务。
-docker compose -f deploy/compose.yaml run --rm --no-deps \
-  -e CPR_MIGRATE_LEGACY_TO_UPSTREAM=1 \
-  codex-proxy-rs --migrate-only
-
-# 再次检查应显示 official。
-docker compose -f deploy/compose.yaml run --rm --no-deps \
-  codex-proxy-rs --check
-
-# 可先用过渡镜像运行官方代码，验证管理端、账号、Key 和一次真实 API 请求。
 docker compose -f deploy/compose.yaml up -d --no-deps --no-build codex-proxy-rs
+docker compose -f deploy/compose.yaml logs -f --tail=100 codex-proxy-rs
 ```
 
-默认不开启转换。也支持在过渡容器的 `environment` 中显式设置
-`CPR_MIGRATE_LEGACY_TO_UPSTREAM: '1'`，使入口在启动官方服务前转换；建议优先使用上述一次性方式，
-避免较长的备份过程被外部健康检查或自动重启策略打断。`export` 一个变量不会自动把它传入已有
-Compose 服务，必须使用 `run -e` 或服务的 `environment`。
+首次转换的日志应先显示完整备份路径，再显示 `数据库状态：migrated；固定目标：v3.19.0`，
+随后服务正常启动。已经转换的库会显示 `数据库状态：official`。确认管理端、账号、Client Key
+和一次真实 API 请求正常，保留备份后即可切换下文的官方镜像；不要仅凭容器已经创建判断成功。
+
+备份和转换期间尚未提供 HTTP 服务，健康检查可能暂时失败。部署平台的启动等待、自动回滚或
+自动重启策略必须允许首次迁移完成，不要在看到迁移成功和服务启动前再次更换镜像。
+
+`CPR_MIGRATE_LEGACY_TO_UPSTREAM=0` 只用于显式关闭自动转换；部署中如保留了这个值，更新镜像前
+应移除。默认值为 `1`，其他值会报错。排障时仍可使用只读 `--check`；需要只转换而不启动服务时，
+停止所有网关后运行 `--migrate-only`，无需另外开启变量：
+
+```bash
+# 可选检查，不转换数据库。
+docker compose -f deploy/compose.yaml run --rm --no-deps codex-proxy-rs --check
+
+# 可选的一次性模式，须先停止全部网关及其他数据库客户端。
+docker compose -f deploy/compose.yaml run --rm --no-deps codex-proxy-rs --migrate-only
+```
 
 程序读取 `/app/deploy/config.yaml` 的 `store.database`，遵循 `CPR_DATABASE_URL` 和
 `CPR_DATABASE_PASSWORD` 的非空环境覆盖；Compose 已提供容器内 URL。密码只经子进程环境传给
@@ -101,7 +105,7 @@ Compose 服务，必须使用 `run -e` 或服务的 `environment`。
 
 ```bash
 export CPR_IMAGE=ghcr.io/zyycn/codex-proxy-rs:3.19.0
-docker compose -f deploy/compose.yaml pull codex-proxy-rs
+docker compose -f deploy/compose.yaml pull codex-proxy-rs &&
 docker compose -f deploy/compose.yaml up -d --no-deps --no-build codex-proxy-rs
 ```
 

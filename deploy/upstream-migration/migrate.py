@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将已知 legacy 数据库一次性转换为固定的官方迁移历史；默认不改库。"""
+"""启动服务前默认将已知 legacy 数据库安全转换为固定的官方迁移历史。"""
 from __future__ import annotations
 
 import hashlib
@@ -295,7 +295,7 @@ def migrate_database(connection, settings: Settings, bundle: dict[str, Any], *,
             if status != "legacy" or check_only:
                 return status, None
             if not enabled:
-                raise MigrationError(f"已识别 legacy 数据库；必须显式设置 {ENABLE_ENV}=1 才能转换")
+                raise MigrationError(f"已识别 legacy 数据库，但转换已禁用；请移除 {ENABLE_ENV}=0 或设为 1")
             require_stopped(cursor)
             # SHARE 阻止写入，但允许另一个连接执行 pg_dump 的 ACCESS SHARE 读取。
             cursor.execute(sql.SQL("LOCK TABLE {} IN SHARE MODE").format(sql.SQL(", ").join(
@@ -336,7 +336,8 @@ def main(arguments: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if arguments is None else arguments
     check_only = arguments == ["--check"]
     migration_only = arguments == ["--migrate-only"]
-    enabled = os.environ.get(ENABLE_ENV, "0")
+    # 过渡镜像以更新即迁移为默认；只有显式设置 0 才跳过启动前转换。
+    enabled = os.environ.get(ENABLE_ENV, "1")
     if enabled not in ("0", "1"):
         raise MigrationError(f"{ENABLE_ENV} 仅接受 0 或 1")
     if check_only or migration_only or enabled == "1":

@@ -1,13 +1,14 @@
 """纯 Python 校验和专用 PostgreSQL 集成测试；绝不连接应用的生产 URL。"""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import copy
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -55,7 +56,7 @@ class HistoryTests(unittest.TestCase):
         settings = migrate.Settings("postgres://secret-url", "secret-password", Path("/backups"))
         self.assertNotIn("secret", repr(settings))
 
-    def test_default_entrypoint_does_not_open_database(self):
+    def test_explicit_opt_out_does_not_open_database(self):
         with patch.dict(os.environ, {migrate.ENABLE_ENV: "0"}), \
                 patch.object(migrate, "connect_database") as connect, \
                 patch.object(migrate.os, "execvp") as execute:
@@ -63,7 +64,7 @@ class HistoryTests(unittest.TestCase):
             connect.assert_not_called()
             execute.assert_called_once_with("/app/bin/codex-proxy-rs", ["/app/bin/codex-proxy-rs"])
 
-    def test_invalid_opt_in_is_not_silently_accepted(self):
+    def test_invalid_migration_setting_is_not_silently_accepted(self):
         with patch.dict(os.environ, {migrate.ENABLE_ENV: "yes"}):
             with self.assertRaises(migrate.MigrationError):
                 migrate.main(["--migrate-only"])
@@ -209,6 +210,73 @@ class PostgreSQLTests(unittest.TestCase):
                 normalize = lambda records: sorted(
                     json.dumps({key: row[key] for key in fields}, sort_keys=True) for row in records)
                 self.assertEqual(normalize(rows), normalize(after[name]), name)
+
+    def entrypoint(self, settings, *arguments):
+        # 子进程不继承部署连接或迁移开关，只使用本测试创建的临时库和目录。
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("CPR_", "PG"))}
+        environment.update(
+            CPR_DATABASE_URL=settings.dsn, CPR_DATABASE_PASSWORD=settings.password,
+            CPR_LEGACY_BACKUP_DIR=str(settings.backup_dir),
+            CPR_LEGACY_CONFIG_PATH=str(settings.backup_dir / "absent-config.yaml"),
+            PYTHONDONTWRITEBYTECODE="1",
+        )
+        return subprocess.run(
+            [sys.executable, str(migrate.BASE / "migrate.py"), *arguments],
+            env=environment, capture_output=True, text=True, encoding="utf-8",
+            timeout=120, check=False,
+        )
+
+    def test_default_entrypoint_migrates_before_service_and_is_idempotent(self):
+        with self.database() as (connection, settings):
+            self.fixture(connection)
+            self.seed(connection)
+            before = self.snapshot(connection)
+            connection.close()
+            for status in ("migrated", "official"):
+                result = self.entrypoint(settings, sys.executable, "-c",
+                                         "print('fixture-service-started')")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"数据库状态：{status}", result.stdout)
+                self.assertTrue(result.stdout.rstrip().endswith("fixture-service-started"))
+                self.assertEqual(len(list(settings.backup_dir.glob("*.dump"))), 1)
+            with closing(self.psycopg2.connect(settings.dsn)) as verified:
+                self.assert_retained(before, self.snapshot(verified))
+                with verified, verified.cursor() as cursor:
+                    self.assertEqual(migrate.read_history(cursor), history_for(self.bundle, "official"))
+
+    def test_default_entrypoint_check_is_read_only(self):
+        with self.database() as (connection, settings):
+            self.fixture(connection)
+            before = self.snapshot(connection)
+            result = self.entrypoint(settings, "--check")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("数据库状态：legacy", result.stdout)
+            self.assertEqual(self.snapshot(connection), before)
+            self.assertFalse(list(settings.backup_dir.glob("*.dump")))
+
+    def test_default_entrypoint_blocks_service_when_old_client_is_connected(self):
+        with self.database() as (connection, settings):
+            self.fixture(connection)
+            before = self.snapshot(connection)
+            result = self.entrypoint(settings, sys.executable, "-c",
+                                     "print('fixture-service-started')")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("数据库仍有其他客户端连接", result.stderr)
+            self.assertNotIn("fixture-service-started", result.stdout)
+            self.assertEqual(self.snapshot(connection), before)
+            self.assertFalse(list(settings.backup_dir.glob("*.dump")))
+
+    def test_default_migrate_only_converts_without_starting_service(self):
+        with self.database() as (connection, settings):
+            self.fixture(connection)
+            connection.close()
+            result = self.entrypoint(settings, "--migrate-only")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("数据库状态：migrated", result.stdout)
+            with closing(self.psycopg2.connect(settings.dsn)) as verified:
+                with verified, verified.cursor() as cursor:
+                    self.assertEqual(migrate.read_history(cursor), history_for(self.bundle, "official"))
 
     def test_every_legacy_prefix_matches_fresh_official_schema_and_preserves_data(self):
         with self.database() as (official, _):
