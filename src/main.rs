@@ -405,13 +405,19 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
         multipart_model(&raw, &content_type)
     };
     let Some(model) = target_model else {
-        // 无效 model 字段由原生 Images 处理器负责报告，避免把非桥接请求误改写。
-        request.body = HttpBody::from_bytes(raw);
-        return next.run(request).await;
+        return Ok(error_response(
+            400,
+            "invalid_image_model",
+            "image model is missing or invalid",
+        ));
     };
     if !Config::is_image_model(&model) {
-        request.body = HttpBody::from_bytes(raw);
-        return next.run(request).await;
+        // 当前插件未声明的图片模型不允许通过原生接口绕开账号白名单。
+        return Ok(error_response(
+            400,
+            "unsupported_image_model",
+            "image model is not enabled by this plugin",
+        ));
     }
     if !config.use_responses(&model) {
         // 原生 Images 在 CPR 内部可能不设置 model_hint；认证后的 request
@@ -644,6 +650,21 @@ mod tests {
             header_value(&unsafe_req.headers, "x-codex-image-turn-id"),
             Some("cpr-image-generated-call-2")
         );
+    }
+
+    #[test]
+    fn image_model_registry_does_not_accept_unrecognized_models() {
+        assert_eq!(
+            root_model(br#"{"model":"gpt-image-2"}"#),
+            Some("gpt-image-2".to_owned())
+        );
+        assert_eq!(
+            root_model(br#"{"model":"gpt-image-3"}"#),
+            Some("gpt-image-3".to_owned())
+        );
+        assert!(!Config::is_image_model("gpt-image-3"));
+        assert!(Config::is_image_model("gpt-image-2"));
+        assert_eq!(root_model(br#"{"model":123}"#), None);
     }
 
     #[test]
