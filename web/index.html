@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex 画图测试</title>
+  <link rel="stylesheet" href="./app.css">
+  <script defer src="./app.js"></script>
+</head>
+<body>
+<div class="root">
+  <div class="intro">
+    <div class="intro-mark"><span class="logo">✦</span><span class="eyebrow">CPR IMAGE BRIDGE / OFFICIAL SDK</span></div>
+    <h1>画图测试台</h1>
+    <p>选择客户端 Key 和预置提示词，直接验证 Codex 生图工具。使用宿主模型桥，不向页面提供密钥明文。</p>
+  </div>
+  <div class="layout">
+    <section class="panel controls" aria-label="画图参数">
+      <div class="section-title"><span class="section-index">01</span><h2>生成设置</h2></div>
+      <label for="clientKey">客户端 Key</label>
+      <div class="field-row"><select id="clientKey"><option value="">加载 Key 中…</option></select><button class="icon-btn" id="refresh" title="重新读取 Key 和模型" aria-label="刷新列表">↻</button></div>
+      <label for="driverModel">Responses 对话主控模型</label>
+      <select id="driverModel"><option value="">加载模型中…</option></select>
+      <div class="hint">只使用被选 Key 允许的对话模型；绘图模型在下方单独选择。</div>
+      <label for="imageModel">绘图模型</label>
+      <select id="imageModel"><option value="gpt-image-2">gpt-image-2</option></select>
+      <div class="two-up">
+        <div><label for="size">图像尺寸</label><select id="size"><option value="1024x1024">正方形 1024²</option><option value="1536x1024">横向 3:2</option><option value="1024x1536">竖向 2:3</option><option value="auto">自动</option></select></div>
+        <div><label for="quality">画质</label><select id="quality"><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
+      </div>
+      <div class="divider"></div>
+      <div class="section-title"><span class="section-index">02</span><h2>创作提示词</h2></div>
+      <div class="label-line"><span class="label-text">快速预设</span><span class="hint">点击载入，可继续编辑</span></div>
+      <div id="presets" class="presets" aria-label="预置提示词"></div>
+      <label for="prompt">图片描述</label>
+      <textarea id="prompt" rows="7" maxlength="10000" placeholder="描述你希望生成的图片…"></textarea>
+      <div class="footer-line"><span id="promptCount">0 / 10000</span><span>一次生成 1 张</span></div>
+      <div class="action-row">
+        <button id="generate" class="primary-btn" disabled><span aria-hidden="true">✦</span> 生成图片</button>
+        <button id="cancel" class="secondary-btn" disabled>取消</button>
+      </div>
+      <div id="validationMessage" class="notice" role="status"></div>
+    </section>
+    <section class="panel results" aria-label="生成结果">
+      <div class="results-top"><div class="section-title"><span class="section-index">03</span><h2>生成预览</h2></div><span class="status" id="status">未开始</span></div>
+      <div class="preview" id="preview">
+        <div class="empty" id="empty"><div class="empty-art">✦</div><h3>你的作品会在这里出现</h3><p>选一个预置场景，或者写下自己的描述。</p></div>
+        <img id="resultImage" alt="本次生成的图片" hidden>
+      </div>
+      <div class="result-bar"><div><span class="mini-label">本次结果</span><div id="resultInfo">暂无生成记录</div></div><a id="saveImage" class="save-btn" hidden download="codex-image.png">保存 PNG</a></div>
+      <div class="technical">
+        <details><summary>响应信息 <span class="chevron">⌄</span></summary>
+          <div class="details-body"><div><span>Response ID</span><code id="responseId">—</code></div><div><span>HTTP 状态</span><code id="httpStatus">—</code></div><div><span>响应头请求 ID</span><code id="requestId">—</code></div><div><span>返回文本</span><pre id="resultText">—</pre></div></div>
+        </details>
+      </div>
+    </section>
+  </div>
+  <footer>由官方 CPR 模型桥发起真实 Responses 调用 · 生图会消耗相关账号的用量 · 结果不在浏览器中持久保存</footer>
+</div>
+</body>
+</html>

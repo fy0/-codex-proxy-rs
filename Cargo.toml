@@ -1,0 +1,19 @@
+[package]
+name = "cpr-image-bridge"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+description = "Images API to Codex Responses image_generation bridge for codex-proxy-rs"
+
+[dependencies]
+gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "96e8443ede051abdd8f0bac69462a7cfe2945633", features = ["io"] }
+tokio = { version = "1.52", features = ["io-std", "rt-multi-thread", "macros", "time"] }
+serde_json = "1.0"
+base64 = "0.22"
+multer = "3.1"
+bytes = "1.10"
+futures-util = "0.3"
+
+[dev-dependencies]
+# No network, credentials, or running gateway are needed for the pure conversion tests.

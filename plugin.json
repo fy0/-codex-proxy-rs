@@ -1,0 +1,98 @@
+{
+  "manifestVersion": 2,
+  "publisher": "community",
+  "name": "codex-image-bridge",
+  "displayName": "Codex Image Bridge",
+  "version": "0.4.0",
+  "description": "Codex native Images API compatibility with authorized per-Key image model discovery and image test workbench.",
+  "license": "Apache-2.0",
+  "engines": {
+    "codex-proxy-rs": ">=3.33.0, <4.0.0"
+  },
+  "main": "cpr-image-bridge",
+  "runtime": "trustedProcess",
+  "contributes": {
+    "middleware": {
+      "version": 6,
+      "stages": [
+        "http",
+        "request"
+      ],
+      "inputFormats": [
+        "openai"
+      ],
+      "outputFormats": [
+        "openai"
+      ]
+    },
+    "scheduler": {
+      "version": 3
+    },
+    "management": {
+      "version": 2
+    }
+  },
+  "configurationSchema": {
+    "type": "object",
+    "properties": {
+      "driverModel": {
+        "type": "string",
+        "title": "Responses 对话主控模型",
+        "description": "用于驱动 image_generation 工具调用的对话模型 ID，例如 gpt-5.6-luna。需要当前客户端 Key 可以调用。不是图片模型 ID。",
+        "default": "gpt-5.6-luna",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "bridgeMode": {
+        "type": "string",
+        "title": "生图路由策略",
+        "description": "auto: 采用 Sub2API 兼容策略，已知支持原生 Images 的图片模型走原生接口；responses: 所有列出的图片模型走 image_generation 工具。",
+        "enum": [
+          "auto",
+          "responses"
+        ],
+        "default": "auto"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "title": "图片请求超时（毫秒）",
+        "description": "用于桥接到 /v1/responses 的 HTTP 请求上限。最终超时还受宿主及反代限制。",
+        "minimum": 30000,
+        "maximum": 600000,
+        "default": 300000
+      },
+      "imageAccountIds": {
+        "type": "array",
+        "title": "允许生图的账号 ID",
+        "description": "只有被宿主选为有效候选且属于本白名单或指定分组的 OpenAI 账号才可执行生图；与分组取并集。空列表不额外放行。",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "maxItems": 256,
+        "uniqueItems": true,
+        "default": []
+      },
+      "imageGroupIds": {
+        "type": "array",
+        "title": "允许生图的分组 ID",
+        "description": "从 CPR 已授权账号候选中选择具有这些分组成员资格的账号，不能扩大当前 Client Key 的权限。与账号白名单取并集。",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "maxItems": 256,
+        "uniqueItems": true,
+        "default": []
+      }
+    },
+    "additionalProperties": false
+  },
+  "resources": {
+    "web/index.html": "text/html",
+    "web/app.js": "text/javascript",
+    "web/app.css": "text/css"
+  }
+}
