@@ -40,6 +40,8 @@ impl Config {
         };
         if driver.is_empty()
             || driver.len() > 128
+            // 模型 ID 允许 provider/model，但禁止路径样式的空段和相对段。
+            || driver.split('/').any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
             || !driver.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/')
             })
