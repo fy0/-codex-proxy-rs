@@ -34,7 +34,7 @@ jobs:
       - name: Configure Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.97.0'
+          toolchain: '1.99.1'
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
       - name: Cargo cache
