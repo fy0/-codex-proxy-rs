@@ -106,6 +106,15 @@
     setOptions(fields.driver, [{ value: '', label: '读取模型中…' }], '');
     const result = await invoke('POST', 'api/models', { clientKeyId: fields.clientKey.value });
     const models = Array.isArray(result.models) ? result.models : [];
+    const allowedImages = Array.isArray(result.imageModels) ? result.imageModels : [];
+    const selectedImage = fields.imageModel.value || 'gpt-image-2';
+    const imageOptions = allowedImages.map((id) => ({value: id, label: id}));
+    if (imageOptions.length) {
+      setOptions(fields.imageModel, imageOptions, selectedImage);
+    } else {
+      setOptions(fields.imageModel, [{value:'', label:'该 Key 没有可用的绘图模型'}], '');
+      notice('当前 Key 对插件指定的生图账号没有权限，请检查账号和分组设置。', true);
+    }
     const chatModels = models.filter((name) => typeof name === 'string'
       && !name.startsWith('gpt-image-') && name.length < 256);
     const options = chatModels.map((name) => ({value: name, label: name}));

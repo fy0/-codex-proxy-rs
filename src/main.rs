@@ -247,8 +247,26 @@ async fn handle_request(
     config: &Config,
     registry: &policy::ImageRegistry,
 ) -> Result<MiddlewareResponse, PluginFault> {
-    let RequestCall { request, next, .. } = call;
-    if let Some(model) = policy::image_intent(&request.head.operation, &request.body) {
+    let RequestCall {
+        mut request, next, ..
+    } = call;
+    // 大型图片编辑请求可能超过纯正文解析上限，内部意图标记由 HTTP
+    // 中间件在身份/模型许可检查后设置，在出站前即刻移除。
+    let marked_image = request
+        .head
+        .headers
+        .iter()
+        .find(|header| {
+            header
+                .name
+                .eq_ignore_ascii_case(INTERNAL_IMAGE_INTENT_HEADER)
+        })
+        .and_then(|header| std::str::from_utf8(&header.value).ok())
+        .map(str::to_owned);
+    request.remove_header(INTERNAL_IMAGE_INTENT_HEADER);
+    let image_model =
+        marked_image.or_else(|| policy::image_intent(&request.head.operation, &request.body));
+    if let Some(model) = image_model {
         if !config.has_image_scope() || !Config::is_image_model(&model) {
             return Err(PluginFault::new(
                 ErrorCode::PermissionDenied,
@@ -456,6 +474,7 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
         ));
     }
     if !config.use_responses(&model) {
+        add_header(&mut request.headers, INTERNAL_IMAGE_INTENT_HEADER, &model);
         prepare_codex_image_headers(&mut request, &format!("cpr-image-{call_id}"));
         if multipart && kind == Kind::Edit && Config::is_image_model(&model) {
             // 原生 Images 端点接受 JSON 结构；把标准 multipart 图片转换成 data:image URL。
@@ -532,6 +551,7 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
         ));
     }
     remove_headers(&mut request.headers, &["x-codex-image-turn-id"]);
+    add_header(&mut request.headers, INTERNAL_IMAGE_INTENT_HEADER, &model);
     update_for_responses(&mut request, outbound, config.timeout_ms);
     let mut upstream = next.run(request).await?;
     if !(200..300).contains(&upstream.status) {

@@ -71,6 +71,16 @@ impl ImageRegistry {
 /// 从协议语义识别实际生图操作，避免客户端私有 header 伪造。
 pub fn image_intent(operation: &str, body: &[u8]) -> Option<String> {
     if body.len() > 4 * 1024 * 1024 {
+        // 大正文中若存在生图工具声明而没有内部校验标记，
+        // 不应静默委托普通对话调度。保守拒绝而不是漏拦。
+        let image_tool = b"\"image_generation\"";
+        if operation == "generate_image"
+            || body
+                .windows(image_tool.len())
+                .any(|window| window == image_tool)
+        {
+            return Some("__unverified_image_intent__".to_owned());
+        }
         return None;
     }
     let payload: Value = serde_json::from_slice(body).ok()?;
@@ -228,6 +238,13 @@ mod tests {
         );
         assert_eq!(image_intent("generate", br#"{"model":"gpt-6"}"#), None);
         registry.mark("request-1", "key-1", "gpt-image-2");
+        let mut large_image = Vec::with_capacity(4 * 1024 * 1024 + 64);
+        large_image.extend_from_slice(br#"{"tools":[{"type":"image_generation"}],"input":""#);
+        large_image.resize(4 * 1024 * 1024 + 5, b'a');
+        assert_eq!(
+            image_intent("generate", &large_image),
+            Some("__unverified_image_intent__".to_owned())
+        );
         assert_eq!(
             registry.get("request-1").unwrap().image_model,
             "gpt-image-2"

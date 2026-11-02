@@ -138,11 +138,13 @@ pub async fn handle(
                 return bad("clientKeyId 不合法");
             };
             let catalog = model_catalog(&call.host, id.to_owned()).await?;
+            let images = crate::access::allowed_models_for_key(&call.host, config, id).await?;
             json_response(
                 200,
-                serde_json::to_value(catalog).map_err(|_| {
-                    PluginFault::new(ErrorCode::Fault, "encode model catalog failed")
-                })?,
+                json!({
+                    "models": catalog.models,
+                    "imageModels": images,
+                }),
             )
         }
         _ => json_response(

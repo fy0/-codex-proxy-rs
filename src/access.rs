@@ -81,18 +81,27 @@ pub async fn allowed_models(
     authorization: &str,
 ) -> Result<Vec<String>, PluginFault> {
     let client_key_id = key_id(host, authorization).await?;
+    allowed_models_for_key(host, config, &client_key_id).await
+}
+
+/// 管理页面只有 Key 的 ID，不持有 Key 明文。直接向官方 ACL 查询这个 Key 的授权。
+pub async fn allowed_models_for_key(
+    host: &HostClient,
+    config: &Config,
+    client_key_id: &str,
+) -> Result<Vec<String>, PluginFault> {
     let candidate_ids = account_ids(host, config).await?;
     if candidate_ids.is_empty() {
         return Ok(Vec::new());
     }
     let mut available = Vec::new();
     let driver_scope = if IMAGE_MODELS.iter().any(|model| config.use_responses(model)) {
-        Some(access_set(host, &client_key_id, &candidate_ids, &config.driver).await?)
+        Some(access_set(host, client_key_id, &candidate_ids, &config.driver).await?)
     } else {
         None
     };
     for model in IMAGE_MODELS {
-        let mut allowed = access_set(host, &client_key_id, &candidate_ids, model).await?;
+        let mut allowed = access_set(host, client_key_id, &candidate_ids, model).await?;
         if config.use_responses(model) {
             let Some(driver) = &driver_scope else {
                 continue;
