@@ -13,7 +13,7 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 COPY frontend ./
 RUN pnpm build
 
-FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS backend-builder
+FROM rust:1.99-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS backend-builder
 
 WORKDIR /app/backend
 ARG TARGETARCH
