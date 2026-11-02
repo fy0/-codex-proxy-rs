@@ -271,10 +271,9 @@ fn prepare_codex_image_headers(request: &mut HttpRequest, call_id: &str) {
             !v.is_empty() && v.len() <= 256 && v.as_bytes().iter().all(|b| *b >= 0x20 && *b <= 0x7e)
         })
         .map(str::to_owned);
-    remove_headers(
-        &mut request.headers,
-        &["x-codex-image-turn-id", "x-codex-turn-metadata"],
-    );
+    // 官方 CodexImagesBackend 可以携带可选 x-codex-turn-metadata；不能删除。
+    // 由 CPR Provider 层按照现有安全规则处理该 Header。
+    remove_headers(&mut request.headers, &["x-codex-image-turn-id"]);
     add_header(
         &mut request.headers,
         "x-codex-image-turn-id",
@@ -415,6 +414,9 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
         return next.run(request).await;
     }
     if !config.use_responses(&model) {
+        // 原生 Images 在 CPR 内部可能不设置 model_hint；认证后的 request
+        // 阶段依赖该标记登记，不能只靠 scheduler.request.model 过滤账号。
+        add_header(&mut request.headers, INTERNAL_IMAGE_INTENT_HEADER, "1");
         prepare_codex_image_headers(&mut request, &format!("cpr-image-{call_id}"));
         if multipart && kind == Kind::Edit && Config::is_image_model(&model) {
             // 原生 Images 端点接受 JSON 结构；把标准 multipart 图片转换成 data:image URL。
@@ -596,7 +598,11 @@ mod tests {
             "codex-turn-from-client",
         );
         add_header(&mut req.headers, "originator", "codex_cli_rs");
-        add_header(&mut req.headers, "x-codex-turn-metadata", "not-for-images");
+        add_header(
+            &mut req.headers,
+            "x-codex-turn-metadata",
+            "official-turn-metadata",
+        );
         prepare_codex_image_headers(&mut req, "cpr-image-8");
         assert_eq!(
             header_value(&req.headers, "x-codex-image-turn-id"),
@@ -606,7 +612,10 @@ mod tests {
             header_value(&req.headers, "originator"),
             Some("codex_cli_rs")
         );
-        assert!(header_value(&req.headers, "x-codex-turn-metadata").is_none());
+        assert_eq!(
+            header_value(&req.headers, "x-codex-turn-metadata"),
+            Some("official-turn-metadata")
+        );
         assert_eq!(
             req.headers
                 .iter()

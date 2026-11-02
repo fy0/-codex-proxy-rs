@@ -17,7 +17,7 @@
 2. 不伪造 originator、Authorization、Cookie；CPR 为选定账号构建认证和请求画像。
 3. 原生编辑接受官方 JSON 图片引用；传统 multipart 编辑先转换为同语义 JSON images 数组后转发。
 4. 原生 JSON 成功响应不做非必要重写；Responses 兼容桥接在上游返回时保留 x-codex-imagegen-request-id。
-5. 原生 Images 不附加不相关的 x-codex-turn-metadata；Responses 兼容请求不携带 x-codex-image-turn-id。
+5. 原生 Images 支持并保留 CodexImagesBackend 可选的 x-codex-turn-metadata；该 Header 由 CPR Provider 做安全过滤。Responses 兼容请求不携带 x-codex-image-turn-id。
 
 实际 Headers 仍取决于 CPR 的 Provider 请求画像、部署代理及调用客户端，不能确保与官方工具的所有网络指纹字节相同。
 
@@ -36,7 +36,7 @@
 
 未指定账号或分组时，插件覆盖的生图请求直接拒绝。普通对话模型的请求委托 CPR 原生调度。生图模型的调度只在 CPR 已完成 Key/账号范围过滤后的候选账号内选取，先匹配指定账号与分组，失败拒绝，不回退给其它账号。
 
-必须同时启用 middleware.http、middleware.request 和 scheduler 绑定，scheduler 的故障策略应为 reject（不能使用 delegate，否则无法保证账号限制）。将它们绑定到需要生图的 Key 范围。请求中用于桥接的内部意图头会在 HTTP 阶段被清除客户端伪造值，认证后 request 阶段才登记，不传给上游。
+必须同时启用 middleware.http、middleware.request 和 scheduler 绑定，scheduler 的故障策略应为 reject（不能使用 delegate，否则无法保证账号限制）。将它们绑定到需要生图的 Key 范围。插件覆盖的原生 Images 与 Responses 桥接请求都由 HTTP 中间件添加受保护的内部意图头；在 HTTP 阶段清除客户端伪造值，认证后 request 阶段才登记并移除，不传给上游。原生 Images 的模型提示可能为空，因此不能仅依赖模型 ID 判定账号范围。
 
 ## /v1/models 的已知 SDK 边界
 

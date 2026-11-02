@@ -183,6 +183,15 @@ mod tests {
         assert!(!should_scope(&request, &registry));
         registry.mark("req-1");
         assert!(should_scope(&request, &registry));
+        // 原生 Images 的 model_hint 可能为空；必须依赖认证后的请求标记。
+        let native = AccountScheduleRequest {
+            request_id: "req-1".to_owned(),
+            attempt_index: 1,
+            provider: "openai".to_owned(),
+            model: None,
+            candidates: Vec::new(),
+        };
+        assert!(should_scope(&native, &registry));
     }
 
     #[test]
