@@ -6,7 +6,7 @@ mod models;
 mod policy;
 mod response;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
@@ -30,9 +30,7 @@ const MAX_RESPONSES_INPUT_BYTES: usize = 60 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut session_config = SessionConfig::default();
-    // 生图处理时间较长；具体的请求截止期限仍由宿主决定。
-    session_config.maximum_call_timeout = Duration::from_secs(660);
+    let session_config = SessionConfig::default();
     let session =
         PluginSession::accept(tokio::io::stdin(), tokio::io::stdout(), session_config).await?;
     let config = Arc::new(

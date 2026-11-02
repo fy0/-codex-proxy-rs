@@ -174,11 +174,11 @@ pub async fn schedule(
     }
     let mut approved = candidates.iter().cloned().collect::<HashSet<_>>();
     // 对 Responses 主控模型的账号，额外要求相同 Key 对实际图片模型拥有权限。
-    if let Some(intent) = intent {
+    if let Some(intent) = intent.as_ref() {
         let check = call
             .host
             .check_access(AccessQuery {
-                client_key_id: intent.client_key_id,
+                client_key_id: intent.client_key_id.clone(),
                 account_ids: candidates,
                 upstream_model: Some(model.to_owned()),
             })
