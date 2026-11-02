@@ -53,14 +53,12 @@ pub fn detail_for(body: &[u8], config: &Config, id: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Mode;
     #[test]
     fn only_add_when_driver_visible_and_never_duplicate() {
-        let cfg = Config {
-            driver: "gpt-5.6-luna".into(),
-            mode: Mode::Auto,
-            timeout_ms: 300_000,
-        };
+        let cfg = Config::from_configuration(&serde_json::json!({
+            "driverModel": "gpt-5.6-luna"
+        }))
+        .unwrap();
         assert!(add_models(br#"{"object":"list","data":[]}"#, &cfg).is_none());
         let root = br#"{"object":"list","data":[{"id":"gpt-5.6-luna","owned_by":"openai"},{"id":"gpt-image-2"}]}"#;
         let out = add_models(root, &cfg).unwrap();
