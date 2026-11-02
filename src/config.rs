@@ -115,16 +115,9 @@ impl Config {
         if self.mode == Mode::Responses {
             return true;
         }
-        // 官方 Codex imagegen 使用原生 Images；保留旧模型 Responses 兼容行为。
-        !matches!(
-            model,
-            "gpt-image-1.5"
-                | "gpt-image-2"
-                | "gpt-image-2.5-flare"
-                | "gpt-image-2.5-sunburst"
-                | "gpt-image-2.5-flare-2026-09-08"
-                | "gpt-image-2.5-sunburst-2026-09-08"
-        )
+        // Auto 只将明确需要兼容的旧款 gpt-image-1 转为 Responses；
+        // 其余显式注册的新模型沿用官方 Codex 原生 Images 路径。
+        model == "gpt-image-1"
     }
 }
 
