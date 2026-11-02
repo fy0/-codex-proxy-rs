@@ -70,3 +70,41 @@ details summary { padding:15px 2px;cursor:pointer;font-weight:620;font-size:13px
 footer {font-size:12px;color:var(--muted);text-align:center;margin:23px 0 0; }
 @media (max-width:920px) { .layout {grid-template-columns:1fr;} .preview {min-height:320px;} }
 @media (max-width:550px) { .root {padding:16px;} .panel {padding:16px;}h1{font-size:24px;} .presets{grid-template-columns:repeat(2,minmax(0,1fr));} }
+/* 插件配置生成器：与原生管理页同样采用自然文档流，保持 14px 基准。 */
+.config-panel {margin-bottom:18px;}
+.config-head {display:flex;justify-content:space-between;align-items:flex-start;gap:14px;}
+.config-head .section-title {margin-bottom:5px;}
+.config-head p {margin:0 0 19px;color:var(--muted);}
+.config-label {background:var(--orange-soft);color:var(--orange);border:1px solid var(--border);border-radius:30px;padding:5px 12px;white-space:nowrap;font-size:12px;font-weight:650;}
+.config-grid {display:grid;grid-template-columns:1fr 1.06fr;gap:25px;}
+.config-column {min-width:0;}
+.config-column+.config-column {border-left:1px solid var(--border);padding-left:25px;}
+.config-column h3 {font-size:15px;margin:0 0 11px;font-weight:710;}
+.config-column .label-line {margin-top:12px;gap:8px;}
+.config-column .label-line .label-text {margin:0;}
+.option-list {border:1px solid var(--border);border-radius:11px;background:var(--bg);max-height:208px;overflow-y:auto;padding:6px;display:grid;align-content:start;gap:4px;min-height:47px;}
+.option-item {display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer;font-size:13px;margin:0;min-width:0;}
+.option-item:hover {background:var(--orange-soft);}
+.option-item.checked {background:var(--orange-soft);}
+.option-item input {width:17px;height:17px;accent-color:var(--orange);flex:none;}
+.option-item .option-title {display:block;font-weight:650;overflow-wrap:anywhere;}
+.option-item .option-secondary {display:block;font-weight:400;color:var(--muted);font-size:11px;overflow-wrap:anywhere;}
+.option-item .option-title.disabled {color:var(--muted);}
+.placeholder {padding:7px 9px;font-size:12px;color:var(--muted);}
+.config-column input:not([type="checkbox"]) {min-height:43px;width:100%;padding:10px 12px;border:1px solid var(--border);background:var(--surface);color:var(--ink);border-radius:9px;}
+.config-column input:focus-visible {outline:3px solid #f6b57f;outline-offset:2px;}
+.config-column .id-entry {min-height:58px;font-size:12px;line-height:1.5;resize:vertical;}
+.config-column .field-note {font-size:12px;line-height:1.65;color:var(--muted);margin:12px 0;}
+.model-options {display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px;}
+.model-chip {display:inline-flex;gap:6px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:var(--surface);font-size:12px;font-weight:600;margin:0;cursor:pointer;overflow-wrap:anywhere;}
+.model-chip input {width:15px;height:15px;accent-color:var(--orange);}
+.model-chip.active {border-color:var(--orange);background:var(--orange-soft);}
+.config-column .inline-model {margin:11px 0;align-items:stretch;}
+.config-column .inline-model button {white-space:nowrap;}
+.config-column .config-preview-label {margin-top:14px;}
+.config-column .config-preview-label label {margin:0;}
+.json-editor {min-height:214px;font-size:12px;line-height:1.55;font-family:Consolas,Menlo,"Courier New",monospace;resize:vertical;tab-size:2;}
+.config-column .notice {min-height:20px;}
+.config-column .action-row {margin-top:11px;}
+@media (max-width:950px) {.config-grid {grid-template-columns:1fr;gap:18px;}.config-column+.config-column{border-left:0;border-top:1px solid var(--border);padding:17px 0 0;}}
+@media (max-width:550px) {.config-head{display:block}.config-label{display:inline-block;margin:9px 0 13px}.config-column .action-row{flex-wrap:wrap}.config-column .action-row button{width:100%}}

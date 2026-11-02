@@ -13,6 +13,270 @@
     requestId: byId('requestId'), resultText: byId('resultText'),
     count: byId('promptCount'), presets: byId('presets')
   };
+  const configFields = {
+    accounts: byId('configAccounts'), groups: byId('configGroups'), models: byId('configModels'),
+    accountsCount: byId('configAccountsCount'), groupsCount: byId('configGroupsCount'),
+    modelsCount: byId('configModelsCount'),
+    accountExtra: byId('configAccountExtra'), groupExtra: byId('configGroupExtra'),
+    modelNew: byId('configModelNew'), modelAdd: byId('configModelAdd'),
+    driver: byId('configDriver'), mode: byId('configMode'),
+    timeout: byId('configTimeout'), json: byId('configJson'),
+    copy: byId('copyConfig'), reset: byId('resetConfig'), notice: byId('configNotice')
+  };
+  const builderState = {
+    accounts: [], groups: [], candidates: [],
+    selectedAccounts: new Set(), selectedGroups: new Set(), selectedModels: new Set(),
+    saved: null, accountOptionsError: false, truncated: false
+  };
+  const isImageModel = (model) => /^gpt-image-[A-Za-z0-9_.-]+$/.test(model) && model.length <= 128;
+  function parseIds(value, field) {
+    const ids = value.trim() ? value.trim().split(/[\s,;]+/).filter(Boolean) : [];
+    if (ids.length > 256 || ids.some((id) => id.length > 128 || /[\x00-\x1f\x7f]/.test(id))) {
+      throw new Error(field + ' ID 格式错误或数量超过 256');
+    }
+    return ids;
+  }
+  function unique(values) {
+    return [...new Set(values)];
+  }
+  function makeOption(container, title, detail, selected, onChange, disabled) {
+    const row = document.createElement('label');
+    row.className = 'option-item' + (selected ? ' checked' : '');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = selected;
+    input.disabled = !!disabled;
+    const display = document.createElement('span');
+    const label = document.createElement('span');
+    label.className = 'option-title' + (disabled ? ' disabled' : '');
+    label.textContent = title;
+    display.appendChild(label);
+    if (detail) {
+      const sub = document.createElement('span');
+      sub.className = 'option-secondary';
+      sub.textContent = detail;
+      display.appendChild(sub);
+    }
+    row.append(input, display);
+    input.addEventListener('change', () => {
+      row.classList.toggle('checked', input.checked);
+      onChange(input.checked);
+    });
+    container.appendChild(row);
+  }
+  function renderAccountOptions() {
+    configFields.accounts.replaceChildren();
+    const selected = builderState.selectedAccounts;
+    const available = builderState.accounts;
+    const candidates = available.map((item) => item.id);
+    const missing = [...selected].filter((id) => !candidates.includes(id));
+    if (!available.length && !missing.length) {
+      const empty = document.createElement('div');
+      empty.className = 'placeholder';
+      empty.textContent = builderState.accountOptionsError
+        ? '账号目录不可用；请在下方手动输入账号 ID'
+        : '没有可选的 OpenAI 账号；可手动输入 ID';
+      configFields.accounts.appendChild(empty);
+    }
+    available.forEach((account) => {
+      const details = account.id + (account.groupIds && account.groupIds.length
+        ? ' · 分组 ' + account.groupIds.join(', ') : '') + (account.enabled ? '' : ' · 已停用');
+      makeOption(configFields.accounts, account.name || account.id, details,
+        selected.has(account.id), (checked) => {
+          if (checked) selected.add(account.id);
+          else selected.delete(account.id);
+          refreshConfigJson();
+        }, !account.enabled);
+    });
+    missing.forEach((id) => {
+      makeOption(configFields.accounts, id, '原配置账号（当前列表未找到）', true, (checked) => {
+        if (!checked) selected.delete(id);
+        refreshConfigJson();
+      });
+    });
+  }
+  function renderGroupOptions() {
+    configFields.groups.replaceChildren();
+    const selected = builderState.selectedGroups;
+    const ids = unique([...builderState.groups, ...selected]);
+    if (!ids.length) {
+      const empty = document.createElement('div');
+      empty.className = 'placeholder';
+      empty.textContent = '暂无分组信息；可以在下方输入分组 ID';
+      configFields.groups.appendChild(empty);
+    }
+    ids.forEach((id) => makeOption(configFields.groups, id,
+      '分组 ID · 与账号白名单取并集', selected.has(id), (checked) => {
+        if (checked) selected.add(id);
+        else selected.delete(id);
+        refreshConfigJson();
+      }));
+  }
+  function renderModelOptions() {
+    configFields.models.replaceChildren();
+    const selected = builderState.selectedModels;
+    const choices = unique([...builderState.candidates, ...selected]);
+    choices.forEach((id) => {
+      const item = document.createElement('label');
+      item.className = 'model-chip' + (selected.has(id) ? ' active' : '');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = selected.has(id);
+      const text = document.createElement('span');
+      text.textContent = id;
+      item.append(checkbox, text);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked && selected.size >= 32) {
+          checkbox.checked = false;
+          configFields.notice.textContent = '最多可配置 32 个绘图模型';
+          configFields.notice.classList.add('error');
+          return;
+        }
+        if (checkbox.checked) selected.add(id);
+        else selected.delete(id);
+        item.classList.toggle('active', checkbox.checked);
+        refreshConfigJson();
+      });
+      configFields.models.appendChild(item);
+    });
+  }
+  function currentConfig() {
+    const imageModels = [...builderState.selectedModels];
+    const accounts = unique([...builderState.selectedAccounts, ...parseIds(configFields.accountExtra.value, '账号')]);
+    const groups = unique([...builderState.selectedGroups, ...parseIds(configFields.groupExtra.value, '分组')]);
+    const driverModel = configFields.driver.value.trim();
+    if (!driverModel || !/^[A-Za-z0-9_.\/-]+$/.test(driverModel)
+        || driverModel.length > 128 || driverModel.split('/').some((segment) => !segment || segment === '.' || segment === '..')) {
+      throw new Error('请输入合法的对话主控模型 ID');
+    }
+    if (imageModels.length > 32 || imageModels.some((id) => !isImageModel(id))) {
+      throw new Error('绘图模型数量或 ID 格式错误');
+    }
+    if (accounts.length > 256 || groups.length > 256) {
+      throw new Error('账号或分组数量超过上限 256');
+    }
+    return {
+      timeoutMs: Number(configFields.timeout.value),
+      bridgeMode: configFields.mode.value,
+      driverModel,
+      imageModels,
+      imageGroupIds: groups,
+      imageAccountIds: accounts
+    };
+  }
+  function refreshConfigJson() {
+    try {
+      const payload = currentConfig();
+      configFields.json.value = JSON.stringify(payload, null, 2);
+      configFields.accountsCount.textContent = payload.imageAccountIds.length + ' 个';
+      configFields.groupsCount.textContent = payload.imageGroupIds.length + ' 个';
+      configFields.modelsCount.textContent = payload.imageModels.length + ' 个';
+      configFields.copy.disabled = false;
+      const warning = payload.imageModels.length === 0 ? '未选择绘图模型，保存后不会向外提供生图模型'
+        : payload.imageAccountIds.length === 0 && payload.imageGroupIds.length === 0
+          ? '账号和分组都为空：保存后生图仍处于禁用状态'
+          : '配置已生成。复制到「插件设置 → 插件参数」保存，随后刷新此页面。';
+      configFields.notice.textContent = warning;
+      configFields.notice.classList.toggle('error', payload.imageModels.length === 0
+        || payload.imageAccountIds.length === 0 && payload.imageGroupIds.length === 0);
+    } catch (error) {
+      configFields.json.value = '';
+      configFields.copy.disabled = true;
+      configFields.notice.textContent = error && error.message || '配置无效';
+      configFields.notice.classList.add('error');
+    }
+  }
+  function setConfigState(config) {
+    builderState.selectedAccounts = new Set(Array.isArray(config.imageAccountIds) ? config.imageAccountIds : []);
+    builderState.selectedGroups = new Set(Array.isArray(config.imageGroupIds) ? config.imageGroupIds : []);
+    builderState.selectedModels = new Set(Array.isArray(config.imageModels) ? config.imageModels : builderState.candidates);
+    configFields.accountExtra.value = '';
+    configFields.groupExtra.value = '';
+    configFields.driver.value = config.driverModel || 'gpt-5.6-luna';
+    configFields.mode.value = config.bridgeMode === 'responses' ? 'responses' : 'auto';
+    const timeout = String(config.timeoutMs || 300000);
+    configFields.timeout.value = [...configFields.timeout.options].some((option) => option.value === timeout)
+      ? timeout : '300000';
+    renderAccountOptions();
+    renderGroupOptions();
+    renderModelOptions();
+    refreshConfigJson();
+  }
+  function loadConfigBuilder(state) {
+    const config = state.configuration || {
+      timeoutMs: 300000, bridgeMode: 'auto', driverModel: 'gpt-5.6-luna',
+      imageModels: ['gpt-image-2'], imageAccountIds: [], imageGroupIds: []
+    };
+    builderState.saved = JSON.parse(JSON.stringify(config));
+    builderState.accounts = (Array.isArray(state.accountOptions) ? state.accountOptions : [])
+      .filter((account) => account && typeof account.id === 'string'
+        && typeof account.name === 'string' && Array.isArray(account.groupIds));
+    builderState.groups = (Array.isArray(state.groupOptions) ? state.groupOptions : [])
+      .filter((group) => typeof group === 'string');
+    builderState.candidates = unique(
+      (Array.isArray(state.candidateImageModels) ? state.candidateImageModels : ['gpt-image-2'])
+      .filter((id) => typeof id === 'string' && isImageModel(id))
+    );
+    builderState.accountOptionsError = !!state.accountOptionsError;
+    builderState.truncated = !!state.accountOptionsTruncated;
+    setConfigState(builderState.saved);
+    if (builderState.truncated) {
+      configFields.notice.textContent += ' · 账号较多，仅显示前 600 个，可手动补充账号 ID。';
+    } else if (builderState.accountOptionsError) {
+      configFields.notice.textContent += ' · 无法自动读取账号目录，可手动填写 ID。';
+    }
+  }
+  function addCustomModel() {
+    const id = configFields.modelNew.value.trim();
+    if (!isImageModel(id)) {
+      configFields.notice.textContent = '自定义绘图模型必须以 gpt-image- 开头，且只含字母、数字、点、横线、下划线（最长 128 字符）';
+      configFields.notice.classList.add('error');
+      return;
+    }
+    if (!builderState.selectedModels.has(id) && builderState.selectedModels.size >= 32) {
+      configFields.notice.textContent = '最多 32 个绘图模型';
+      configFields.notice.classList.add('error');
+      return;
+    }
+    if (!builderState.candidates.includes(id)) builderState.candidates.push(id);
+    builderState.selectedModels.add(id);
+    configFields.modelNew.value = '';
+    renderModelOptions();
+    refreshConfigJson();
+  }
+  async function copyConfig() {
+    if (!configFields.json.value) return;
+    const text = configFields.json.value;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        configFields.json.focus();
+        configFields.json.select();
+        if (!document.execCommand || !document.execCommand('copy')) throw new Error('copy unavailable');
+      }
+      configFields.notice.textContent = '已复制配置 JSON。请到「插件设置 → 插件参数」粘贴并保存，保存后再刷新画图测试页面。';
+      configFields.notice.classList.remove('error');
+    } catch {
+      configFields.json.focus();
+      configFields.json.select();
+      configFields.notice.textContent = '自动复制被浏览器阻止；已选中 JSON，请按 Ctrl+C / ⌘C 复制。';
+      configFields.notice.classList.add('error');
+    }
+  }
+  [configFields.accountExtra, configFields.groupExtra, configFields.driver].forEach((input) =>
+    input.addEventListener('input', refreshConfigJson));
+  [configFields.mode, configFields.timeout].forEach((select) =>
+    select.addEventListener('change', refreshConfigJson));
+  configFields.modelAdd.addEventListener('click', addCustomModel);
+  configFields.modelNew.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); addCustomModel(); }
+  });
+  configFields.copy.addEventListener('click', copyConfig);
+  configFields.reset.addEventListener('click', () => {
+    if (builderState.saved) setConfigState(builderState.saved);
+  });
+
   const presets = [
     { name: '骑车鹈鹕', desc: '卡通 / 可爱', prompt: '一只胖乎乎的白色鹈鹕骑着橙色复古自行车穿过海滨小路，长长的橙色喙，轻快的动态姿势，晴朗天空和零星白云，精致的 2D 动画插画，轮廓清晰，温暖配色，高质量。' },
     { name: '微缩城市', desc: '3D / 等距', prompt: '一个充满生机的微缩城市街区等距视角 3D 渲染，小咖啡馆、街边绿树、行人和有轨电车，柔和清晨阳光，细腻的微型模型材质，干净的画面构图。' },
@@ -134,6 +398,7 @@
     try {
       notice('');
       const state = await invoke('GET', 'api/bootstrap');
+      loadConfigBuilder(state);
       configuredDriver = state.driverModel || 'gpt-5.6-luna';
       supportedKeys = Array.isArray(state.keys) ? state.keys.filter((key) => key.enabled) : [];
       const selectedKey = fields.clientKey.value || '';
@@ -144,8 +409,7 @@
         setOptions(fields.clientKey, [{value: '', label: '没有可用的客户端 Key'}], '');
         notice('请先在 CPR 管理端创建并启用客户端 Key。', true);
       }
-      const choices = Array.isArray(state.imageModels) && state.imageModels.length
-        ? state.imageModels : ['gpt-image-2'];
+      const choices = Array.isArray(state.imageModels) ? state.imageModels : [];
       const selectedImage = fields.imageModel.value || 'gpt-image-2';
       setOptions(fields.imageModel, choices.map((id) => ({value: id, label: id})), selectedImage);
       if (!state.enabled) notice('尚未选择启用生图的账号或分组，请先在插件设置中配置。', true);
@@ -312,6 +576,11 @@
   fields.generate.addEventListener('click', generate);
   fields.cancel.addEventListener('click', function () { if (controller) controller.abort(); });
   fields.refresh.addEventListener('click', bootstrap);
+  loadConfigBuilder({
+    configuration: {timeoutMs:300000,bridgeMode:'auto',driverModel:'gpt-5.6-luna',
+      imageModels:['gpt-image-2'],imageGroupIds:[],imageAccountIds:[]},
+    candidateImageModels:['gpt-image-2','gpt-image-1.5']
+  });
   fields.prompt.value = presets[0].prompt;
   presetButtons();
   count();

@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.4.0",
-  "description": "Codex native Images API compatibility with authorized per-Key image model discovery and image test workbench.",
+  "version": "0.5.0",
+  "description": "Codex image API and per-Key dynamic image models with graphical account/group/model configuration builder.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -86,6 +86,28 @@
         "maxItems": 256,
         "uniqueItems": true,
         "default": []
+      },
+      "imageModels": {
+        "type": "array",
+        "title": "对外提供的生图模型",
+        "description": "图片模型允许列表，必须为 gpt-image-*。仅这些模型会按当前 Key 和账号/分组范围过滤后出现在 /v1/models。可在插件画图测试页生成完整 JSON 配置。",
+        "items": {
+          "type": "string",
+          "minLength": 11,
+          "maxLength": 128,
+          "pattern": "^gpt-image-[A-Za-z0-9_.-]+$"
+        },
+        "maxItems": 32,
+        "uniqueItems": true,
+        "default": [
+          "gpt-image-1",
+          "gpt-image-1.5",
+          "gpt-image-2",
+          "gpt-image-2.5-flare",
+          "gpt-image-2.5-sunburst",
+          "gpt-image-2.5-flare-2026-09-08",
+          "gpt-image-2.5-sunburst-2026-09-08"
+        ]
       }
     },
     "additionalProperties": false

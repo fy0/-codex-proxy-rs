@@ -7,7 +7,7 @@ use gateway_plugin_sdk::{
     client::HostClient,
 };
 
-use crate::config::{Config, IMAGE_MODELS};
+use crate::config::Config;
 
 const MAX_PAGES: usize = 128;
 
@@ -94,38 +94,55 @@ pub async fn allowed_models_for_key(
     if candidate_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut available = Vec::new();
-    let driver_scope = if IMAGE_MODELS.iter().any(|model| config.use_responses(model)) {
-        Some(access_set(host, client_key_id, &candidate_ids, &config.driver).await?)
+    // 图片操作的 Core 模型提示不是普通对话模型。此前以
+    // upstream_model=gpt-image-* 查询普通 model_access，会将合法 Images
+    // 账号错误过滤为空。正确做法是先按 Key 的账号范围查询（None），
+    // 仅 Responses 桥接再检查真实驱动模型的访问范围。
+    let key_scope = access_set(host, client_key_id, &candidate_ids, None).await?;
+    let driver_scope = if config
+        .image_models
+        .iter()
+        .any(|model| config.use_responses(model))
+    {
+        Some(access_set(host, client_key_id, &candidate_ids, Some(&config.driver)).await?)
     } else {
         None
     };
-    for model in IMAGE_MODELS {
-        let mut allowed = access_set(host, client_key_id, &candidate_ids, model).await?;
-        if config.use_responses(model) {
-            let Some(driver) = &driver_scope else {
-                continue;
-            };
-            allowed.retain(|account| driver.contains(account));
-        }
-        if !allowed.is_empty() {
-            available.push((*model).to_owned());
-        }
-    }
-    Ok(available)
+    Ok(eligible_image_models(
+        config,
+        &key_scope,
+        driver_scope.as_ref(),
+    ))
+}
+
+fn eligible_image_models(
+    config: &Config,
+    scope: &HashSet<String>,
+    drivers: Option<&HashSet<String>>,
+) -> Vec<String> {
+    config
+        .image_models
+        .iter()
+        .filter(|model| {
+            !scope.is_empty()
+                && (!config.use_responses(model)
+                    || drivers.is_some_and(|allowed| !allowed.is_disjoint(scope)))
+        })
+        .cloned()
+        .collect()
 }
 
 async fn access_set(
     host: &HostClient,
     client_key_id: &str,
     ids: &[String],
-    model: &str,
+    model: Option<&str>,
 ) -> Result<HashSet<String>, PluginFault> {
     let facts = host
         .check_access(AccessQuery {
             client_key_id: client_key_id.to_owned(),
             account_ids: ids.to_vec(),
-            upstream_model: Some(model.to_owned()),
+            upstream_model: model.map(str::to_owned),
         })
         .await?;
     Ok(facts
@@ -140,10 +157,34 @@ async fn access_set(
 mod tests {
     use super::*;
     #[test]
-    fn image_model_names_are_distinct() {
+    fn native_images_are_visible_when_key_has_matching_accounts() {
+        let config = Config::from_configuration(&serde_json::json!({
+            "imageModels":["gpt-image-2","gpt-image-1"],
+            "imageAccountIds":["acc-1"]
+        }))
+        .unwrap();
+        let authorized = HashSet::from(["acc-1".to_owned()]);
+        let driver_unavailable = HashSet::new();
+        // Native Images does not require gpt-image-* to pass ordinary model_access.
         assert_eq!(
-            IMAGE_MODELS.iter().collect::<HashSet<_>>().len(),
-            IMAGE_MODELS.len()
+            eligible_image_models(&config, &authorized, Some(&driver_unavailable)),
+            vec!["gpt-image-2".to_owned()]
+        );
+        assert!(eligible_image_models(&config, &HashSet::new(), Some(&authorized)).is_empty());
+    }
+
+    #[test]
+    fn response_bridge_checks_driver_access_only_for_same_accounts() {
+        let config = Config::from_configuration(&serde_json::json!({
+            "bridgeMode":"responses", "imageModels":["gpt-image-2"],
+        }))
+        .unwrap();
+        let allowed = HashSet::from(["account-a".to_owned()]);
+        let other_driver = HashSet::from(["account-b".to_owned()]);
+        assert!(eligible_image_models(&config, &allowed, Some(&other_driver)).is_empty());
+        assert_eq!(
+            eligible_image_models(&config, &allowed, Some(&allowed)),
+            vec!["gpt-image-2".to_owned()]
         );
     }
 }

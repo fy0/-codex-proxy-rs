@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.4.0 (official SDK)
+# CPR Image Bridge v0.5.0 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -25,6 +25,7 @@
 | timeoutMs | 300000 | Responses 桥接请求超时（毫秒） |
 | imageAccountIds | 空数组 | 可执行生图的 OpenAI 账号 ID |
 | imageGroupIds | 空数组 | 可执行生图的 OpenAI 账号分组 ID |
+| imageModels | 内置 gpt-image 候选列表 | 允许发布和生成的 gpt-image-* 模型列表 |
 
 未指定账号和分组时不开放插件生图。配置项由 CPR 的插件管理接口持久化并注入 Handshake，不使用环境变量伪造配置状态。
 
@@ -60,3 +61,24 @@ GitHub Actions 使用官方 SDK 提交和官方 cpr-plugin packaging CLI，运�
 目标平台：Linux AMD64、Linux ARM64、macOS Apple Silicon。请根据实际服务器部署架构选包；当前不支持将该包安装到旧 RPC v2 的 CPR 宿主。
 
 真实性边界：check_access 判断 Key/账号/模型政策的允许性，不是上游图像权限探针；真实 OAuth 生图、上游限流、图像尺寸兼容性仍需在授权测试环境验收。没有提供 S3/R2 存储、独立图片计费或异步批量任务。
+
+## v0.5.0 联动修复与可视化配置生成器
+
+已修复 v0.4.0 绘图测试列表为空的一个原因：之前把原生 Images 的 gpt-image-* 当作普通对话模型传入 host.check_access(upstream_model=...)，账号未在普通模型访问清单列出图片模型时被错误过滤。v0.5.0 对原生 Images 采用 check_access(upstream_model=None) 校验 Client Key 与账号/分组的有效交集；只有走 Responses 桥接的模型额外检查同一账号是否允许配置的 driverModel。模型展示不能代替上游真实生图授权检测，分组的 allowImageGeneration 仍由宿主在调用时执行。
+
+新增 imageModels：数组指定可公开和执行的图片模型，最多 32 个不同合法 gpt-image-*。省略时沿用之前内置列表，明确设置 [] 时不公开图片模型。
+
+新增页面顶部「插件配置生成器」：通过宿主只读账号事实查询可选账号名称、ID 和所属分组 ID，允许勾选与手动输入账号/分组 ID，图片模型多选、添加自定义模型、设置 driverModel、bridgeMode、timeoutMs，实时生成合法 JSON 并复制。由于管理页面当前缺少直接改写插件自身配置的官方 SDK 能力，此处**仅生成，不自动保存**：复制后到 CPR「插件管理 → 插件设置 → 插件参数」粘贴 JSON 并保存，再刷新画图测试页。
+
+典型配置：
+
+    {
+      "timeoutMs": 300000,
+      "bridgeMode": "auto",
+      "driverModel": "gpt-5.6-luna",
+      "imageModels": ["gpt-image-2", "gpt-image-1.5"],
+      "imageGroupIds": ["替换为真实分组ID"],
+      "imageAccountIds": []
+    }
+
+后台仍复核 Key、账号启用、分组范围和桥接主控模型权限；图片模型的官方服务器真实授权须调用实测才能确定。

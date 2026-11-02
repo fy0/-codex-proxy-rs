@@ -164,7 +164,7 @@ pub async fn schedule(
     let Some(model) = image_model else {
         return Ok(TypedReply::new(AccountScheduleDecision::Delegate));
     };
-    if !Config::is_image_model(model) || !config.has_image_scope() {
+    if !config.enabled_image_model(model) || !config.has_image_scope() {
         return Ok(TypedReply::new(AccountScheduleDecision::Reject));
     }
     let group = group_accounts(&call.host, &config.image_group_ids).await?;

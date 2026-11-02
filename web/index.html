@@ -14,6 +14,52 @@
     <h1>画图测试台</h1>
     <p>选择客户端 Key 和预置提示词，直接验证 Codex 生图工具。使用宿主模型桥，不向页面提供密钥明文。</p>
   </div>
+  <section class="panel config-panel" aria-label="插件可视化配置生成器">
+    <div class="config-head">
+      <div>
+        <div class="section-title"><span class="section-index">00</span><h2>插件配置生成器</h2></div>
+        <p>勾选账号、分组和图片模型，生成一份完整配置。复制后到 CPR「插件设置 → 插件参数」粘贴并保存。</p>
+      </div>
+      <span class="config-label">仅生成配置 · 不自动保存</span>
+    </div>
+    <div class="config-grid">
+      <div class="config-column">
+        <h3>账号与分组</h3>
+        <div class="label-line"><span class="label-text">允许生图的账号</span><span id="configAccountsCount" class="hint">0 个</span></div>
+        <div id="configAccounts" class="option-list" aria-label="生图账号多选"><div class="placeholder">读取 CPR 账号中…</div></div>
+        <label for="configAccountExtra">补充账号 ID（可选）</label>
+        <textarea id="configAccountExtra" class="id-entry" rows="2" placeholder="输入未列出的账号 ID，用逗号或换行分隔"></textarea>
+        <div class="label-line"><span class="label-text">允许生图的分组</span><span id="configGroupsCount" class="hint">0 个</span></div>
+        <div id="configGroups" class="option-list" aria-label="生图分组多选"><div class="placeholder">读取 CPR 分组中…</div></div>
+        <label for="configGroupExtra">补充分组 ID（可选）</label>
+        <textarea id="configGroupExtra" class="id-entry" rows="2" placeholder="输入未列出的分组 ID，用逗号或换行分隔"></textarea>
+        <p class="field-note">账号和分组取并集；生图仍受 Client Key 的账号范围与分组「允许图像生成」开关约束。</p>
+      </div>
+      <div class="config-column">
+        <h3>绘图模型与执行策略</h3>
+        <div class="label-line"><span class="label-text">对外提供的图片模型</span><span id="configModelsCount" class="hint">0 个</span></div>
+        <div id="configModels" class="model-options" aria-label="图片模型多选"></div>
+        <div class="field-row inline-model">
+          <input id="configModelNew" aria-label="自定义图片模型 ID" placeholder="其他模型，如 gpt-image-3-preview" maxlength="128">
+          <button id="configModelAdd" class="secondary-btn" type="button">添加</button>
+        </div>
+        <div class="two-up">
+          <div><label for="configDriver">默认对话主控模型</label><input id="configDriver" value="gpt-5.6-luna" maxlength="128"></div>
+          <div><label for="configMode">图片请求策略</label><select id="configMode"><option value="auto">auto · 优先原生 Images</option><option value="responses">responses · 统一工具桥接</option></select></div>
+        </div>
+        <label for="configTimeout">请求超时</label>
+        <select id="configTimeout"><option value="60000">60 秒</option><option value="180000">180 秒</option><option value="300000">300 秒</option><option value="600000">600 秒</option></select>
+        <div class="label-line config-preview-label"><label for="configJson">生成的配置 JSON</label><span class="hint">实时生成</span></div>
+        <textarea id="configJson" class="json-editor" rows="10" readonly spellcheck="false" aria-label="生成的插件配置 JSON"></textarea>
+        <div class="action-row">
+          <button type="button" class="primary-btn" id="copyConfig">复制配置 JSON</button>
+          <button type="button" class="secondary-btn" id="resetConfig">恢复当前已保存配置</button>
+        </div>
+        <div class="notice" id="configNotice" role="status"></div>
+      </div>
+    </div>
+  </section>
+
   <div class="layout">
     <section class="panel controls" aria-label="画图参数">
       <div class="section-title"><span class="section-index">01</span><h2>生成设置</h2></div>

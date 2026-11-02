@@ -25,6 +25,8 @@ pub struct Config {
     pub timeout_ms: u64,
     pub image_account_ids: Vec<String>,
     pub image_group_ids: Vec<String>,
+    /// 对外发布和实际允许调用的生图模型；仅配置在此处的模型开放。
+    pub image_models: Vec<String>,
 }
 
 impl Config {
@@ -62,10 +64,16 @@ impl Config {
         }
         let image_account_ids = id_list(config.get("imageAccountIds"), "imageAccountIds")?;
         let image_group_ids = id_list(config.get("imageGroupIds"), "imageGroupIds")?;
+        let image_models = image_model_list(config.get("imageModels"))?;
         if config.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "driverModel" | "bridgeMode" | "timeoutMs" | "imageAccountIds" | "imageGroupIds"
+                "driverModel"
+                    | "bridgeMode"
+                    | "timeoutMs"
+                    | "imageAccountIds"
+                    | "imageGroupIds"
+                    | "imageModels"
             )
         }) {
             return Err("plugin configuration contains unknown fields".into());
@@ -76,6 +84,7 @@ impl Config {
             timeout_ms,
             image_account_ids,
             image_group_ids,
+            image_models,
         })
     }
 
@@ -83,12 +92,24 @@ impl Config {
         !self.image_account_ids.is_empty() || !self.image_group_ids.is_empty()
     }
 
+    /// 校验图片模型的安全 ID 形状；并不据此宣称上游具备真实生图能力。
     pub fn is_image_model(model: &str) -> bool {
-        IMAGE_MODELS.contains(&model)
+        model.len() <= 128
+            && model.starts_with("gpt-image-")
+            && model.len() > "gpt-image-".len()
+            && model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    }
+
+    pub fn enabled_image_model(&self, model: &str) -> bool {
+        self.image_models
+            .iter()
+            .any(|configured| configured == model)
     }
 
     pub fn use_responses(&self, model: &str) -> bool {
-        if !Self::is_image_model(model) {
+        if !self.enabled_image_model(model) {
             return false;
         }
         if self.mode == Mode::Responses {
@@ -105,6 +126,28 @@ impl Config {
                 | "gpt-image-2.5-sunburst-2026-09-08"
         )
     }
+}
+
+fn image_model_list(value: Option<&Value>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(IMAGE_MODELS.iter().map(|name| (*name).to_owned()).collect());
+    };
+    let values = value.as_array().ok_or("imageModels must be an array")?;
+    if values.len() > 32 {
+        return Err("imageModels cannot contain more than 32 model IDs".into());
+    }
+    let mut models: Vec<String> = Vec::with_capacity(values.len());
+    for value in values {
+        let model = value.as_str().ok_or("imageModels must contain strings")?;
+        if !Config::is_image_model(model) {
+            return Err(format!("invalid imageModels entry: {model}"));
+        }
+        if models.iter().any(|item| item == model) {
+            return Err("imageModels cannot contain duplicate IDs".into());
+        }
+        models.push(model.to_owned());
+    }
+    Ok(models)
 }
 
 fn id_list(value: Option<&Value>, name: &str) -> Result<Vec<String>, String> {
@@ -170,6 +213,25 @@ mod tests {
     }
 
     #[test]
+    fn image_models_are_configurable_without_exposing_unlisted_models() {
+        let selected = Config::from_configuration(&serde_json::json!({
+            "imageModels":["gpt-image-2","gpt-image-3-preview"],
+            "imageAccountIds":["account-a"]
+        }))
+        .unwrap();
+        assert_eq!(
+            selected.image_models,
+            vec!["gpt-image-2", "gpt-image-3-preview"]
+        );
+        assert!(selected.enabled_image_model("gpt-image-3-preview"));
+        assert!(!selected.enabled_image_model("gpt-image-1"));
+        assert!(!selected.use_responses("gpt-image-1"));
+        assert!(!selected.use_responses("gpt-image-3-preview"));
+        let empty = Config::from_configuration(&serde_json::json!({"imageModels":[]})).unwrap();
+        assert!(empty.image_models.is_empty());
+    }
+
+    #[test]
     fn rejects_invalid_configuration() {
         for value in [
             serde_json::json!({"driverModel":"../../bad"}),
@@ -179,6 +241,11 @@ mod tests {
             serde_json::json!({"bridgeMode":"unknown"}),
             serde_json::json!({"imageGroupIds":"wrong"}),
             serde_json::json!({"imageAccountIds":["same","same"]}),
+            serde_json::json!({"imageModels":"gpt-image-2"}),
+            serde_json::json!({"imageModels":["gpt-image-2","gpt-image-2"]}),
+            serde_json::json!({"imageModels":["chat-model"]}),
+            serde_json::json!({"imageModels":["gpt-image-2/path"]}),
+            serde_json::json!({"imageModels":["gpt-image-"]}),
             serde_json::json!({"unexpected":true}),
         ] {
             assert!(Config::from_configuration(&value).is_err(), "{value}");

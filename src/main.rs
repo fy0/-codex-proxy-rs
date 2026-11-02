@@ -267,7 +267,7 @@ async fn handle_request(
     let image_model =
         marked_image.or_else(|| policy::image_intent(&request.head.operation, &request.body));
     if let Some(model) = image_model {
-        if !config.has_image_scope() || !Config::is_image_model(&model) {
+        if !config.has_image_scope() || !config.enabled_image_model(&model) {
             return Err(PluginFault::new(
                 ErrorCode::PermissionDenied,
                 "image model or account scope is disabled",
@@ -448,8 +448,8 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
             "image model is missing or invalid",
         ));
     };
-    if !Config::is_image_model(&model) {
-        // 当前插件未声明的图片模型不允许通过原生接口绕开账号白名单。
+    if !config.enabled_image_model(&model) {
+        // 当前配置未启用的图片模型不允许绕过白名单。
         return Ok(error_response(
             400,
             "unsupported_image_model",
@@ -712,8 +712,11 @@ mod tests {
             root_model(br#"{"model":"gpt-image-3"}"#),
             Some("gpt-image-3".to_owned())
         );
-        assert!(!Config::is_image_model("gpt-image-3"));
+        assert!(Config::is_image_model("gpt-image-3"));
         assert!(Config::is_image_model("gpt-image-2"));
+        let config = Config::from_configuration(&serde_json::json!({})).unwrap();
+        assert!(!config.enabled_image_model("gpt-image-3"));
+        assert!(config.enabled_image_model("gpt-image-2"));
         assert_eq!(root_model(br#"{"model":123}"#), None);
     }
 

@@ -1,8 +1,9 @@
 //! 插件独立管理页面；密钥只通过宿主模型桥按 ID 选择，不传入前端。
-use crate::config::Config;
+use crate::config::{Config, IMAGE_MODELS, Mode};
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
     call::{
+        data::AccountFactsQuery,
         host::{ModelListRequest, ModelListResult},
         management::{
             ManagementPage, ManagementRegistration, ManagementRequest, ManagementResource,
@@ -12,6 +13,7 @@ use gateway_plugin_sdk::{
     client::{HostClient, SessionError, TypedCall, TypedReply},
 };
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 const JSON: &str = "application/json";
 
@@ -74,7 +76,7 @@ async fn model_catalog(
             serde_json::to_value(ModelListRequest {
                 client_key_id,
                 protocol: "openai".into(),
-                client_version: "cpr-image-workbench/0.4.0".into(),
+                client_version: "cpr-image-workbench/0.5.0".into(),
             })
             .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid model list"))?,
             Vec::new(),
@@ -90,6 +92,51 @@ async fn model_catalog(
     serde_json::from_value(reply.result)
         .map_err(|_| PluginFault::new(ErrorCode::Fault, "invalid model-list response"))
 }
+/// 仅返回非秘密的账号显示信息，供 UI 勾选配置；无法列出时允许手动输入 ID。
+async fn account_choices(
+    host: &HostClient,
+) -> Result<(Vec<Value>, Vec<String>, bool), PluginFault> {
+    let mut accounts = Vec::new();
+    let mut groups = BTreeSet::new();
+    let mut cursor = None;
+    let mut seen = BTreeSet::new();
+    for _ in 0..6 {
+        let page = host
+            .account_facts(AccountFactsQuery {
+                provider_id: Some("openai".to_owned()),
+                cursor,
+                limit: 200,
+            })
+            .await?;
+        for account in page.accounts {
+            if account.provider_id != "openai" {
+                continue;
+            }
+            groups.extend(account.group_ids.iter().cloned());
+            if accounts.len() < 600 {
+                accounts.push(json!({
+                    "id": account.account_id,
+                    "name": account.name,
+                    "enabled": account.enabled,
+                    "groupIds": account.group_ids,
+                }));
+            }
+        }
+        cursor = page.next_cursor;
+        match cursor.as_deref() {
+            None => return Ok((accounts, groups.into_iter().collect(), false)),
+            Some(next) if !next.is_empty() && seen.insert(next.to_owned()) => {}
+            _ => {
+                return Err(PluginFault::new(
+                    ErrorCode::Rejected,
+                    "account options pagination is invalid",
+                ));
+            }
+        }
+    }
+    Ok((accounts, groups.into_iter().collect(), true))
+}
+
 pub async fn handle(
     call: TypedCall<ManagementRequest>,
     config: &Config,
@@ -112,16 +159,37 @@ pub async fn handle(
                     limit: 200,
                 })
                 .await?;
+            let (accounts, groups, account_options_truncated, account_options_error) =
+                match account_choices(&call.host).await {
+                    Ok((accounts, groups, truncated)) => (accounts, groups, truncated, false),
+                    Err(_) => (Vec::new(), Vec::new(), false, true),
+                };
             json_response(
                 200,
                 json!({
                     "keys": result.keys,
                     "keysNextCursor": result.next_cursor,
                     "driverModel": config.driver,
-                    "imageModels": crate::config::IMAGE_MODELS,
+                    "imageModels": config.image_models,
+                    "candidateImageModels": IMAGE_MODELS,
                     "enabled": config.has_image_scope(),
                     "accountCount": config.image_account_ids.len(),
                     "groupCount": config.image_group_ids.len(),
+                    "accountOptions": accounts,
+                    "groupOptions": groups,
+                    "accountOptionsTruncated": account_options_truncated,
+                    "accountOptionsError": account_options_error,
+                    "configuration": {
+                        "timeoutMs": config.timeout_ms,
+                        "bridgeMode": match config.mode {
+                            Mode::Auto => "auto",
+                            Mode::Responses => "responses",
+                        },
+                        "driverModel": config.driver,
+                        "imageModels": config.image_models,
+                        "imageGroupIds": config.image_group_ids,
+                        "imageAccountIds": config.image_account_ids,
+                    }
                 }),
             )
         }
