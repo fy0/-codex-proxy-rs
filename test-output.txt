@@ -1,0 +1,113 @@
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m cfg-if v1.0.5
+[1m[92m  Downloaded[0m core_detect v1.0.0
+[1m[92m  Downloaded[0m tokio-macros v2.7.2
+[1m[92m  Downloaded[0m base64 v0.22.1
+[1m[92m  Downloaded[0m bytes v1.12.1
+[1m[92m  Downloaded[0m futures-core v0.3.34
+[1m[92m  Downloaded[0m mime v0.3.17
+[1m[92m  Downloaded[0m futures-task v0.3.34
+[1m[92m  Downloaded[0m multiversion_no_op v1.0.0
+[1m[92m  Downloaded[0m version_check v0.9.5
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m slab v0.4.12
+[1m[92m  Downloaded[0m futures-macro v0.3.34
+[1m[92m  Downloaded[0m rustversion v1.0.23
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m thiserror v2.0.21
+[1m[92m  Downloaded[0m multer v3.1.0
+[1m[92m  Downloaded[0m quote v1.0.47
+[1m[92m  Downloaded[0m thiserror-impl v2.0.21
+[1m[92m  Downloaded[0m zmij v1.0.23
+[1m[92m  Downloaded[0m httparse v1.10.1
+[1m[92m  Downloaded[0m semver v1.0.28
+[1m[92m  Downloaded[0m simdutf8 v0.1.5
+[1m[92m  Downloaded[0m spin v0.9.9
+[1m[92m  Downloaded[0m pin-project-lite v0.2.17
+[1m[92m  Downloaded[0m serde_core v1.0.229
+[1m[92m  Downloaded[0m unicode-ident v1.0.27
+[1m[92m  Downloaded[0m proc-macro2 v1.0.107
+[1m[92m  Downloaded[0m serde_derive v1.0.229
+[1m[92m  Downloaded[0m http v1.5.0
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m serde v1.0.229
+[1m[92m  Downloaded[0m serde_json v1.0.154
+[1m[92m  Downloaded[0m futures-util v0.3.34
+[1m[92m  Downloaded[0m syn v3.0.9
+[1m[92m  Downloaded[0m encoding_rs v0.8.44
+[1m[92m  Downloaded[0m tokio v1.54.1
+[1m[92m   Compiling[0m proc-macro2 v1.0.107
+[1m[92m   Compiling[0m unicode-ident v1.0.27
+[1m[92m   Compiling[0m quote v1.0.47
+[1m[92m   Compiling[0m rustversion v1.0.23
+[1m[92m   Compiling[0m serde_core v1.0.229
+[1m[92m   Compiling[0m zmij v1.0.23
+[1m[92m   Compiling[0m pin-project-lite v0.2.17
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m bytes v1.12.1
+[1m[92m   Compiling[0m encoding_rs v0.8.44
+[1m[92m   Compiling[0m httparse v1.10.1
+[1m[92m   Compiling[0m syn v3.0.9
+[1m[92m   Compiling[0m serde_json v1.0.154
+[1m[92m   Compiling[0m thiserror v2.0.21
+[1m[92m   Compiling[0m serde v1.0.229
+[1m[92m   Compiling[0m version_check v0.9.5
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m multer v3.1.0
+[1m[92m   Compiling[0m core_detect v1.0.0
+[1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m cfg-if v1.0.5
+[1m[92m   Compiling[0m futures-task v0.3.34
+[1m[92m   Compiling[0m futures-core v0.3.34
+[1m[92m   Compiling[0m simdutf8 v0.1.5
+[1m[92m   Compiling[0m multiversion_no_op v1.0.0
+[1m[92m   Compiling[0m slab v0.4.12
+[1m[92m   Compiling[0m semver v1.0.28
+[1m[92m   Compiling[0m http v1.5.0
+[1m[92m   Compiling[0m mime v0.3.17
+[1m[92m   Compiling[0m spin v0.9.9
+[1m[92m   Compiling[0m base64 v0.22.1
+[1m[92m   Compiling[0m tokio-macros v2.7.2
+[1m[92m   Compiling[0m thiserror-impl v2.0.21
+[1m[92m   Compiling[0m serde_derive v1.0.229
+[1m[92m   Compiling[0m futures-macro v0.3.34
+[1m[92m   Compiling[0m tokio v1.54.1
+[1m[92m   Compiling[0m futures-util v0.3.34
+[1m[92m   Compiling[0m gateway-plugin-sdk v0.1.0 (https://github.com/zyycn/codex-proxy-rs.git?rev=f9b9dfefe7a2706d625d6476c87bde0332290979#f9b9dfef)
+[1m[92m   Compiling[0m cpr-image-bridge v0.2.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 16.21s
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/cpr_image_bridge-9d628e2600c6df38)
+
+running 16 tests
+test bridge::tests::accepts_data_url_edits_and_mask ... ok
+test bridge::tests::preserves_prompt_and_uses_explicit_image_model ... ok
+test bridge::tests::direct_edits_use_native_images_wire_shape ... ok
+test config::tests::configured_driver_takes_effect ... ok
+test bridge::tests::rejects_missing_edit_images_and_unsupported_url_result ... ok
+test config::tests::auto_mode_prefers_direct_when_codex_has_native_images ... ok
+test bridge::tests::parses_standard_multipart_edit ... ok
+test config::tests::invalid_driver_and_timeouts_fail_closed ... FAILED
+test response::tests::incomplete_and_error_are_not_false_successes ... ok
+test models::tests::only_add_when_driver_visible_and_never_duplicate ... ok
+test response::tests::can_parse_final_json_and_stream_result ... ok
+test response::tests::prefers_completed_outputs_and_keeps_fallback_when_empty ... ok
+test tests::detects_multipart_model_after_an_uploaded_image ... ok
+test config::tests::missing_values_use_schema_defaults ... ok
+test tests::targets_only_images_and_skips_codex_native_catalog ... ok
+test tests::response_header_replacement_drops_stale_lengths_and_compression ... ok
+
+failures:
+
+---- config::tests::invalid_driver_and_timeouts_fail_closed stdout ----
+
+thread 'config::tests::invalid_driver_and_timeouts_fail_closed' (3091) panicked at src/config.rs:145:13:
+{"driverModel":"../../bad"}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    config::tests::invalid_driver_and_timeouts_fail_closed
+
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[91merror[0m: test failed, to rerun pass `--bin cpr-image-bridge`
