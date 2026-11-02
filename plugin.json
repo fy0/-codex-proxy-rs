@@ -1,0 +1,60 @@
+{
+  "manifestVersion": 2,
+  "publisher": "community",
+  "name": "codex-image-bridge",
+  "displayName": "Codex Images API Bridge",
+  "version": "0.2.0",
+  "description": "Compatible Images API bridge for Codex accounts with configurable Responses conversation model and plugin-management settings.",
+  "license": "Apache-2.0",
+  "engines": {
+    "codex-proxy-rs": ">=3.14.0, <4.0.0"
+  },
+  "main": "cpr-image-bridge",
+  "runtime": "trustedProcess",
+  "contributes": {
+    "middleware": {
+      "version": 3,
+      "stages": [
+        "http"
+      ],
+      "inputFormats": [
+        "openai"
+      ],
+      "outputFormats": [
+        "openai"
+      ]
+    }
+  },
+  "configurationSchema": {
+    "type": "object",
+    "properties": {
+      "driverModel": {
+        "type": "string",
+        "title": "Responses 对话主控模型",
+        "description": "用于驱动 image_generation 工具调用的对话模型 ID，例如 gpt-5.6-luna。需要当前客户端 Key 可以调用。不是图片模型 ID。",
+        "default": "gpt-5.6-luna",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "bridgeMode": {
+        "type": "string",
+        "title": "生图路由策略",
+        "description": "auto: 采用 Sub2API 兼容策略，已知支持原生 Images 的图片模型走原生接口；responses: 所有列出的图片模型走 image_generation 工具。",
+        "enum": [
+          "auto",
+          "responses"
+        ],
+        "default": "auto"
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "title": "图片请求超时（毫秒）",
+        "description": "用于桥接到 /v1/responses 的 HTTP 请求上限。最终超时还受宿主及反代限制。",
+        "minimum": 30000,
+        "maximum": 600000,
+        "default": 300000
+      }
+    },
+    "additionalProperties": false
+  }
+}
