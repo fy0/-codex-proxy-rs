@@ -1,5 +1,6 @@
 //! 插件独立管理页面；密钥只通过宿主模型桥按 ID 选择，不传入前端。
 use crate::config::{Config, IMAGE_MODELS, Mode};
+use gateway_plugin_sdk::call::data::AccountFacts;
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
     call::{
@@ -92,6 +93,17 @@ async fn model_catalog(
     serde_json::from_value(reply.result)
         .map_err(|_| PluginFault::new(ErrorCode::Fault, "invalid model-list response"))
 }
+/// 管理页专属的非秘密账号展示资料；电子邮箱用于消歧，而不是认证标识。
+fn account_option(account: &AccountFacts) -> Value {
+    json!({
+        "id": account.account_id,
+        "name": account.name,
+        "email": account.email,
+        "enabled": account.enabled,
+        "groupIds": account.group_ids,
+    })
+}
+
 /// 仅返回非秘密的账号显示信息，供 UI 勾选配置；无法列出时允许手动输入 ID。
 async fn account_choices(
     host: &HostClient,
@@ -114,12 +126,7 @@ async fn account_choices(
             }
             groups.extend(account.group_ids.iter().cloned());
             if accounts.len() < 600 {
-                accounts.push(json!({
-                    "id": account.account_id,
-                    "name": account.name,
-                    "enabled": account.enabled,
-                    "groupIds": account.group_ids,
-                }));
+                accounts.push(account_option(&account));
             }
         }
         cursor = page.next_cursor;
@@ -224,6 +231,28 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_choices_include_email_without_changing_identity() {
+        let account = AccountFacts {
+            account_id: "acct_example".to_owned(),
+            provider_id: "openai".to_owned(),
+            name: "acct_example".to_owned(),
+            email: Some("image.user@example.org".to_owned()),
+            group_ids: vec!["group-images".to_owned()],
+            enabled: true,
+            updated_at_ms: 0,
+        };
+        let result = account_option(&account);
+        assert_eq!(result["email"], "image.user@example.org");
+        assert_eq!(result["id"], "acct_example");
+        assert_eq!(result["groupIds"][0], "group-images");
+        let missing_email = AccountFacts {
+            email: None,
+            ..account
+        };
+        assert!(account_option(&missing_email)["email"].is_null());
+    }
+
     #[test]
     fn management_route_and_page_are_registered() {
         let registration = registration();

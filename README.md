@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.5.0 (official SDK)
+# CPR Image Bridge v0.5.1 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -82,3 +82,10 @@ GitHub Actions 使用官方 SDK 提交和官方 cpr-plugin packaging CLI，运�
     }
 
 后台仍复核 Key、账号启用、分组范围和桥接主控模型权限；图片模型的官方服务器真实授权须调用实测才能确定。
+
+
+## v0.5.1 配置生成器易用性
+
+- 账号选择项现在优先使用 CPR 官方只读 AccountFacts.email 展示邮箱，下面仍保留账户 ID、分组；缺失邮箱时自动展示原有名称或 ID。该数据仅在已登录管理员的插件页面 / 管理 API 范围可见，不会进入 /v1/models 响应。
+- 配置生成器改为可点击标题展开的原生 details 组件，默认折叠。首次打开画图测试页直接看到生成设置和预览；展开后所有账号、分组和模型选择、JSON 生成及复制功能不变。
+- 不新增配置字段、不修改插件权限或账号池；升级 v0.5.0 至 v0.5.1 会沿用原配置。仍须将配置生成器导出的 JSON 复制到官方 CPR 插件参数并保存。

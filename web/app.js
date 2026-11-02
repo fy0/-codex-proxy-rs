@@ -79,9 +79,16 @@
       configFields.accounts.appendChild(empty);
     }
     available.forEach((account) => {
-      const details = account.id + (account.groupIds && account.groupIds.length
-        ? ' · 分组 ' + account.groupIds.join(', ') : '') + (account.enabled ? '' : ' · 已停用');
-      makeOption(configFields.accounts, account.name || account.id, details,
+      const email = typeof account.email === 'string' ? account.email.trim() : '';
+      const accountName = account.name.trim();
+      const title = email || (accountName && accountName !== account.id ? accountName : account.id);
+      const details = [
+        accountName && accountName !== title && accountName !== account.id ? accountName : '',
+        'ID ' + account.id,
+        account.groupIds && account.groupIds.length ? '分组 ' + account.groupIds.join(', ') : '',
+        account.enabled ? '' : '已停用'
+      ].filter(Boolean).join(' · ');
+      makeOption(configFields.accounts, title, details,
         selected.has(account.id), (checked) => {
           if (checked) selected.add(account.id);
           else selected.delete(account.id);

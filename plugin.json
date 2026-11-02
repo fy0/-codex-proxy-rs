@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.5.0",
-  "description": "Codex image API and per-Key dynamic image models with graphical account/group/model configuration builder.",
+  "version": "0.5.1",
+  "description": "Codex images bridge: per-Key image models, visual configuration builder, email-labeled account choices and collapsed-by-default configuration.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
