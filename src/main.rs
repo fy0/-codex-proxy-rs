@@ -1,16 +1,18 @@
 mod bridge;
 mod config;
 mod models;
+mod policy;
 mod response;
 
 use std::{sync::Arc, time::Duration};
 
 use gateway_plugin_sdk::{
-    PluginFault,
+    ErrorCode, PluginFault,
     call::middleware::MiddlewareHeader,
     client::{
-        HttpBody, HttpCall, HttpFrame, HttpRequest, HttpResponse, PluginBuilder, PluginSession,
-        SessionConfig,
+        HttpBody, HttpCall, HttpFrame, HttpRequest, HttpResponse, MiddlewareCall,
+        MiddlewareResponse, MiddlewareResult, PluginBuilder, PluginSession, RequestCall,
+        SessionConfig, methods,
     },
 };
 use serde_json::{Value, json};
@@ -21,6 +23,7 @@ use crate::{
 };
 
 const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+const INTERNAL_IMAGE_INTENT_HEADER: &str = "x-cpr-image-bridge-intent";
 const MAX_RESPONSES_INPUT_BYTES: usize = 60 * 1024 * 1024;
 
 #[tokio::main]
@@ -34,12 +37,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Config::from_configuration(&session.handshake().configuration)
             .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?,
     );
+    let registry = Arc::new(policy::ImageRequestRegistry::default());
     let handler = PluginBuilder::from_json(include_bytes!("../plugin.json"))?
         .middleware({
             let config = Arc::clone(&config);
-            move |call: HttpCall| {
+            let registry = Arc::clone(&registry);
+            move |call: MiddlewareCall| {
                 let config = Arc::clone(&config);
-                async move { handle_http(call, &config).await }
+                let registry = Arc::clone(&registry);
+                async move {
+                    match call {
+                        MiddlewareCall::Http(call) => handle_http(*call, &config)
+                            .await
+                            .map(MiddlewareResult::Http),
+                        MiddlewareCall::Request(call) => handle_request(*call, &config, &registry)
+                            .await
+                            .map(MiddlewareResult::Request),
+                        other => other.forward().await,
+                    }
+                }
+            }
+        })?
+        .on(methods::SCHEDULE_ACCOUNT, {
+            let config = Arc::clone(&config);
+            let registry = Arc::clone(&registry);
+            move |call| {
+                let config = Arc::clone(&config);
+                let registry = Arc::clone(&registry);
+                async move { policy::schedule(call, config, registry).await }
             }
         })?
         .build()?;
@@ -209,12 +234,70 @@ fn update_for_responses(request: &mut HttpRequest, body: Vec<u8>, timeout_ms: u6
     add_header(&mut request.headers, "accept", "text/event-stream");
 }
 
-async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, PluginFault> {
-    let HttpCall {
+// 内部意图头只由 HTTP Images 入口写入。普通客户端不能伪造此标记来绕过策略。
+async fn handle_request(
+    call: RequestCall,
+    config: &Config,
+    registry: &policy::ImageRequestRegistry,
+) -> Result<MiddlewareResponse, PluginFault> {
+    let RequestCall {
         mut request, next, ..
     } = call;
+    let marked = request.head.headers.iter().any(|header| {
+        header
+            .name
+            .eq_ignore_ascii_case(INTERNAL_IMAGE_INTENT_HEADER)
+            && header.value == b"1"
+    });
+    request.remove_header(INTERNAL_IMAGE_INTENT_HEADER);
+    if marked {
+        if !config.has_image_scope() {
+            return Err(PluginFault::new(
+                ErrorCode::PermissionDenied,
+                "image generation has no allowed accounts or groups",
+            ));
+        }
+        registry.mark(&request.head.request_id);
+    }
+    next.run(request).await
+}
+
+fn prepare_codex_image_headers(request: &mut HttpRequest, call_id: &str) {
+    // CodexImagesBackend 为每次独立 Images 请求附加 x-codex-image-turn-id。
+    // 真实 Codex turn ID 已经存在时保留；其它客户端使用宿主创建的唯一 HTTP call ID。
+    // originator / Authorization 仍由选中账号的 CPR Provider 生成，绝不伪造。
+    let turn_id = header_value(&request.headers, "x-codex-image-turn-id")
+        .filter(|v| {
+            !v.is_empty() && v.len() <= 256 && v.as_bytes().iter().all(|b| *b >= 0x20 && *b <= 0x7e)
+        })
+        .map(str::to_owned);
+    remove_headers(
+        &mut request.headers,
+        &["x-codex-image-turn-id", "x-codex-turn-metadata"],
+    );
+    add_header(
+        &mut request.headers,
+        "x-codex-image-turn-id",
+        turn_id.as_deref().unwrap_or(call_id),
+    );
+}
+
+async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, PluginFault> {
+    let HttpCall {
+        mut request,
+        next,
+        call_id,
+        ..
+    } = call;
     let current_path = path(&request.uri).to_owned();
-    if request.method == "GET" && current_path == "/v1/models" && !codex_model_list(&request.uri) {
+    // HTTP middleware 位于原生鉴权之前，因此先清除来自客户端的内部标记。
+    remove_headers(&mut request.headers, &[INTERNAL_IMAGE_INTENT_HEADER]);
+    if request.method == "GET"
+        && current_path == "/v1/models"
+        && !codex_model_list(&request.uri)
+        && config.has_image_scope()
+        && config.synthetic_catalog
+    {
         let mut response = next.run(request).await?;
         if response.status == 200 {
             let raw = match read_body(&mut response.body, MAX_CATALOG_BYTES).await? {
@@ -240,7 +323,8 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
     // 可见的图片模型支持详情接口；通过已鉴权的模型目录判断当前 Key 是否有 driver 资格。
     if request.method == "GET" {
         if let Some(model) = current_path.strip_prefix("/v1/models/") {
-            if Config::is_image_model(model) {
+            if Config::is_image_model(model) && config.has_image_scope() && config.synthetic_catalog
+            {
                 request.uri = "/v1/models".into();
                 let mut response = next.run(request).await?;
                 if response.status != 200 {
@@ -274,20 +358,36 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
     let Some(kind) = image_kind(&request.method, &current_path) else {
         return next.run(request).await;
     };
+    // 禁止范围为空时通过原生 Images 或 Responses 桥接绕过选定的账号池。
+    if !config.has_image_scope() {
+        return Ok(error_response(
+            403,
+            "image_account_scope_empty",
+            "image generation is disabled until account or group IDs are configured",
+        ));
+    }
     let content_type = header_value(&request.headers, "content-type")
         .unwrap_or("")
         .to_owned();
     let content_encoding = header_value(&request.headers, "content-encoding").unwrap_or("");
     if !content_encoding.is_empty() && !content_encoding.eq_ignore_ascii_case("identity") {
         // 这里不是解压端点，压缩请求仍交还宿主的原生 Images 处理器。
-        return next.run(request).await;
+        return Ok(error_response(
+            415,
+            "unsupported_content_encoding",
+            "compressed image requests are not supported by this plugin",
+        ));
     }
     let json_body = json_content_type(&content_type);
     let multipart = content_type
         .to_ascii_lowercase()
         .starts_with("multipart/form-data");
     if !json_body && !multipart {
-        return next.run(request).await;
+        return Ok(error_response(
+            415,
+            "unsupported_content_type",
+            "image requests must contain JSON or multipart/form-data",
+        ));
     }
 
     let raw = match read_body(&mut request.body, bridge::MAX_REQUEST_BYTES).await? {
@@ -310,7 +410,12 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
         request.body = HttpBody::from_bytes(raw);
         return next.run(request).await;
     };
+    if !Config::is_image_model(&model) {
+        request.body = HttpBody::from_bytes(raw);
+        return next.run(request).await;
+    }
     if !config.use_responses(&model) {
+        prepare_codex_image_headers(&mut request, &format!("cpr-image-{call_id}"));
         if multipart && kind == Kind::Edit && Config::is_image_model(&model) {
             // 原生 Images 端点接受 JSON 结构；把标准 multipart 图片转换成 data:image URL。
             let parsed =
@@ -385,6 +490,10 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
             "encoded image inputs exceed the 60 MiB Responses limit",
         ));
     }
+    remove_headers(&mut request.headers, &["x-codex-image-turn-id"]);
+    // 只有由本插件转换的 Responses 请求才携带内部意图，供认证后中间件登记；
+    // 原生 Images 由调度器根据图片模型 ID 识别，避免把内部标记泄漏至上游。
+    add_header(&mut request.headers, INTERNAL_IMAGE_INTENT_HEADER, "1");
     update_for_responses(&mut request, outbound, config.timeout_ms);
     let mut upstream = next.run(request).await?;
     if !(200..300).contains(&upstream.status) {
@@ -428,7 +537,11 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
         &payload.len().to_string(),
     );
     add_header(&mut result.headers, "cache-control", "no-store");
-    for name in ["x-request-id", "x-gateway-request-id"] {
+    for name in [
+        "x-request-id",
+        "x-gateway-request-id",
+        "x-codex-imagegen-request-id",
+    ] {
         if let Some(value) = header_value(&upstream.headers, name) {
             add_header(&mut result.headers, name, value);
         }
@@ -459,6 +572,68 @@ mod tests {
         assert_eq!(
             multipart_model(body, "multipart/form-data; boundary=TEST"),
             Some("gpt-image-2".to_owned())
+        );
+    }
+
+    fn image_request_for_header_tests() -> HttpRequest {
+        HttpRequest {
+            settings: Value::Null,
+            method: "POST".into(),
+            uri: "/v1/images/generations".into(),
+            version: gateway_plugin_sdk::call::middleware::http::Version::Http11,
+            headers: Vec::new(),
+            timeout_ms: Some(300_000),
+            body: HttpBody::empty(),
+        }
+    }
+
+    #[test]
+    fn codex_native_header_parity_preserves_valid_turn_and_originator() {
+        let mut req = image_request_for_header_tests();
+        add_header(
+            &mut req.headers,
+            "x-codex-image-turn-id",
+            "codex-turn-from-client",
+        );
+        add_header(&mut req.headers, "originator", "codex_cli_rs");
+        add_header(&mut req.headers, "x-codex-turn-metadata", "not-for-images");
+        prepare_codex_image_headers(&mut req, "cpr-image-8");
+        assert_eq!(
+            header_value(&req.headers, "x-codex-image-turn-id"),
+            Some("codex-turn-from-client")
+        );
+        assert_eq!(
+            header_value(&req.headers, "originator"),
+            Some("codex_cli_rs")
+        );
+        assert!(header_value(&req.headers, "x-codex-turn-metadata").is_none());
+        assert_eq!(
+            req.headers
+                .iter()
+                .filter(|h| h.name == "x-codex-image-turn-id")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn codex_native_header_parity_generates_safe_turn_id() {
+        let mut req = image_request_for_header_tests();
+        prepare_codex_image_headers(&mut req, "cpr-image-generated-call-1");
+        assert_eq!(
+            header_value(&req.headers, "x-codex-image-turn-id"),
+            Some("cpr-image-generated-call-1")
+        );
+        let mut unsafe_req = image_request_for_header_tests();
+        add_header(
+            &mut unsafe_req.headers,
+            "x-codex-image-turn-id",
+            "bad\r\nvalue",
+        );
+        prepare_codex_image_headers(&mut unsafe_req, "cpr-image-generated-call-2");
+        assert_eq!(
+            header_value(&unsafe_req.headers, "x-codex-image-turn-id"),
+            Some("cpr-image-generated-call-2")
         );
     }
 

@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Images API Bridge",
-  "version": "0.2.0",
-  "description": "Compatible Images API bridge for Codex accounts with configurable Responses conversation model and plugin-management settings.",
+  "version": "0.3.0",
+  "description": "Codex native Images wire and request-header compatibility, with scoped account/group image scheduling and optional legacy model listing.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.14.0, <4.0.0"
@@ -15,7 +15,8 @@
     "middleware": {
       "version": 3,
       "stages": [
-        "http"
+        "http",
+        "request"
       ],
       "inputFormats": [
         "openai"
@@ -23,7 +24,8 @@
       "outputFormats": [
         "openai"
       ]
-    }
+    },
+    "scheduler": {}
   },
   "configurationSchema": {
     "type": "object",
@@ -53,6 +55,38 @@
         "minimum": 30000,
         "maximum": 600000,
         "default": 300000
+      },
+      "imageAccountIds": {
+        "type": "array",
+        "title": "允许生图的账号 ID",
+        "description": "只有被宿主选为有效候选且属于本白名单或指定分组的 OpenAI 账号才可执行生图；与分组取并集。空列表不额外放行。",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "maxItems": 256,
+        "uniqueItems": true,
+        "default": []
+      },
+      "imageGroupIds": {
+        "type": "array",
+        "title": "允许生图的分组 ID",
+        "description": "从 CPR 已授权账号候选中选择具有这些分组成员资格的账号，不能扩大当前 Client Key 的权限。与账号白名单取并集。",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "maxItems": 256,
+        "uniqueItems": true,
+        "default": []
+      },
+      "syntheticCatalog": {
+        "type": "boolean",
+        "title": "兼容模式：在 /v1/models 增补图片模型（不保证 Key 精确范围）",
+        "description": "实验性旧版兼容选项。当前 CPR SDK 的前置 HTTP middleware 无法读取经过身份认证的客户端 Key ID，因此不能对虚拟模型完成账号交集校验。共享多 Key 环境请保持 false，直到宿主 SDK 提供授权后模型目录扩展。",
+        "default": false
       }
     },
     "additionalProperties": false
