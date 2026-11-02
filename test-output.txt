@@ -1,0 +1,110 @@
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m core_detect v1.0.0
+[1m[92m  Downloaded[0m cfg-if v1.0.5
+[1m[92m  Downloaded[0m pin-project-lite v0.2.17
+[1m[92m  Downloaded[0m futures-core v0.3.34
+[1m[92m  Downloaded[0m multiversion_no_op v1.0.0
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m tokio-macros v2.7.2
+[1m[92m  Downloaded[0m futures-macro v0.3.34
+[1m[92m  Downloaded[0m mime v0.3.17
+[1m[92m  Downloaded[0m futures-task v0.3.34
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m multer v3.1.0
+[1m[92m  Downloaded[0m rustversion v1.0.23
+[1m[92m  Downloaded[0m semver v1.0.28
+[1m[92m  Downloaded[0m slab v0.4.12
+[1m[92m  Downloaded[0m quote v1.0.47
+[1m[92m  Downloaded[0m simdutf8 v0.1.5
+[1m[92m  Downloaded[0m zmij v1.0.23
+[1m[92m  Downloaded[0m version_check v0.9.5
+[1m[92m  Downloaded[0m thiserror v2.0.21
+[1m[92m  Downloaded[0m thiserror-impl v2.0.21
+[1m[92m  Downloaded[0m httparse v1.10.1
+[1m[92m  Downloaded[0m spin v0.9.9
+[1m[92m  Downloaded[0m unicode-ident v1.0.27
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m serde_core v1.0.229
+[1m[92m  Downloaded[0m proc-macro2 v1.0.107
+[1m[92m  Downloaded[0m base64 v0.22.1
+[1m[92m  Downloaded[0m bytes v1.12.1
+[1m[92m  Downloaded[0m serde_derive v1.0.229
+[1m[92m  Downloaded[0m base64 v0.23.1
+[1m[92m  Downloaded[0m serde v1.0.229
+[1m[92m  Downloaded[0m http v1.5.0
+[1m[92m  Downloaded[0m serde_json v1.0.154
+[1m[92m  Downloaded[0m futures-util v0.3.34
+[1m[92m  Downloaded[0m syn v3.0.9
+[1m[92m  Downloaded[0m encoding_rs v0.8.44
+[1m[92m  Downloaded[0m tokio v1.54.1
+[1m[92m   Compiling[0m proc-macro2 v1.0.107
+[1m[92m   Compiling[0m unicode-ident v1.0.27
+[1m[92m   Compiling[0m quote v1.0.47
+[1m[92m   Compiling[0m rustversion v1.0.23
+[1m[92m   Compiling[0m serde_core v1.0.229
+[1m[92m   Compiling[0m bytes v1.12.1
+[1m[92m   Compiling[0m syn v3.0.9
+[1m[92m   Compiling[0m zmij v1.0.23
+[1m[92m   Compiling[0m pin-project-lite v0.2.17
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m encoding_rs v0.8.44
+[1m[92m   Compiling[0m version_check v0.9.5
+[1m[92m   Compiling[0m thiserror v2.0.21
+[1m[92m   Compiling[0m httparse v1.10.1
+[1m[92m   Compiling[0m serde v1.0.229
+[1m[92m   Compiling[0m serde_json v1.0.154
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m multer v3.1.0
+[1m[92m   Compiling[0m core_detect v1.0.0
+[1m[92m   Compiling[0m simdutf8 v0.1.5
+[1m[92m   Compiling[0m futures-core v0.3.34
+[1m[92m   Compiling[0m cfg-if v1.0.5
+[1m[92m   Compiling[0m slab v0.4.12
+[1m[92m   Compiling[0m futures-task v0.3.34
+[1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m multiversion_no_op v1.0.0
+[1m[92m   Compiling[0m semver v1.0.28
+[1m[92m   Compiling[0m http v1.5.0
+[1m[92m   Compiling[0m mime v0.3.17
+[1m[92m   Compiling[0m spin v0.9.9
+[1m[92m   Compiling[0m base64 v0.23.1
+[1m[92m   Compiling[0m base64 v0.22.1
+[1m[92m   Compiling[0m thiserror-impl v2.0.21
+[1m[92m   Compiling[0m futures-macro v0.3.34
+[1m[92m   Compiling[0m tokio-macros v2.7.2
+[1m[92m   Compiling[0m serde_derive v1.0.229
+[1m[92m   Compiling[0m tokio v1.54.1
+[1m[92m   Compiling[0m futures-util v0.3.34
+[1m[92m   Compiling[0m gateway-plugin-sdk v0.1.0 (https://github.com/zyycn/codex-proxy-rs.git?rev=96e8443ede051abdd8f0bac69462a7cfe2945633#96e8443e)
+[1m[92m   Compiling[0m cpr-image-bridge v0.4.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs)
+[1m[91merror[E0505][0m[1m: cannot move out of `intent.0` because it is borrowed[0m
+   [1m[94m--> [0msrc/policy.rs:177:17
+    [1m[94m|[0m
+[1m[94m148[0m [1m[94m|[0m     let intent = registry.get(&req.request_id);
+    [1m[94m|[0m         [1m[94m------[0m [1m[94mbinding `intent` declared here[0m
+[1m[94m149[0m [1m[94m|[0m     // 如果因绑定或载荷协议无法登记的图像模型已进入调度，至少按白名单收窄。
+[1m[94m150[0m [1m[94m|[0m     let image_model = intent
+    [1m[94m|[0m                       [1m[94m------[0m [1m[94mborrow of `intent` occurs here[0m
+[1m[94m...[0m
+[1m[94m177[0m [1m[94m|[0m     if let Some(intent) = intent {
+    [1m[94m|[0m                 [1m[91m^^^^^^[0m [1m[91mmove out of `intent.0` occurs here[0m
+[1m[94m...[0m
+[1m[94m183[0m [1m[94m|[0m                 upstream_model: Some(model.to_owned()),
+    [1m[94m|[0m                                      [1m[94m-----[0m [1m[94mborrow later used here[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: consider cloning the value if the performance cost is acceptable
+    [1m[94m|[0m
+[1m[94m150[0m [1m[94m| [0m    let image_model = intent[92m.clone()[0m
+    [1m[94m|[0m                             [92m++++++++[0m
+
+[1m[91merror[E0609][0m[1m: no field `maximum_call_timeout` on type `SessionConfig`[0m
+  [1m[94m--> [0msrc/main.rs:35:20
+   [1m[94m|[0m
+[1m[94m35[0m [1m[94m|[0m     session_config.maximum_call_timeout = Duration::from_secs(660);
+   [1m[94m|[0m                    [1m[91m^^^^^^^^^^^^^^^^^^^^[0m [1m[91munknown field[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: available fields are: `maximum_stream_chunk_bytes`, `maximum_calls`, `maximum_callbacks`, `maximum_buffered_stream_chunks`, `handshake_timeout`
+
+[1mSome errors have detailed explanations: E0505, E0609.[0m
+[1mFor more information about an error, try `rustc --explain E0505`.[0m
+[1m[91merror[0m: could not compile `cpr-image-bridge` (bin "cpr-image-bridge" test) due to 2 previous errors
