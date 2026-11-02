@@ -523,10 +523,10 @@
           input: [{ type: 'message', role: 'user', content: [{type: 'input_text', text: prompt}]}],
           instructions: 'Use image_generation to create exactly one image corresponding closely to the user instruction. Preserve its original language and visual constraints.',
           tools: [{
-            type: 'image_generation', model: imageModel, action: 'generate',
+            type: 'image_generation', model: imageModel, action: 'auto',
             size: fields.size.value, quality: fields.quality.value, output_format: 'png'
           }],
-          tool_choice: {type: 'image_generation'},
+          tool_choice: 'auto',
           parallel_tool_calls: false,
           include: ['reasoning.encrypted_content']
         }
