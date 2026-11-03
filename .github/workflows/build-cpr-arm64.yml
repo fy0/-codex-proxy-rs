@@ -96,8 +96,21 @@ jobs:
               --binary "target/$TARGET/release/cpr-quota-guard" \
               --target "$TARGET" \
               --resource-map web=frontend/dist \
-              --output-dir "$GITHUB_WORKSPACE/dist"
+              --output-dir "$GITHUB_WORKSPACE/dist" 2>&1 | tee "$GITHUB_WORKSPACE/quota-package.log"
           )
+
+      - name: Publish quota packaging diagnostics if it fails
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -f quota-package.log ]; then
+            gh release create "cpr-arm64-debug-${GITHUB_SHA:0:12}" quota-package.log \
+              --title "CPR ARM64 packaging diagnostic" --notes "Diagnostic only. This is not a plugin binary." \
+              --target "$GITHUB_SHA" --prerelease
+          fi
 
       - name: Preserve quota guard ARM64 artifact independently
         uses: actions/upload-artifact@v4
