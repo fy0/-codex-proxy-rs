@@ -1,0 +1,207 @@
+name: Build CPR plugins (Linux ARM64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - build/cpr-arm64-20261103
+    paths:
+      - .github/workflows/build-cpr-arm64.yml
+      - .github/scripts/prepare-jzjc-arm64.py
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-arm64:
+    name: Build and package native aarch64 plugins
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: 4
+      RUSTFLAGS: -C debuginfo=0
+      TARGET: aarch64-unknown-linux-gnu
+      IMAGE: index.docker.io/library/python@sha256:8a00ecb83ed9d0864dfd102a1bdb2067fda907ceb30bb86d09da9ee558b19590
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Confirm native ARM64 runner and bootstrap required OS libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libssl-dev file binutils
+
+      - name: Set up Rust 1.99.1 (GitHub runner only)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Set up Python for ARM64 runtime builder
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go for crane image extraction
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Clone the exact upstream plugin tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.2.3 https://github.com/Mr-xiongyq/cpr-quota-guard.git quota
+          git clone --depth 1 --branch v1.14.0 https://github.com/Victor-Tau/cpr-jzjc.git jzjc
+          test "$(git -C quota rev-parse HEAD)" = 6df19fb028f3c3698462ce7ee249de9eccb9b3e7
+          test "$(git -C jzjc rev-parse HEAD)" = a8a490fcfc2715ba59435d679907a8ee0e0941f9
+
+      - name: Build upstream CPR plugin packaging CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 install --locked --path backend/apps/plugin-cli --root "$RUNNER_TEMP/cpr-tools"
+          echo "$RUNNER_TEMP/cpr-tools/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Node.js 26 for quota guard frontend
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: Build quota guard ARM64 frontend and backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.6.0
+          pnpm --dir quota/frontend install --frozen-lockfile
+          pnpm --dir quota/frontend build
+          cargo +1.99.1 build --manifest-path quota/Cargo.toml --locked --release --target "$TARGET"
+          file "quota/target/$TARGET/release/cpr-quota-guard"
+          readelf -h "quota/target/$TARGET/release/cpr-quota-guard" | grep -E 'Class:|Machine:'
+
+      - name: Package quota guard using the CPR CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          (
+            cd quota
+            cpr-plugin package --manifest plugin.json \
+              --binary "target/$TARGET/release/cpr-quota-guard" \
+              --target "$TARGET" \
+              --resource-map web=frontend/dist \
+              --output-dir "$GITHUB_WORKSPACE/dist"
+          )
+
+      - name: Preserve quota guard ARM64 artifact independently
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpr-quota-guard-linux-arm64
+          path: |
+            dist/mr-xiongyq.quota-guard-*.tar.gz
+            dist/mr-xiongyq.quota-guard-*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Set up Node.js 24 for modeltrace-health frontend
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build the modeltrace-health frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@10.14.0
+          pnpm --dir jzjc/frontend install --frozen-lockfile
+          pnpm --dir jzjc/frontend build
+
+      - name: Install host-only runtime builder dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check pyelftools==0.32
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Rebuild Python/NumPy offline runtime for Linux ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p jzjc/.cache/runtime
+          crane pull --platform linux/arm64 "$IMAGE" jzjc/.cache/runtime/python-base.tar
+          python .github/scripts/prepare-jzjc-arm64.py
+          python jzjc/scripts/build_runtime.py --base-tar jzjc/.cache/runtime/python-base.tar
+          python jzjc/scripts/collect_licenses.py
+
+      - name: Build the modeltrace-health ARM64 Rust binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 build --manifest-path jzjc/backend/Cargo.toml --locked --release --target "$TARGET"
+          file "jzjc/backend/target/$TARGET/release/modeltrace-health"
+          readelf -h "jzjc/backend/target/$TARGET/release/modeltrace-health" | grep -E 'Class:|Machine:'
+          mkdir -p jzjc/.runtime-smoke
+          tar xzf jzjc/runtime/runtime.tar.gz -C jzjc/.runtime-smoke
+          file jzjc/.runtime-smoke/usr/local/bin/python3.11
+          readelf -h jzjc/.runtime-smoke/usr/local/bin/python3.11 | grep 'AArch64'
+          rm -rf jzjc/.runtime-smoke
+
+      - name: Package modeltrace-health using the CPR CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd jzjc
+            cpr-plugin package --manifest plugin.json \
+              --binary "backend/target/$TARGET/release/modeltrace-health" \
+              --target "$TARGET" \
+              --resource-map web=frontend/dist \
+              --output-dir "$GITHUB_WORKSPACE/dist"
+          )
+
+      - name: Verify complete modeltrace-health ARM64 installation archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd jzjc && python scripts/verify_artifact.py "$GITHUB_WORKSPACE/dist/personal.modeltrace-health-1.14.0-$TARGET.tar.gz")
+          python - <<'PY'
+          import json, tarfile, pathlib, hashlib
+          for archive in sorted(pathlib.Path('dist').glob('*.tar.gz')):
+              checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+              assert archive.with_name(archive.name + '.sha256').read_text().split()[0] == checksum
+              with tarfile.open(archive) as tar:
+                  members = {f.name for f in tar}
+                  assert 'plugin.json' in members
+                  assert 'bin/' in '\n'.join(sorted(members))
+              print(archive.name, archive.stat().st_size, checksum)
+          assert len(list(pathlib.Path('dist').glob('*.tar.gz'))) == 2
+          PY
+
+      - name: Upload both installable ARM64 plugins as Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpr-plugins-linux-arm64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish pre-release assets for direct downloads
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="cpr-plugins-arm64-${GITHUB_SHA:0:12}"
+          printf 'Source tags: cpr-quota-guard v0.2.3; cpr-jzjc v1.14.0\nNative target: aarch64-unknown-linux-gnu\nRunner: ubuntu-22.04-arm\n' > release-notes.txt
+          gh release create "$tag" dist/* --title "CPR plugins Linux ARM64" \
+            --notes-file release-notes.txt --target "$GITHUB_SHA" --prerelease
