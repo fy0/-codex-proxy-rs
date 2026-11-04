@@ -62,12 +62,15 @@ jobs:
           test "$(git -C quota rev-parse HEAD)" = 6df19fb028f3c3698462ce7ee249de9eccb9b3e7
           test "$(git -C jzjc rev-parse HEAD)" = a8a490fcfc2715ba59435d679907a8ee0e0941f9
 
-      - name: Build upstream CPR plugin packaging CLI
+      - name: Build quota guard's pinned CPR packaging CLI
         shell: bash
         run: |
           set -euo pipefail
-          cargo +1.99.1 install --locked --path backend/apps/plugin-cli --root "$RUNNER_TEMP/cpr-tools"
-          echo "$RUNNER_TEMP/cpr-tools/bin" >> "$GITHUB_PATH"
+          # Plugin SDK manifest validation must match the SDK revision used to build this plugin.
+          cargo +1.99.1 install --locked --git https://github.com/zyycn/codex-proxy-rs.git \
+            --rev 12771aca8719ed4b23b0362b23d8d81f228190ca \
+            codex-proxy-plugin-cli --root "$RUNNER_TEMP/quota-cli"
+          "$RUNNER_TEMP/quota-cli/bin/cpr-plugin" --version
 
       - name: Set up Node.js 26 for quota guard frontend
         uses: actions/setup-node@v4
@@ -92,7 +95,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/dist"
           (
             cd quota
-            cpr-plugin package --manifest plugin.json \
+            "$RUNNER_TEMP/quota-cli/bin/cpr-plugin" package --manifest plugin.json \
               --binary "target/$TARGET/release/cpr-quota-guard" \
               --target "$TARGET" \
               --resource-map web=frontend/dist \
@@ -166,13 +169,22 @@ jobs:
           readelf -h jzjc/.runtime-smoke/usr/local/bin/python3.11 | grep 'AArch64'
           rm -rf jzjc/.runtime-smoke
 
+      - name: Build modeltrace-health's pinned CPR packaging CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 install --locked --git https://github.com/zyycn/codex-proxy-rs.git \
+            --rev e0b7a841ca074f17e11dad73f39a159c75cb2fb1 \
+            codex-proxy-plugin-cli --root "$RUNNER_TEMP/jzjc-cli"
+          "$RUNNER_TEMP/jzjc-cli/bin/cpr-plugin" --version
+
       - name: Package modeltrace-health using the CPR CLI
         shell: bash
         run: |
           set -euo pipefail
           (
             cd jzjc
-            cpr-plugin package --manifest plugin.json \
+            "$RUNNER_TEMP/jzjc-cli/bin/cpr-plugin" package --manifest plugin.json \
               --binary "backend/target/$TARGET/release/modeltrace-health" \
               --target "$TARGET" \
               --resource-map web=frontend/dist \
