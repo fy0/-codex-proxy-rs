@@ -73,7 +73,7 @@ jobs:
       CARGO_BUILD_JOBS: 4
       RUSTFLAGS: -C debuginfo=0
       TARGET: aarch64-unknown-linux-gnu
-      IMAGE: index.docker.io/library/python:3.11.17-bookworm
+      IMAGE: index.docker.io/library/python:3.11.17-slim-bookworm
     steps:
       - uses: actions/checkout@v4
       - name: Native ARM64 prerequisites
@@ -122,6 +122,7 @@ jobs:
             crane pull --platform linux/arm64 "$arm64_image" jzjc/.cache/runtime/python-base.tar
             CPR_PYTHON_IMAGE="$arm64_image" python .github/scripts/prepare-jzjc-arm64.py
             python jzjc/scripts/build_runtime.py --base-tar jzjc/.cache/runtime/python-base.tar
+            python .github/scripts/compact-jzjc-runtime.py jzjc/runtime/runtime.tar.gz
             python jzjc/scripts/collect_licenses.py
           ) 2>&1 | tee "$GITHUB_WORKSPACE/jzjc-runtime.log"
       - name: Build ARM64 Rust and verify bundled Python architecture
