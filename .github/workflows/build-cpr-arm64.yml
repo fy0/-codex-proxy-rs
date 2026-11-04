@@ -2,12 +2,6 @@ name: Build CPR plugins (Linux ARM64)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - build/cpr-arm64-20261103
-    paths:
-      - .github/workflows/build-cpr-arm64.yml
-      - .github/scripts/prepare-jzjc-arm64.py
 
 permissions:
   contents: write

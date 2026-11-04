@@ -24,8 +24,14 @@ with tarfile.open(base) as tar:
     assert config['architecture'] == 'arm64' and config['os'] == 'linux', config
     config_hash = 'sha256:' + hashlib.sha256(config_bytes).hexdigest()
 
+image = os.environ.get("CPR_PYTHON_IMAGE")
+assert image and image.startswith("index.docker.io/library/python@sha256:"), "ARM64 image digest missing"
+
 runtime_py = root / 'scripts/build_runtime.py'
 src = runtime_py.read_text()
+src, n_image = re.subn(r'^IMAGE = "index.docker.io/library/python@sha256:[0-9a-f]{64}"$',
+                       f'IMAGE = "{image}"', src, count=1, flags=re.MULTILINE)
+assert n_image == 1, "Upstream runtime image pin changed"
 original = src
 src, n = re.subn(r'^CONFIG = "sha256:[0-9a-f]{64}"$',
                  f'CONFIG = "{config_hash}"', src, count=1, flags=re.MULTILINE)

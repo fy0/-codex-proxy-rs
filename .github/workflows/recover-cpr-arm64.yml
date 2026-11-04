@@ -42,9 +42,28 @@ jobs:
           tag="cpr-quota-guard-arm64-v0.2.3"
           printf 'Source: Mr-xiongyq/cpr-quota-guard v0.2.3\nTarget: aarch64-unknown-linux-gnu\nBuilt on GitHub ubuntu-22.04-arm, run 41782599340\n' > notes.txt
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --clobber
+            gh release upload "$tag" dist/* --clobber 2>&1 | tee quota-release.log
           else
-            gh release create "$tag" dist/* --title 'cpr-quota-guard v0.2.3 ARM64' --notes-file notes.txt --target "$GITHUB_SHA" --prerelease
+            gh release create "$tag" dist/* --title 'cpr-quota-guard v0.2.3 ARM64' --notes-file notes.txt --target "$GITHUB_SHA" --prerelease 2>&1 | tee quota-release.log
+          fi
+
+      - name: Upload quota release diagnostic log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quota-release-debug
+          path: quota-release.log
+          if-no-files-found: ignore
+      - name: Publish readable quota release log
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -f quota-release.log ]; then
+            gh release create "cpr-quota-publish-debug-${GITHUB_SHA:0:12}" quota-release.log \
+              --title 'Quota release diagnostic only' --notes 'Log only; not a plugin.' \
+              --target "$GITHUB_SHA" --prerelease
           fi
 
   build-jzjc:
@@ -54,7 +73,7 @@ jobs:
       CARGO_BUILD_JOBS: 4
       RUSTFLAGS: -C debuginfo=0
       TARGET: aarch64-unknown-linux-gnu
-      IMAGE: index.docker.io/library/python@sha256:8a00ecb83ed9d0864dfd102a1bdb2067fda907ceb30bb86d09da9ee558b19590
+      IMAGE: index.docker.io/library/python:3.11.17-bookworm
     steps:
       - uses: actions/checkout@v4
       - name: Native ARM64 prerequisites
@@ -98,8 +117,10 @@ jobs:
           set -euo pipefail
           mkdir -p jzjc/.cache/runtime
           (
-            crane pull --platform linux/arm64 "$IMAGE" jzjc/.cache/runtime/python-base.tar
-            python .github/scripts/prepare-jzjc-arm64.py
+            arm64_image="index.docker.io/library/python@$(crane digest --platform linux/arm64 "$IMAGE")"
+            echo "Pinned ARM64 runtime image: $arm64_image"
+            crane pull --platform linux/arm64 "$arm64_image" jzjc/.cache/runtime/python-base.tar
+            CPR_PYTHON_IMAGE="$arm64_image" python .github/scripts/prepare-jzjc-arm64.py
             python jzjc/scripts/build_runtime.py --base-tar jzjc/.cache/runtime/python-base.tar
             python jzjc/scripts/collect_licenses.py
           ) 2>&1 | tee "$GITHUB_WORKSPACE/jzjc-runtime.log"
