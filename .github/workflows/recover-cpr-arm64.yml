@@ -123,6 +123,16 @@ jobs:
             CPR_PYTHON_IMAGE="$arm64_image" python .github/scripts/prepare-jzjc-arm64.py
             python jzjc/scripts/build_runtime.py --base-tar jzjc/.cache/runtime/python-base.tar
             python .github/scripts/compact-jzjc-runtime.py jzjc/runtime/runtime.tar.gz
+            # Verify executable ARM64 Python/NumPy before spending time on Rust compilation.
+            mkdir -p jzjc/.runtime-quickcheck
+            tar xzf jzjc/runtime/runtime.tar.gz -C jzjc/.runtime-quickcheck
+            runtime_root="$(realpath jzjc/.runtime-quickcheck)"
+            PYTHONHOME="$runtime_root/usr/local" OPENBLAS_NUM_THREADS=1 \
+              "$runtime_root/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" \
+              --library-path "$runtime_root/usr/local/lib:$runtime_root/usr/lib/aarch64-linux-gnu" \
+              "$runtime_root/usr/local/bin/python3.11" -B -c \
+              'import numpy; print("Bundled NumPy:", numpy.__version__)'
+            rm -rf jzjc/.runtime-quickcheck
             python jzjc/scripts/collect_licenses.py
           ) 2>&1 | tee "$GITHUB_WORKSPACE/jzjc-runtime.log"
       - name: Build ARM64 Rust and verify bundled Python architecture

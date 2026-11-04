@@ -3,7 +3,7 @@
 
 Runs only in a GitHub Actions ARM64 runner after build_runtime.py. Removes
 runtime-irrelevant headers, compiler support, type stubs and development-only
-modules, then strips unused symbols from ELF files. Leaves the rest intact.
+modules, and preserves all native ELF libraries byte-for-byte. Leaves the rest intact.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import gzip
 import io
 import os
 from pathlib import Path, PurePosixPath
-import subprocess
 import tarfile
 import tempfile
 
@@ -42,25 +41,12 @@ def compact(path: Path) -> None:
             original[member.name] = (archive.extractfile(member).read(), member.mode)
     kept = {}
     omitted = []
-    stripped_count = stripped_saved = 0
-    with tempfile.TemporaryDirectory(prefix="jzjc-elf-") as temp:
-        scratch = Path(temp) / "elf"
-        for name, (data, mode) in original.items():
-            if remove_development_only(name):
-                omitted.append((name, len(data)))
-                continue
-            if data.startswith(b"\x7fELF"):
-                scratch.write_bytes(data)
-                result = subprocess.run(["strip", "--strip-unneeded", str(scratch)], capture_output=True, text=True)
-                if result.returncode == 0:
-                    cleaned = scratch.read_bytes()
-                    if len(cleaned) < len(data):
-                        stripped_count += 1
-                        stripped_saved += len(data) - len(cleaned)
-                        data = cleaned
-                elif "file format not recognized" not in result.stderr:
-                    print(f"Warning: unable to strip {name}: {result.stderr.strip()}")
-            kept[name] = data, mode
+    # Never alter ELF binaries: GNU strip can invalidate PT_LOAD alignment on AArch64.
+    for name, (data, mode) in original.items():
+        if remove_development_only(name):
+            omitted.append((name, len(data)))
+            continue
+        kept[name] = data, mode
     with tempfile.NamedTemporaryFile(prefix="jzjc-runtime-", suffix=".tar.gz", dir=path.parent, delete=False) as tmp:
         destination = Path(tmp.name)
     try:
@@ -82,7 +68,7 @@ def compact(path: Path) -> None:
     finally:
         destination.unlink(missing_ok=True)
     after = path.stat().st_size
-    print(f"Runtime compression: {before:,} -> {after:,} bytes (saved {before-after:,}); {len(omitted)} development-only files removed ({sum(x[1] for x in omitted):,} raw bytes), {stripped_count} ELF objects stripped ({stripped_saved:,} raw bytes saved)")
+    print(f"Runtime compression: {before:,} -> {after:,} bytes (saved {before-after:,}); {len(omitted)} development-only files removed ({sum(x[1] for x in omitted):,} raw bytes); native ELF binaries preserved unchanged")
     # Extra detail for follow-up size budgets. Never print the contents of files.
     for name, size in sorted(omitted, key=lambda t: t[1], reverse=True)[:8]:
         print(f"  omitted {size:>10} {name}")
