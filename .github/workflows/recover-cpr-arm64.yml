@@ -1,0 +1,167 @@
+name: Recover quota guard and build JZJC (Linux ARM64)
+
+on:
+  push:
+    branches: [build/cpr-arm64-20261103]
+    paths: ['.github/workflows/recover-cpr-arm64.yml', '.github/scripts/prepare-jzjc-arm64.py']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish-quota:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Recover completed quota guard ARM64 package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download 41782599340 --repo "$GITHUB_REPOSITORY" --name cpr-quota-guard-linux-arm64 --dir dist
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          packages = list(Path('dist').glob('*.tar.gz'))
+          assert len(packages) == 1, packages
+          for p in packages:
+              expected = p.with_name(p.name+'.sha256').read_text().split()[0]
+              assert hashlib.sha256(p.read_bytes()).hexdigest() == expected
+              print(p.name, p.stat().st_size, expected)
+          PY
+      - name: Publish quota guard standalone release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="cpr-quota-guard-arm64-v0.2.3"
+          printf 'Source: Mr-xiongyq/cpr-quota-guard v0.2.3\nTarget: aarch64-unknown-linux-gnu\nBuilt on GitHub ubuntu-22.04-arm, run 41782599340\n' > notes.txt
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title 'cpr-quota-guard v0.2.3 ARM64' --notes-file notes.txt --target "$GITHUB_SHA" --prerelease
+          fi
+
+  build-jzjc:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 4
+      RUSTFLAGS: -C debuginfo=0
+      TARGET: aarch64-unknown-linux-gnu
+      IMAGE: index.docker.io/library/python@sha256:8a00ecb83ed9d0864dfd102a1bdb2067fda907ceb30bb86d09da9ee558b19590
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native ARM64 prerequisites
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libssl-dev file binutils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+          targets: aarch64-unknown-linux-gnu
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Checkout pinned JZJC
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.14.0 https://github.com/Victor-Tau/cpr-jzjc.git jzjc
+          test "$(git -C jzjc rev-parse HEAD)" = a8a490fcfc2715ba59435d679907a8ee0e0941f9
+      - name: Build frontend
+        run: |
+          set -euo pipefail
+          npm install -g pnpm@10.14.0
+          pnpm --dir jzjc/frontend install --frozen-lockfile
+          pnpm --dir jzjc/frontend build
+      - name: Install Python/NumPy builder (GitHub only)
+        run: |
+          set -euo pipefail
+          python -m pip install pyelftools==0.32
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Build ARM64 private runtime (log)
+        run: |
+          set -euo pipefail
+          mkdir -p jzjc/.cache/runtime
+          (
+            crane pull --platform linux/arm64 "$IMAGE" jzjc/.cache/runtime/python-base.tar
+            python .github/scripts/prepare-jzjc-arm64.py
+            python jzjc/scripts/build_runtime.py --base-tar jzjc/.cache/runtime/python-base.tar
+            python jzjc/scripts/collect_licenses.py
+          ) 2>&1 | tee "$GITHUB_WORKSPACE/jzjc-runtime.log"
+      - name: Build ARM64 Rust and verify bundled Python architecture
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 build --manifest-path jzjc/backend/Cargo.toml --locked --release --target "$TARGET"
+          readelf -h "jzjc/backend/target/$TARGET/release/modeltrace-health" | grep AArch64
+          mkdir -p jzjc/.runtime-smoke
+          tar xzf jzjc/runtime/runtime.tar.gz -C jzjc/.runtime-smoke
+          readelf -h jzjc/.runtime-smoke/usr/local/bin/python3.11 | grep AArch64
+          rm -rf jzjc/.runtime-smoke
+      - name: Build JZJC matching CLI (GitHub only)
+        run: |
+          set -euo pipefail
+          cargo +1.99.1 install --locked --git https://github.com/zyycn/codex-proxy-rs.git \
+            --rev e0b7a841ca074f17e11dad73f39a159c75cb2fb1 \
+            codex-proxy-plugin-cli --root "$RUNNER_TEMP/jzjc-cli"
+      - name: Package and verify plugin (log)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          (
+            cd jzjc
+            "$RUNNER_TEMP/jzjc-cli/bin/cpr-plugin" package --manifest plugin.json \
+              --binary "backend/target/$TARGET/release/modeltrace-health" \
+              --target "$TARGET" --resource-map web=frontend/dist --output-dir "$GITHUB_WORKSPACE/dist"
+            python scripts/verify_artifact.py "$GITHUB_WORKSPACE/dist/personal.modeltrace-health-1.14.0-$TARGET.tar.gz"
+          ) 2>&1 | tee "$GITHUB_WORKSPACE/jzjc-package.log"
+      - name: Publish failure logs
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=()
+          for f in jzjc-runtime.log jzjc-package.log; do
+            if [ -f "$f" ]; then files+=("$f"); fi
+          done
+          if [ "${#files[@]}" -gt 0 ]; then
+            gh release create "cpr-jzjc-arm64-debug-${GITHUB_SHA:0:12}" "${files[@]}" \
+              --title 'JZJC ARM64 diagnostic only' \
+              --notes 'Diagnostic logs only, not a plugin installation package.' \
+              --target "$GITHUB_SHA" --prerelease
+          fi
+      - name: Upload verified JZJC ARM64 install package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpr-jzjc-linux-arm64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+      - name: Publish JZJC release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="cpr-jzjc-arm64-v1.14.0"
+          printf 'Source: Victor-Tau/cpr-jzjc v1.14.0\nTarget: aarch64-unknown-linux-gnu\nNative Python 3.11 + NumPy 2.4.3 ARM64 included\n' > notes.txt
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title 'cpr-jzjc v1.14.0 ARM64' --notes-file notes.txt --target "$GITHUB_SHA" --prerelease
+          fi
