@@ -1,0 +1,56 @@
+name: Publish cpr-quota-guard Linux ARM64 package
+
+on:
+  push:
+    branches: [build/cpr-arm64-20261103]
+    paths: ['.github/workflows/publish-cpr-quota-arm64.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout for GitHub CLI repository context
+        uses: actions/checkout@v4
+
+      - name: Retrieve already-built ARM64 plugin (no compilation)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download 41782599340 --repo "$GITHUB_REPOSITORY" \
+            --name cpr-quota-guard-linux-arm64 --dir dist
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          packages = list(Path('dist').glob('*.tar.gz'))
+          assert len(packages) == 1, packages
+          for package in packages:
+              expected = package.with_name(package.name + '.sha256').read_text().split()[0]
+              actual = hashlib.sha256(package.read_bytes()).hexdigest()
+              assert expected == actual
+              print('Verified', package, package.stat().st_size, actual)
+          PY
+
+      - name: Publish existing package as downloadable GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='cpr-quota-guard-arm64-v0.2.3'
+          printf 'Source: Mr-xiongyq/cpr-quota-guard v0.2.3\nTarget: aarch64-unknown-linux-gnu\nARM64 build: GitHub Actions run 41782599340\n' > notes.txt
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title 'cpr-quota-guard v0.2.3 Linux ARM64' \
+              --notes-file notes.txt --target "$GITHUB_SHA" --prerelease
+          fi
