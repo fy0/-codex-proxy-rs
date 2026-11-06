@@ -277,9 +277,7 @@
   }
   [configFields.accountExtra, configFields.groupExtra, configFields.driver].forEach((input) =>
     input.addEventListener('input', refreshConfigJson));
-  [configFields.storageDir, configFields.quotaRules].forEach((input) =>
-    input.addEventListener('input', refreshConfigJson));
-  [configFields.mode, configFields.timeout, configFields.backendConcurrency, configFields.quotaAge].forEach((select) =>
+  [configFields.mode, configFields.timeout, configFields.backendConcurrency].forEach((select) =>
     select.addEventListener('change', refreshConfigJson));
   configFields.modelAdd.addEventListener('click', addCustomModel);
   configFields.modelNew.addEventListener('keydown', (event) => {
