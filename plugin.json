@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.0",
-  "description": "Codex Image Bridge with backend durable image job queue, quota guard in one scheduler, Images 2.6 and persistent workbench preferences.",
+  "version": "0.8.0",
+  "description": "Image bridge with self-managed default CPR data storage, 5-minute automatic cleanup, optional keep, quota guard and durable server queue.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -115,8 +115,8 @@
       },
       "imageStorageDir": {
         "type": "string",
-        "title": "后端持久化图片目录",
-        "description": "启用后端异步生图必填。填写宿主系统的绝对目录；Docker 必须挂载此目录为持久卷，后台会将 PNG 存入该目录。空值会禁用异步任务提交。",
+        "title": "自定义图片目录（可选）",
+        "description": "可选。留空时自动写入 CPR 当前 runtime_data_dir/image-bridge/<实例>/images；未挂载持久卷也可运行，容器重启后可能丢失。填入自定义绝对路径则覆盖默认位置。",
         "maxLength": 1024,
         "default": ""
       },

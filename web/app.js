@@ -6,6 +6,7 @@
     clientKey: byId('clientKey'), driver: byId('driverModel'), imageModel: byId('imageModel'),
     prompt: byId('prompt'), size: byId('size'), quality: byId('quality'),
     batchCount: byId('batchCount'), parallelism: byId('parallelism'),
+    keepResults: byId('keepResults'), clearAllResults: byId('clearAllResults'),
     generate: byId('generate'), cancel: byId('cancel'), refresh: byId('refresh'),
     status: byId('status'), notice: byId('validationMessage'),
     taskGrid: byId('taskGrid'), queueInfo: byId('queueInfo'),
@@ -330,6 +331,7 @@
   const MAX_RETAINED_IMAGES = 12;
   const MAX_PARALLEL = 3;
   let closed = false;
+  let clearAllConfirmationUntil=0;
   const host = () => {
     if (!window.codexProxyPlugin || window.codexProxyPlugin.version < 2
       || !window.codexProxyPlugin.models || !window.codexProxyPlugin.request) {
@@ -372,7 +374,9 @@
       ||!backendEnabled||!Number.isInteger(number)||number<1||number>10
       ||liveTaskCount()+number>MAX_TASKS;
     fields.cancel.disabled=liveTaskCount()===0;
-    fields.clearFinished.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
+    fields.clearFinished.disabled=!tasks.some((t)=>
+      !['queued','running'].includes(t.status) && !t.keep);
+    fields.clearAllResults.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
   }
   function presetButtons() {
     fields.presets.replaceChildren();
@@ -607,8 +611,8 @@
       const warning=byId('backendNotice');
       if(warning) {
         warning.textContent=backendEnabled
-          ? '后台任务已启用：关闭页面不会取消队列，结果存储在服务器持久目录。'
-          : '后台任务未配置：请展开配置生成器，设置 imageStorageDir 并保存插件参数。';
+          ? '后端任务可用：默认保存在 CPR 数据目录。未勾选长期保留的结果完成后 5 分钟自动清理。'
+          : '服务器暂时无法读取后端队列，请核对 CPR 插件状态。';
         warning.classList.toggle('error',!backendEnabled);
       }
       startPolling();
@@ -776,7 +780,8 @@
     prompt.title=task.prompt;
     const model=document.createElement('span');
     model.className='task-model';
-    model.textContent=task.imageModel+' · '+task.size+' · '+task.quality;
+    model.textContent=task.imageModel+' · '+task.size+' · '+task.quality
+      +(task.keep?' · 长期保留':' · 5 分钟自动清理');
     const error=document.createElement('div');
     error.className='task-error';
     error.hidden=true;
@@ -898,7 +903,9 @@
     else if(done)status('success','已完成');
     else if(failed)status('error','部分任务失败');
     else status('',tasks.length?'暂无进行中的任务':'尚无任务');
-    fields.clearFinished.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
+    fields.clearFinished.disabled=!tasks.some((t)=>
+      !['queued','running'].includes(t.status) && !t.keep);
+    fields.clearAllResults.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
     fields.cancel.disabled=!(running||queued);
     count();
   }
@@ -959,7 +966,7 @@
     if(closed || !fields.clientKey.value || !fields.imageModel.value ||
       !fields.prompt.value.trim() || !Number.isInteger(n) || n<1 || n>10)return;
     if(!backendEnabled){
-      notice('后端任务未启用：请展开配置生成器，设置 imageStorageDir 绝对持久目录并保存插件参数。',true);
+      notice('CPR 后端任务接口当前不可用，请检查插件运行状态。',true);
       return;
     }
     fields.generate.disabled=true;
@@ -970,7 +977,8 @@
         prompt:fields.prompt.value.trim(),
         size:fields.size.value,
         quality:fields.quality.value,
-        count:n
+        count:n,
+        keep:!!fields.keepResults.checked
       });
       notice('已向 CPR 后端提交 '+response.ids.length+' 张。页面关闭后任务仍将继续。');
       await pollJobs();
@@ -995,13 +1003,33 @@
       return cancelTask(task);
     }));
   }
-  function clearFinishedTasks() {
-    for(const task of tasks.slice()) {
-      if(['queued','running'].includes(task.status))continue;
-      hiddenFinished.add(task.id);
-      forgetTask(task);
+  async function clearFinishedTasks() {
+    fields.clearFinished.disabled=true;
+    try{
+      const result=await invoke('POST','api/jobs/clear',{includeKept:false});
+      notice('已从后端删除 '+result.deleted+' 个普通已结束任务及其图片。长期保留的图片不受影响。');
+      await pollJobs();
+    }catch(error){
+      notice('清理失败：'+(error.message||error),true);
+    }finally{updateQueueInfo();}
+  }
+  async function clearAllSavedResults() {
+    if(Date.now()>clearAllConfirmationUntil){
+      clearAllConfirmationUntil=Date.now()+10000;
+      fields.clearAllResults.textContent='再点一次确认（10秒）';
+      notice('注意：再次点击将永久删除所有已结束结果，包括“长期保留”的图片；正在生成的任务不受影响。',true);
+      return;
     }
-    updateQueueInfo();
+    clearAllConfirmationUntil=0;
+    fields.clearAllResults.textContent='清空含长期保留';
+    fields.clearAllResults.disabled=true;
+    try{
+      const result=await invoke('POST','api/jobs/clear',{includeKept:true});
+      notice('已从后端删除 '+result.deleted+' 个已结束任务，包括长期保留结果。');
+      await pollJobs();
+    }catch(error){
+      notice('清空失败：'+(error.message||error),true);
+    }finally{updateQueueInfo();}
   }
   function closePage() {
     closed=true;
@@ -1036,7 +1064,8 @@
   });
   fields.generate.addEventListener('click',queueBatch);
   fields.cancel.addEventListener('click',cancelAllTasks);
-  fields.clearFinished.addEventListener('click',clearFinishedTasks);
+  fields.clearFinished.addEventListener('click',()=>{void clearFinishedTasks();});
+  fields.clearAllResults.addEventListener('click',()=>{void clearAllSavedResults();});
   fields.refresh.addEventListener('click',bootstrap);
   window.addEventListener('pagehide',closePage,{once:true});
   loadConfigBuilder({

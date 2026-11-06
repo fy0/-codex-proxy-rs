@@ -65,6 +65,12 @@ pub fn registration() -> ManagementRegistration {
             },
             ManagementRoute {
                 method: "POST".into(),
+                path: "api/jobs/clear".into(),
+                request_content_types: vec![JSON.into()],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "POST".into(),
                 path: "api/jobs/cancel".into(),
                 request_content_types: vec![JSON.into()],
                 response_content_types: vec![JSON.into()],
@@ -323,7 +329,7 @@ pub async fn handle(
                     "enabled": config.has_image_scope(),
                     "backendJobsEnabled": jobs.enabled(),
                     "backgroundConcurrency": config.background_concurrency,
-                    "imageStorageDir": config.image_storage_dir,
+                    "imageStorageDir": jobs.default_path().display().to_string(),
                     "accountCount": config.image_account_ids.len(),
                     "groupCount": config.image_group_ids.len(),
                     "accountOptions": accounts,
@@ -386,6 +392,12 @@ pub async fn handle(
             let body: Value = serde_json::from_slice(&call.payload)
                 .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid job JSON"))?;
             json_response(202, jobs.submit(&call.host, &body).await?)
+        }
+        ("POST", "api/jobs/clear") => {
+            let body: Value = serde_json::from_slice(&call.payload).map_err(|_| {
+                PluginFault::new(ErrorCode::InvalidInput, "invalid clear jobs JSON")
+            })?;
+            json_response(200, jobs.clear(&call.host, &body).await?)
         }
         ("POST", "api/jobs/cancel") => {
             let body: Value = serde_json::from_slice(&call.payload)
@@ -496,7 +508,7 @@ mod tests {
     #[test]
     fn management_route_and_page_are_registered() {
         let registration = registration();
-        assert_eq!(registration.routes.len(), 8);
+        assert_eq!(registration.routes.len(), 9);
         assert_eq!(registration.pages[0].entry, "web/index.html");
         assert_eq!(registration.pages[0].title, "画图测试");
     }

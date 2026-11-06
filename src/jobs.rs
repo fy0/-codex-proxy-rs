@@ -17,6 +17,7 @@ use gateway_plugin_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -36,6 +37,36 @@ const STATE_KEY: &str = "queue";
 const MAX_PENDING: usize = 30;
 const CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PNG_BYTES: usize = 120 * 1024 * 1024;
+// 未勾选保留的成品及任务记录在完成后 5 分钟到期。每次列表/API 读取
+// 和维护回调都会主动清理；文件兜底清扫器在插件运行期间独立于长耗时维护工作。
+const RESULT_TTL_MS: u64 = 5 * 60 * 1000;
+pub const FILE_SWEEP_INTERVAL_SECONDS: u64 = 10;
+
+/// CPR 官方 ProcessSpec.directory 来自 runtime_data_dir/plugins/plugin-* 缓存。
+/// 不将结果放入 plugin-*（升级时会销毁该缓存），而放在同级 runtime_data_dir
+/// 的 image-bridge 子目录，每个实例采用固定摘要隔离。
+fn default_storage_dir(current_dir: &Path, instance_id: &str, temp_dir: &Path) -> PathBuf {
+    let digest = Sha256::digest(instance_id.as_bytes());
+    let short = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let name = current_dir
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or("");
+    if name.starts_with("plugin-") {
+        if let Some(plugin_cache) = current_dir.parent() {
+            if plugin_cache.file_name().and_then(|name| name.to_str()) == Some("plugins") {
+                if let Some(runtime_data) = plugin_cache.parent() {
+                    return runtime_data.join("image-bridge").join(short).join("images");
+                }
+            }
+        }
+    }
+    // 开发/非标准安装也允许用临时存储启动；用户接受容器重启后丢结果。
+    temp_dir.join("cpr-image-bridge").join(short).join("images")
+}
 
 fn invalid(msg: &str) -> PluginFault {
     PluginFault::new(ErrorCode::InvalidInput, msg)
@@ -43,6 +74,18 @@ fn invalid(msg: &str) -> PluginFault {
 fn fault(msg: &str) -> PluginFault {
     PluginFault::new(ErrorCode::Fault, msg)
 }
+/// 档位始终保留上游原值；这里只拒绝明显不支持 xhigh/max 的早期模型。
+/// API 参考：官方 2.5 Sunburst/Flare 支持 xhigh/max，2.6 继续透传并由上游校验。
+fn quality_for_model(model: &str, quality: &str) -> bool {
+    match quality {
+        "auto" | "low" | "medium" | "high" => true,
+        "xhigh" | "max" => {
+            model.starts_with("gpt-image-2.5-") || model.starts_with("gpt-image-2.6-")
+        }
+        _ => false,
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,11 +110,29 @@ pub struct ImageJob {
     pub account_id: Option<String>,
     pub result_bytes: Option<u64>,
     pub error: Option<String>,
+    /// 新字段带 serde default，升级时仍能读取 v0.7.0 保存的队列。
+    #[serde(default)]
+    pub keep: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct JobQueue {
     pub jobs: Vec<ImageJob>,
+}
+
+/// 结束后 5 分钟自动到期。未结束及明确长期保留的任务不能被自动清理。
+fn expired(job: &ImageJob, now: u64) -> bool {
+    job.status != "queued"
+        && job.status != "running"
+        && !job.keep
+        && job
+            .completed_ms
+            .is_some_and(|ended| now.saturating_sub(ended) >= RESULT_TTL_MS)
+}
+
+/// 除后台自动过期外，一键清理也只操作已结束任务。
+fn cleanup_candidate(job: &ImageJob, include_kept: bool) -> bool {
+    !matches!(job.status.as_str(), "queued" | "running") && (include_kept || !job.keep)
 }
 
 impl ImageJob {
@@ -81,6 +142,7 @@ impl ImageJob {
         prompt: String,
         size: String,
         quality: String,
+        keep: bool,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -97,34 +159,46 @@ impl ImageJob {
             account_id: None,
             result_bytes: None,
             error: None,
+            keep,
         }
     }
 }
 pub struct BackendJobs {
     config: Arc<Config>,
+    storage_root: PathBuf,
     lock: Mutex<()>,
     next_account: AtomicUsize,
 }
 
 impl BackendJobs {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<Config>, instance_id: &str) -> Self {
+        let root = if config.image_storage_dir.is_empty() {
+            default_storage_dir(
+                &std::env::current_dir().unwrap_or_default(),
+                instance_id,
+                &std::env::temp_dir(),
+            )
+        } else {
+            PathBuf::from(&config.image_storage_dir)
+        };
         Self {
             config,
+            storage_root: root,
             lock: Mutex::new(()),
             next_account: AtomicUsize::new(0),
         }
     }
+    /// 未指定自定义目录不等于禁用后端。
     pub fn enabled(&self) -> bool {
-        !self.config.image_storage_dir.is_empty()
+        true
+    }
+
+    pub fn default_path(&self) -> &Path {
+        &self.storage_root
     }
 
     fn storage_path(&self) -> Result<PathBuf, PluginFault> {
-        if !self.enabled() {
-            return Err(invalid(
-                "Backend image jobs require imageStorageDir (a persistent absolute directory)",
-            ));
-        }
-        let path = PathBuf::from(&self.config.image_storage_dir);
+        let path = self.storage_root.clone();
         if !path.is_absolute()
             || path
                 .components()
@@ -154,6 +228,88 @@ impl BackendJobs {
         let job = Uuid::parse_str(id).map_err(|_| invalid("invalid job ID"))?;
         Ok(self.storage_path()?.join(format!("{job}.png")))
     }
+    fn keep_marker_path(&self, id: &str) -> Result<PathBuf, PluginFault> {
+        let job = Uuid::parse_str(id).map_err(|_| invalid("invalid job ID"))?;
+        Ok(self.storage_path()?.join(format!("{job}.keep")))
+    }
+
+    async fn remove_files(&self, id: &str) {
+        if let Ok(path) = self.result_path(id) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        if let Ok(path) = self.keep_marker_path(id) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    /// 清理状态和已过期的 PNG；在管理页读取和维护轮次均触发。
+    pub async fn expire(&self, host: &HostClient) -> Result<usize, PluginFault> {
+        let _guard = self.lock.lock().await;
+        let (mut queue, version) = self.load(host).await?;
+        let mut expired_ids = Vec::new();
+        let now = now_ms();
+        queue.jobs.retain(|job| {
+            if expired(job, now) {
+                expired_ids.push(job.id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !expired_ids.is_empty() {
+            self.save(host, &queue, version).await?;
+            for id in &expired_ids {
+                self.remove_files(id).await;
+            }
+        }
+        Ok(expired_ids.len())
+    }
+
+    /// 执行后的 PNG 可以独立于长耗时维护调用到期。
+    /// keep 标志会由同目录的 .keep 标记保护，程序重启后同样有效。
+    pub async fn sweep_expired_files(&self) {
+        let Ok(root) = self.storage_path() else {
+            return;
+        };
+        let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("png") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|x| x.to_str()) else {
+                continue;
+            };
+            if Uuid::parse_str(stem).is_err() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+                continue;
+            };
+            if age.as_millis() < RESULT_TTL_MS as u128 {
+                continue;
+            }
+            let Ok(marker) = self.keep_marker_path(stem) else {
+                continue;
+            };
+            if tokio::fs::metadata(marker).await.is_ok() {
+                continue;
+            }
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
     async fn load(&self, host: &HostClient) -> Result<(JobQueue, Option<u64>), PluginFault> {
         let reply = host
             .call(
@@ -203,12 +359,19 @@ impl BackendJobs {
         Ok(answer.version)
     }
     pub async fn list(&self, host: &HostClient) -> Result<Value, PluginFault> {
+        self.expire(host).await?;
         let (queue, _) = self.load(host).await?;
-        Ok(json!({"jobs":queue.jobs,"backendEnabled":self.enabled()}))
+        Ok(json!({
+            "jobs":queue.jobs,
+            "backendEnabled":self.enabled(),
+            "storagePath":self.storage_root.display().to_string(),
+            "retentionSeconds":RESULT_TTL_MS/1000,
+        }))
     }
 
     pub async fn submit(&self, host: &HostClient, input: &Value) -> Result<Value, PluginFault> {
         self.ensure_storage().await?;
+        self.expire(host).await?;
         let fields = input
             .as_object()
             .ok_or_else(|| invalid("invalid job request"))?;
@@ -229,6 +392,11 @@ impl BackendJobs {
         let size = str_field("size", 32)?;
         let quality = str_field("quality", 16)?;
         let count = fields.get("count").and_then(Value::as_u64).unwrap_or(1);
+        let keep = match fields.get("keep") {
+            Some(Value::Bool(value)) => *value,
+            None => false,
+            _ => return Err(invalid("keep must be boolean")),
+        };
         if !(1..=10).contains(&count)
             || ![
                 "auto",
@@ -243,6 +411,7 @@ impl BackendJobs {
             ]
             .contains(&size.as_str())
             || !["auto", "low", "medium", "high", "xhigh", "max"].contains(&quality.as_str())
+            || !quality_for_model(&model, &quality)
             || !self.config.enabled_image_model(&model)
         {
             return Err(invalid("unsupported image job parameters"));
@@ -273,14 +442,16 @@ impl BackendJobs {
         // 仅逐出已结束、状态保留时间最长的任务，且不删除仍需要的结果文件。
         let mut dropped = Vec::new();
         while queue.jobs.len() + new_count > MAX_PENDING {
-            let Some(index) = queue
-                .jobs
-                .iter()
-                .position(|j| j.status != "queued" && j.status != "running")
-            else {
+            let Some(index) = queue.jobs.iter().position(|j| cleanup_candidate(j, false)) else {
                 break;
             };
             dropped.push(queue.jobs.remove(index).id);
+        }
+        if queue.jobs.len() + new_count > MAX_PENDING {
+            return Err(PluginFault::new(
+                ErrorCode::Capacity,
+                "saved images fill the history; clear retained results before adding more",
+            ));
         }
         let mut ids = Vec::new();
         for _ in 0..new_count {
@@ -290,15 +461,14 @@ impl BackendJobs {
                 prompt.clone(),
                 size.clone(),
                 quality.clone(),
+                keep,
             );
             ids.push(job.id.clone());
             queue.jobs.push(job);
         }
         self.save(host, &queue, version).await?;
         for id in dropped {
-            if let Ok(path) = self.result_path(&id) {
-                let _ = tokio::fs::remove_file(path).await;
-            }
+            self.remove_files(&id).await;
         }
         Ok(json!({"ids":ids,"status":"queued","pollAfterMs":1500}))
     }
@@ -328,6 +498,34 @@ impl BackendJobs {
         self.save(host, &queue, version).await?;
         Ok(json!({"id":id,"status":job_status(&queue,id)}))
     }
+    /// 管理端一键清理：只删除已结束任务，保留执行中的请求。
+    /// includeKept 必须显式为 true 才会删除用户声明长期保留的文件。
+    pub async fn clear(&self, host: &HostClient, input: &Value) -> Result<Value, PluginFault> {
+        let include_kept = match input.get("includeKept") {
+            Some(Value::Bool(v)) => *v,
+            None => false,
+            _ => return Err(invalid("includeKept must be boolean")),
+        };
+        let _guard = self.lock.lock().await;
+        let (mut queue, version) = self.load(host).await?;
+        let mut deleted = Vec::new();
+        queue.jobs.retain(|job| {
+            if cleanup_candidate(job, include_kept) {
+                deleted.push(job.id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !deleted.is_empty() {
+            self.save(host, &queue, version).await?;
+            for id in &deleted {
+                self.remove_files(id).await;
+            }
+        }
+        Ok(json!({"deleted":deleted.len(),"includeKept":include_kept}))
+    }
+
     pub async fn image_chunk(
         &self,
         host: &HostClient,
@@ -338,6 +536,7 @@ impl BackendJobs {
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("missing job id"))?;
         let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        self.expire(host).await?;
         let (queue, _) = self.load(host).await?;
         let job = queue
             .jobs
@@ -383,10 +582,9 @@ fn job_status(queue: &JobQueue, id: &str) -> String {
 impl BackendJobs {
     /// 宿主独立维护回调领取任务，而不是复用浏览器管理请求的父调用。
     pub async fn reconcile(&self, host: &HostClient) -> Result<(), PluginFault> {
-        if !self.enabled() {
-            return Ok(());
-        }
         self.ensure_storage().await?;
+        self.expire(host).await?;
+        self.sweep_expired_files().await;
         let active = {
             let _guard = self.lock.lock().await;
             let (mut queue, version) = self.load(host).await?;
@@ -461,9 +659,7 @@ impl BackendJobs {
             };
             if job.status == "canceled" {
                 // 用户主动停止的结果不能再交付。
-                if let Ok(path) = self.result_path(&id) {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
+                self.remove_files(&id).await;
                 continue;
             }
             if job.status != "running" {
@@ -684,6 +880,22 @@ impl BackendJobs {
         tokio::fs::rename(&staging, &path)
             .await
             .map_err(|_| fault("cannot commit image result"))?;
+        if job.keep {
+            let marker = self.keep_marker_path(&job.id)?;
+            // 长期保留标记即使插件重启仍会被后台文件清扫器识别。
+            if tokio::fs::write(marker, b"keep").await.is_err() {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(fault("cannot mark retained image"));
+            }
+        } else {
+            // 正常运行时以精确 5 分钟定时器删除文件，不依赖维护调用是否繁忙。
+            // 实例重启后由 10 秒文件扫除器兜底，状态则在 GET/维护时剔除。
+            let expires = path.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(RESULT_TTL_MS)).await;
+                let _ = tokio::fs::remove_file(expires).await;
+            });
+        }
         Ok((account, request_id, png.len() as u64))
     }
 }
@@ -754,8 +966,79 @@ mod tests {
             "prompt".into(),
             "1024x1024".into(),
             "high".into(),
+            false,
         );
         assert!(Uuid::parse_str(&j.id).is_ok());
         assert_eq!(j.status, "queued");
+        assert!(!j.keep);
+        assert!(!expired(&j, now_ms() + 100_000));
+    }
+
+    #[test]
+    fn uses_cpr_runtime_data_dir_not_temporary_package_cache() {
+        let data = Path::new("/srv/cpr/data/plugins/plugin-A1b2");
+        let temp = Path::new("/tmp");
+        let base = default_storage_dir(data, "plugin-instance", temp);
+        assert!(base.starts_with("/srv/cpr/data/image-bridge"));
+        assert!(base.ends_with("images"));
+        assert!(!base.starts_with("/srv/cpr/data/plugins"));
+        assert_eq!(base, default_storage_dir(data, "plugin-instance", temp));
+        assert_ne!(base, default_storage_dir(data, "another-instance", temp));
+        let fallback = default_storage_dir(Path::new("/app"), "plugin-instance", temp);
+        assert!(fallback.starts_with("/tmp/cpr-image-bridge"));
+    }
+
+    #[test]
+    fn expires_at_five_minutes_unless_explicitly_kept() {
+        let mut job = ImageJob::new(
+            "key".into(),
+            "gpt-image-2.6-sunburst".into(),
+            "example".into(),
+            "1024x1024".into(),
+            "high".into(),
+            false,
+        );
+        job.status = "succeeded".to_string();
+        job.completed_ms = Some(1000);
+        assert!(!expired(&job, 300_999));
+        assert!(expired(&job, 301_000));
+        assert!(cleanup_candidate(&job, false));
+        job.keep = true;
+        assert!(!expired(&job, 999_999_999));
+        assert!(!cleanup_candidate(&job, false));
+        assert!(cleanup_candidate(&job, true));
+        job.status = "running".into();
+        assert!(!cleanup_candidate(&job, true));
+    }
+
+    #[test]
+    fn previously_saved_jobs_without_keep_default_to_temporary() {
+        let job = ImageJob::new(
+            "key".into(),
+            "gpt-image-2.5-sunburst".into(),
+            "example".into(),
+            "1024x1024".into(),
+            "medium".into(),
+            false,
+        );
+        let mut value = serde_json::to_value(&job).unwrap();
+        value.as_object_mut().unwrap().remove("keep");
+        let restored: ImageJob = serde_json::from_value(value).unwrap();
+        assert!(!restored.keep);
+    }
+
+    #[test]
+    fn quality_ladder_remains_unmodified_and_validates_by_model() {
+        for quality in ["auto", "low", "medium", "high", "xhigh", "max"] {
+            assert!(quality_for_model("gpt-image-2.5-sunburst", quality));
+            assert!(quality_for_model("gpt-image-2.6-flare", quality));
+        }
+        for quality in ["xhigh", "max"] {
+            assert!(!quality_for_model("gpt-image-1.5", quality));
+            assert!(!quality_for_model("gpt-image-2", quality));
+        }
+        assert!(!quality_for_model("gpt-image-2.6-flare", "ultra"));
+        let request = serde_json::json!({"quality":"xhigh"});
+        assert_eq!(request["quality"], "xhigh");
     }
 }

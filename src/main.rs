@@ -42,7 +42,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?,
     );
     let registry = Arc::new(policy::ImageRegistry::default());
-    let jobs = Arc::new(jobs::BackendJobs::new(Arc::clone(&config)));
+    let jobs = Arc::new(jobs::BackendJobs::new(
+        Arc::clone(&config),
+        &session.handshake().instance_id,
+    ));
+    {
+        let jobs_gc = Arc::clone(&jobs);
+        // 文件级 10 秒扫描独立于可能持续数分钟的 maintenance 生图调用。
+        // 只清理 UUID PNG 且遵循 .keep 标记；私有状态过期由维护与管理读操作处理。
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                jobs::FILE_SWEEP_INTERVAL_SECONDS,
+            ));
+            loop {
+                interval.tick().await;
+                jobs_gc.sweep_expired_files().await;
+            }
+        });
+    }
     let quota = Arc::new(quota_guard::QuotaGuard::new(Arc::new(
         config.quota_guard.clone(),
     )));

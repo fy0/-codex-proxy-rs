@@ -51,9 +51,9 @@
           <div><label for="configDriver">默认对话主控模型</label><input id="configDriver" value="gpt-5.6-luna" maxlength="128"></div>
           <div><label for="configMode">图片请求策略</label><select id="configMode"><option value="auto">auto · 优先原生 Images</option><option value="responses">responses · 统一工具桥接</option></select></div>
         </div>
-        <label for="configStorageDir">后端图片持久目录（绝对路径）</label>
-        <input id="configStorageDir" type="text" placeholder="/var/lib/cpr-image-bridge/images（Docker 要挂载 volume）" autocomplete="off">
-        <div class="field-note">必填。生图任务由后端执行，完成的 PNG 写入此目录；重启要保留目录对应持久卷。</div>
+        <label for="configStorageDir">自定义后端图片目录（可选）</label>
+        <input id="configStorageDir" type="text" placeholder="留空 → CPR 数据目录/image-bridge/实例/images" autocomplete="off">
+        <div class="field-note">不填也能直接生图，默认使用 CPR 数据目录中的独立子目录。没有持久卷时，容器重建后允许丢失历史图片。</div>
         <div class="two-up">
           <div><label for="configBackendConcurrency">后端同时执行</label>
             <select id="configBackendConcurrency"><option value="1">1 张</option><option value="2">2 张（推荐）</option><option value="3">3 张</option></select></div>
@@ -130,6 +130,10 @@
       <div id="presets" class="presets" aria-label="预置提示词"></div>
       <label for="prompt">图片描述</label>
       <textarea id="prompt" rows="7" maxlength="10000" placeholder="描述你希望生成的图片…"></textarea>
+      <label class="keep-option" for="keepResults">
+        <input type="checkbox" id="keepResults">
+        <span><strong>长期保留本批图片</strong><small>不勾选时，完成后最多 5 分钟自动删除结果及记录</small></span>
+      </label>
       <div class="footer-line"><span id="promptCount">0 / 10000</span><span>最多 10 张／批 · 可随时追加批次</span></div>
       <div class="action-row">
         <button id="generate" class="primary-btn" disabled><span aria-hidden="true">✦</span> 加入生成队列</button>
@@ -145,7 +149,10 @@
       </div>
       <div class="task-toolbar">
         <span id="queueInfo">0 运行中 · 0 排队 · 0 完成</span>
-        <button id="clearFinished" class="text-action" type="button" disabled>隐藏已结束</button>
+        <div class="task-cleanup-actions">
+          <button id="clearFinished" class="text-action" type="button" disabled>一键清理普通结果</button>
+          <button id="clearAllResults" class="text-action danger" type="button" disabled>清空含长期保留</button>
+        </div>
       </div>
       <div id="taskGrid" class="task-grid" aria-live="polite" aria-relevant="additions text">
         <div class="task-placeholder" id="empty">
@@ -154,10 +161,10 @@
           <p>提交一张或多张，等待时也可以继续添加新任务。</p>
         </div>
       </div>
-      <p class="task-note">任务由 CPR 后端的维护工作器执行；关闭页面不会停止队列或上游生图。状态和结果保存在后端，重新打开页面可继续查看。请先在配置生成器指定持久目录。</p>
+      <p class="task-note">任务由 CPR 后端的维护工作器执行；关闭页面不会停止队列或上游生图。状态和结果保存在后端，重新打开页面可继续查看。默认保存到 CPR 数据目录的 image-bridge 子目录；无需配置持久卷。未选“长期保留”的结果最多保留 5 分钟。</p>
     </section>
   </div>
-  <footer>任务由 CPR 插件后端维护工作器执行与持久保存 · 页面断连不取消任务 · 原生 Images 通过 CPR Core 账号租约、额度与计费</footer>
+  <footer>CPR 后端维护任务独立于页面运行 · 普通结果完成 5 分钟后自动清理 · 勾选长期保留才持续保存 · 使用 Core 账号租约、额度和计费</footer>
 </div>
 </body>
 </html>

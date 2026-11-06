@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.7.0 (official SDK)
+# CPR Image Bridge v0.8.0 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -135,9 +135,9 @@ Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢
 领取后由 host.model.execute_stream 通过 CPR Core 执行并按原生 Key、账号、租约、配额和计费规则结算。
 每个任务通过管理接口 GET api/jobs 轮询状态（queued/running/succeeded/failed/interrupted/canceled），前端每 0.1 秒根据服务器 startedMs 更新计时。PNG 使用文件写入到服务器持久目录，浏览器通过 POST api/jobs/image 按 256 KiB 分块下载并预览。
 
-**必须先在插件配置中设置 imageStorageDir 为服务器绝对路径，保证该路径存在或可被插件运行用户创建。Docker/容器部署必须绑定持久卷。** 若为空，后端任务不接受提交。
+**v0.8.0 起 imageStorageDir 可留空**，默认在 CPR 运行数据目录下创建独立子目录。不要求持久卷；容器重建时可以丢记录和图片。
 例：imageStorageDir=/var/lib/cpr-image-bridge/images，backgroundConcurrency=2。
-请勿使用 /tmp、容器未挂载路径或可能被清理的缓存目录作为永久结果存储。服务器关闭或插件进程替换期间，排队中的任务仍保存在 CPR 私有状态；先前已经在上游执行的 running 任务如果 PNG 已经完成原子落盘，会自动恢复为 succeeded；如果没有有效完成文件，则标为 interrupted，**不自动重试**，以避免上游已扣费但下游还没存储的情况下重复执行。
+非标准插件启动路径会退回系统临时目录。只有要求跨容器重建保留图片时才建议指定映射到持久卷的目录。服务器关闭或插件进程替换期间，排队中的任务仍保存在 CPR 私有状态；先前已经在上游执行的 running 任务如果 PNG 已经完成原子落盘，会自动恢复为 succeeded；如果没有有效完成文件，则标为 interrupted，**不自动重试**，以避免上游已扣费但下游还没存储的情况下重复执行。
 网页关闭、断网或刷新只影响轮询和预览，不会取消已经交给后端的维护任务。显式点“取消”会标记任务不再交付图片；若上游已受理，取消仍可能产生计费。
 状态由同一 CPR 实例的管理员共享，不是 per-browser。插件状态包括 Prompt（属于业务敏感信息），只有具有插件管理权限的管理员可访问；API Key 明文不写入状态或 PNG 文件。
 
@@ -181,3 +181,45 @@ Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢
 当前宿主的插件维护工作器在**每个实例的本地进程**内串行运行，并通过实例私有状态做 CAS 持久化。后台任务目前按“一个插件实例只有一个有效维护工作器”设计；如果高可用部署让两个宿主副本同时维护相同的插件实例，它们可能观察到另一副本已经领取的 running 任务并将其误判为 interrupted。因此正式生产建议单实例执行该 worker，或在 CPR 宿主增加跨副本租约/owner 与 fencing token 后再启用多副本后台执行。
 
 服务端单张图像最长受 maintenance 父调用预算 900 秒限制；等待最多约 30 秒才会由维护轮询领取，若需要立即响应、长于预算或可跨宿主副本自动恢复，应升级到具备专用持久任务 worker 和租约队列的宿主 API/独立服务。
+
+
+## v0.8.0 后端存储、自动回收与真实质量参数
+
+### 开箱即用
+
+不填写 imageStorageDir 即可使用后台任务。官方 CPR 将插件进程运行在
+host.runtime_data_dir/plugins/plugin-* 解包目录。插件据此找到当前真实数据根目录，
+默认将图片保存在 <runtime_data_dir>/image-bridge/<实例摘要>/images，
+不会写入临时解包目录。非标准启动路径退回系统临时目录。
+没有持久卷允许重启丢失文件；但如果文件系统完全不可写，仍须报告真实失败。
+
+### 五分钟保留策略
+
+页面新增“长期保留本批图片”开关，默认未勾选。
+未勾选的 PNG 完成后 300 秒自动删除；进程活跃时使用定时器精确到期清理，
+另有每 10 秒独立扫描，重启后兜底。管理列表、提交和维护会同步清理到期记录。
+进程完全停止时无法准时删除，下次启动清扫；已到期条目不会重新对管理页展示。
+
+长期保留图片会写入 .keep 标志，直到管理员手动执行包括保留结果的清理。
+UI 中“一键清理普通结果”直接删除后台全部已结束且没有标记长期保留的结果。
+“清空含长期保留”需要两次点击确认，删除所有已结束结果，正在执行/排队的不受影响。
+旧版队列记录不带 keep 的默认为未保留；保留的记录在列表上限 30 条时不会静默驱逐，
+占满列表后需手动清理才能继续提交。
+
+### 画质档位真实值
+
+测试页完整提供 auto、low、medium、high、xhigh、max。选择直接作为 quality 值
+提交到后端，没有自行把 xhigh/max 映射为 high 的代码。后端将它原封不动地
+发送到原生 Images 请求的根 quality 字段，或者 Responses 的 tools[].quality 字段。
+后端只验证档位合法性和型号范围：GPT Image 2.5 Sunburst/Flare 明确可用
+xhigh/max；较早的 1.5/2 只提供到 high；2.6 仍透传 xhigh/max 由上游验证，
+可能因真实权限或模型能力而被拒绝，不静默降档。
+
+官方参考：
+https://developers.openai.com/api/reference/resources/images/methods/generate
+https://developers.openai.com/api/docs/guides/image-generation
+
+### 验收范围
+
+官方 SDK CI 测试与浏览器模拟不能替代真实 OAuth 生图、5分钟运行验证和
+无 volume 容器重启验证。结果目录保留依赖宿主文件系统生命周期。
