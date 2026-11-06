@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.2",
-  "description": "Official CPR Image Bridge: WebP-first 4K generation, temporary result files, per-account concurrency, original Quota Guard management.",
+  "version": "0.7.3",
+  "description": "Codex Image Bridge: state migration v1 to v2 preserves workbench preferences; WebP-first 4K, temporary images, Quota Guard integration.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -197,7 +197,7 @@
   "state": [
     {
       "namespace": "image-workbench",
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "schema": {
         "type": "object",
         "required": [
@@ -252,7 +252,9 @@
       "maximumRecords": 1,
       "maximumBytes": 4096,
       "maximumValueBytes": 2048,
-      "migratesFrom": []
+      "migratesFrom": [
+        1
+      ]
     },
     {
       "namespace": "image-jobs",

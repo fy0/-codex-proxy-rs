@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.7.2 (official SDK)
+# CPR Image Bridge v0.7.3 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -216,3 +216,22 @@ CPR 官方插件 iframe 的 CSP 为 img-src data:，不允许 blob:。v0.7.0 从
 保留 Quota Guard 的 5 小时和每周额度保护。新增独立管理页「账号额度保护」，**直接移植 Mr-xiongyq/cpr-quota-guard 的 Vue 账号卡片、额度进度条、账号选择和保存交互**（Apache License 2.0）；仅对 API 路径和保存的宿主配置合并做适配，不会用保存额度规则覆盖图片模型、账号白名单等其它 Image Bridge 配置。源代码位于 quota-ui/，构建资源位于 web/quota/。本地模拟测试不能代替真实 CPR 宿主管理员授权、真实 OAuth 生图和额度交互验收。
 
 仍须停用原 cpr-quota-guard 的 scheduler 绑定，保留 Image Bridge 的单个 scheduler；使用失败时拒绝策略，防止额度保护筛选失效。
+
+
+## v0.7.3：修复插件状态版本升级冲突
+
+症状：在 CPR 插件管理里从 v0.7.1 切换 v0.7.2 时，switch-version 端点报「插件状态版本不兼容或已发生并发变更」。
+
+根因：v0.7.2 把 image-workbench 状态中 parallelism.maximum 从 3 改成 32，却仍声明 schemaVersion=1、migratesFrom=[]。官方 CPR PostgreSQL State Store 同时比较 schemaVersion 和 Schema SHA-256；内容变更但未声明迁移时，transition_required 会拒绝更新，而不是静默改写旧记录。
+
+本版修复：
+
+- image-workbench 的 schemaVersion 升为 **2**，声明 migratesFrom=[1]。
+- 注册官方 plugin.state.migrate 处理器，按宿主提供的批次逐项返回 Keep，完整保留以前的 last-selection 设置（Client Key ID、对话模型、绘图模型、尺寸、画质、数量、并发数）；v1 原有并发范围 1..3 完全包含在新版 1..32 中，无须转换。
+- image-jobs 私有状态（任务记录）Schema 与版本 **保持 1 不变**，不进行图片队列迁移、不删除结果文件。
+- CPR 版本切换可能在迁移时短暂停用实例，迁移失败时由宿主保护原数据，不能在调度任务进行中强制重启。
+- 可以从 v0.7.1 **直接切换到 v0.7.3**，不需要先切到 v0.7.2；安装并接受目标制品后通过插件管理「切换版本」。若提示配置 revision 发生并发变化，刷新插件列表后核对最新状态再重试，不删除插件实例、不清空状态。
+
+宿主源码依据：gateway-store/src/postgres/plugins/state.rs 的 transition_required / begin_transition；gateway-plugin/runtime/src/generation/state.rs 的受管迁移；SDK call/host.rs 中 StateMigrationRequest 与 StateMigrationChange::Keep。修复没有改变 Quota Guard、WebP/PNG/4K、默认临时目录、每账号并发或真实调度策略。
+
+验证包含：Rust 迁移处理器单元测试、manifest 目标 schema 声明比对、官方 GitHub Actions 三平台编译和打包校验。尚未在用户实际 CPR 宿主中执行带真实 PostgreSQL 的升级迁移，生产中的并发变更仍可导致另一类 409。

@@ -8,6 +8,7 @@ mod policy;
 mod quota_guard;
 mod quota_management;
 mod response;
+mod state_migration;
 
 use std::sync::Arc;
 
@@ -118,6 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         })?
+        // 状态 Schema 哈希变化后必须经宿主受管迁移，不能直接复用 Schema v1。
+        .on(methods::STATE_MIGRATE, state_migration::migrate)?
         .on(methods::RECONCILE, {
             let jobs = Arc::clone(&jobs);
             let quota = Arc::clone(&quota);
