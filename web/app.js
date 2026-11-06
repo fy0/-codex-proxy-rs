@@ -19,6 +19,8 @@
     accountExtra: byId('configAccountExtra'), groupExtra: byId('configGroupExtra'),
     modelNew: byId('configModelNew'), modelAdd: byId('configModelAdd'),
     driver: byId('configDriver'), mode: byId('configMode'),
+    storageDir: byId('configStorageDir'), backendConcurrency: byId('configBackendConcurrency'),
+    quotaRules: byId('configQuotaRules'), quotaAge: byId('configQuotaAge'),
     timeout: byId('configTimeout'), json: byId('configJson'),
     copy: byId('copyConfig'), reset: byId('resetConfig'), notice: byId('configNotice')
   };
@@ -161,13 +163,23 @@
     if (accounts.length > 256 || groups.length > 256) {
       throw new Error('账号或分组数量超过上限 256');
     }
+    let quotaGuard;
+    try { quotaGuard=JSON.parse(configFields.quotaRules.value.trim() || '[]'); }
+    catch {throw new Error('额度保护规则必须是合法 JSON 数组');}
+    if(!Array.isArray(quotaGuard) || quotaGuard.length>1000) {
+      throw new Error('额度保护规则必须是长度不超过 1000 的数组');
+    }
     return {
       timeoutMs: Number(configFields.timeout.value),
       bridgeMode: configFields.mode.value,
       driverModel,
       imageModels,
       imageGroupIds: groups,
-      imageAccountIds: accounts
+      imageAccountIds: accounts,
+      imageStorageDir: configFields.storageDir.value.trim(),
+      backgroundConcurrency: Number(configFields.backendConcurrency.value),
+      quotaGuard,
+      maxObservationAgeSeconds: Number(configFields.quotaAge.value)
     };
   }
   function refreshConfigJson() {
@@ -200,6 +212,10 @@
     configFields.groupExtra.value = '';
     configFields.driver.value = config.driverModel || 'gpt-5.6-luna';
     configFields.mode.value = config.bridgeMode === 'responses' ? 'responses' : 'auto';
+    configFields.storageDir.value = config.imageStorageDir || '';
+    configFields.backendConcurrency.value = String(config.backgroundConcurrency || 2);
+    configFields.quotaRules.value = JSON.stringify(config.quotaGuard || [], null, 2);
+    configFields.quotaAge.value = String(config.maxObservationAgeSeconds || 300);
     const timeout = String(config.timeoutMs || 300000);
     configFields.timeout.value = [...configFields.timeout.options].some((option) => option.value === timeout)
       ? timeout : '300000';
@@ -272,7 +288,9 @@
   }
   [configFields.accountExtra, configFields.groupExtra, configFields.driver].forEach((input) =>
     input.addEventListener('input', refreshConfigJson));
-  [configFields.mode, configFields.timeout].forEach((select) =>
+  [configFields.storageDir, configFields.quotaRules].forEach((input) =>
+    input.addEventListener('input', refreshConfigJson));
+  [configFields.mode, configFields.timeout, configFields.backendConcurrency, configFields.quotaAge].forEach((select) =>
     select.addEventListener('change', refreshConfigJson));
   configFields.modelAdd.addEventListener('click', addCustomModel);
   configFields.modelNew.addEventListener('keydown', (event) => {
@@ -344,32 +362,17 @@
     fields.notice.classList.toggle('error', !!isError);
   }
   function liveTaskCount() {
-    return tasks.filter((task) => task.state === 'queued' || task.state === 'running').length;
+    return tasks.filter((t)=>t.status==='queued'||t.status==='running').length;
   }
   function count() {
-    fields.count.textContent = fields.prompt.value.length + ' / 10000';
-    const number = Number(fields.batchCount.value) || 1;
-    fields.generate.disabled = closed || !fields.clientKey.value || !fields.driver.value
-      || !fields.imageModel.value || !fields.prompt.value.trim()
-      || !Number.isInteger(number) || number < 1 || number > 10
-      || liveTaskCount() + number > MAX_TASKS;
-    fields.cancel.disabled = liveTaskCount() === 0;
-    fields.clearFinished.disabled = !tasks.some((task) => !['queued','running'].includes(task.state));
-  }
-  function updateQueueInfo() {
-    const running = tasks.filter((task) => task.state === 'running').length;
-    const waiting = tasks.filter((task) => task.state === 'queued').length;
-    const succeeded = tasks.filter((task) => task.state === 'succeeded').length;
-    const failed = tasks.filter((task) => task.state === 'failed').length;
-    const canceled = tasks.filter((task) => task.state === 'canceled').length;
-    fields.queueInfo.textContent = running + ' 运行中 · ' + waiting + ' 排队 · '
-      + succeeded + ' 完成 · ' + failed + ' 失败 · ' + canceled + ' 取消';
-    if (running || waiting) status('working', '进行中');
-    else if (succeeded) status('success', '生成完成');
-    else if (failed) status('error', '存在失败');
-    else status('', tasks.length ? '已停止' : '尚无任务');
-    fields.empty.hidden = tasks.length !== 0;
-    count();
+    fields.count.textContent=fields.prompt.value.length+' / 10000';
+    const number=Number(fields.batchCount.value)||1;
+    fields.generate.disabled=closed||!fields.clientKey.value||!fields.imageModel.value
+      ||!fields.prompt.value.trim()||fields.prompt.value.trim().length>4096
+      ||!backendEnabled||!Number.isInteger(number)||number<1||number>10
+      ||liveTaskCount()+number>MAX_TASKS;
+    fields.cancel.disabled=liveTaskCount()===0;
+    fields.clearFinished.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
   }
   function presetButtons() {
     fields.presets.replaceChildren();
@@ -595,6 +598,20 @@
       const state = await invoke('GET','api/bootstrap');
       if (closed || epoch !== scanEpoch) return;
       loadConfigBuilder(state);
+      backendEnabled=!!state.backendJobsEnabled;
+      const actualConcurrency=String(state.backgroundConcurrency||2);
+      if ([...fields.parallelism.options].some(option=>option.value===actualConcurrency)) {
+        fields.parallelism.value=actualConcurrency;
+      }
+      fields.parallelism.disabled=true;
+      const warning=byId('backendNotice');
+      if(warning) {
+        warning.textContent=backendEnabled
+          ? '后台任务已启用：关闭页面不会取消队列，结果存储在服务器持久目录。'
+          : '后台任务未配置：请展开配置生成器，设置 imageStorageDir 并保存插件参数。';
+        warning.classList.toggle('error',!backendEnabled);
+      }
+      startPolling();
       configuredDriver = state.driverModel || 'gpt-5.6-luna';
       try {
         const stored = await invoke('GET','api/preferences');
@@ -607,6 +624,8 @@
       }
       if (closed || epoch !== scanEpoch) return;
       applyRememberedSettings();
+      // 旧偏好不能覆盖已经冻结在后端插件配置中的真实并发上限。
+      fields.parallelism.value=actualConcurrency;
       supportedKeys = Array.isArray(state.keys) ? state.keys.filter((key)=>key.enabled) : [];
       modelLists = new Map();
       eligibleKeys = [];
@@ -720,250 +739,278 @@
     } finally { reader.releaseLock(); }
     return state;
   }
+  // 所有请求由 CPR 后端 maintenance 拥有；此处仅提交、轮询并取回已保存的 PNG。
+  let backendEnabled=false;
+  let polling=false;
+  let pollStarted=false;
+  let pollTimer=null;
+  let stopwatchTimer=null;
+  const hiddenFinished=new Set();
+  const fetching=new Set();
+
   function createTaskCard(task) {
-    const card = document.createElement('article');
-    card.className = 'task-card';
-    card.dataset.taskId = String(task.id);
-    const head = document.createElement('div');
-    head.className = 'task-head';
-    const label = document.createElement('span');
-    label.className = 'task-id';
-    label.textContent = '图片 #' + task.id;
-    const state = document.createElement('span');
-    state.className = 'task-state';
-    head.append(label,state);
-    const preview = document.createElement('div');
-    preview.className = 'task-preview';
-    const info = document.createElement('span');
-    info.className = 'task-preview-text';
-    const img = document.createElement('img');
-    img.hidden = true;
-    img.alt = task.prompt.length > 100 ? task.prompt.slice(0,100) + '…' : task.prompt;
+    const card=document.createElement('article');
+    card.className='task-card';
+    card.dataset.taskId=task.id;
+    const head=document.createElement('div');
+    head.className='task-head';
+    const title=document.createElement('span');
+    title.className='task-id';
+    title.textContent='图片 #'+task.id.slice(0,8);
+    const state=document.createElement('span');
+    state.className='task-state';
+    head.append(title,state);
+    const preview=document.createElement('div');
+    preview.className='task-preview';
+    const info=document.createElement('span');
+    info.className='task-preview-text';
+    const img=document.createElement('img');
+    img.hidden=true;
+    img.alt=task.prompt.slice(0,100);
     preview.append(info,img);
-    const details = document.createElement('div');
-    details.className = 'task-details';
-    const prompt = document.createElement('p');
-    prompt.className = 'task-prompt';
-    prompt.title = task.prompt;
-    prompt.textContent = task.prompt;
-    const model = document.createElement('span');
-    model.className = 'task-model';
-    model.textContent = task.imageModel + ' · ' + task.size + ' · ' + task.quality;
-    const error = document.createElement('div');
-    error.className = 'task-error';
-    error.hidden = true;
-    const requestId = document.createElement('div');
-    requestId.className = 'task-model';
-    requestId.hidden = true;
+    const details=document.createElement('div');
+    details.className='task-details';
+    const prompt=document.createElement('p');
+    prompt.className='task-prompt';
+    prompt.textContent=task.prompt;
+    prompt.title=task.prompt;
+    const model=document.createElement('span');
+    model.className='task-model';
+    model.textContent=task.imageModel+' · '+task.size+' · '+task.quality;
+    const error=document.createElement('div');
+    error.className='task-error';
+    error.hidden=true;
+    const requestId=document.createElement('div');
+    requestId.className='task-model';
+    requestId.hidden=true;
     details.append(prompt,model,error,requestId);
-    const actions = document.createElement('div');
-    actions.className = 'task-actions';
-    const cancel = document.createElement('button');
-    cancel.className = 'task-button cancel';
-    cancel.type = 'button';
-    cancel.textContent = '取消此张';
-    cancel.addEventListener('click',()=>cancelTask(task));
-    const download = document.createElement('a');
-    download.className = 'task-button';
-    download.hidden = true;
-    download.textContent = '保存 PNG';
-    download.download = 'codex-image-'+task.id+'.png';
+    const actions=document.createElement('div');
+    actions.className='task-actions';
+    const cancel=document.createElement('button');
+    cancel.type='button';
+    cancel.className='task-button cancel';
+    cancel.textContent='停止此张';
+    cancel.addEventListener('click',()=>{void cancelTask(task);});
+    const download=document.createElement('a');
+    download.className='task-button';
+    download.textContent='保存 PNG';
+    download.hidden=true;
+    download.download='codex-image-'+task.id.slice(0,8)+'.png';
     actions.append(cancel,download);
     card.append(head,preview,details,actions);
-    task.node = {card,state,info,img,error,requestId,cancel,download};
-    fields.taskGrid.appendChild(card);
+    fields.taskGrid.append(card);
+    task.node={card,state,info,img,error,requestId,cancel,download};
     renderTask(task);
+  }
+
+  function elapsedTime(job) {
+    if (!Number.isFinite(job.startedMs) || job.startedMs<=0) return '';
+    const end=job.status==='running'?Date.now()
+      :(Number.isFinite(job.completedMs)?job.completedMs:Date.now());
+    return Math.max(0,(end-job.startedMs)/1000).toFixed(1)+'s';
+  }
+  function refreshStopwatches() {
+    if (closed)return;
+    for (const task of tasks) {
+      if (task.status!=='running' || !task.node) continue;
+      task.node.state.textContent='生成中 '+elapsedTime(task);
+    }
   }
   function renderTask(task) {
     if (!task.node || closed) return;
-    const {card,state,info,img,error,requestId,cancel,download} = task.node;
-    const labels = {
+    const stateKey=task.status || 'queued';
+    const n=task.node;
+    const labels={
       queued:'排队中',running:'生成中',succeeded:'已完成',
-      failed:'生成失败',canceled:'已取消'
+      failed:'失败',canceled:'已取消',interrupted:'中断（请手动重试）'
     };
-    state.textContent = labels[task.state] || task.state;
-    state.className = 'task-state ' + task.state;
-    card.className = 'task-card ' + task.state;
-    img.hidden = !(task.state==='succeeded' && task.imageUrl);
-    if (!img.hidden && img.src!==task.imageUrl) img.src=task.imageUrl;
-    info.hidden = !img.hidden;
-    if (!info.hidden) {
-      info.textContent = task.state === 'running' ? '等待图像生成…'
-        : task.state === 'queued' ? '等待可用执行槽位…'
-        : task.state === 'canceled' ? '已停止此张任务'
-        : task.state === 'failed' ? '本次没有生成图片' : '';
+    n.state.className='task-state '+(
+      stateKey==='succeeded'?'succeeded':stateKey==='running'?'running':
+        stateKey==='failed'||stateKey==='interrupted'?'failed':'');
+    n.state.textContent=(labels[stateKey]||stateKey)
+      + (stateKey==='queued'?'':task.startedMs?' '+elapsedTime(task):'');
+    n.card.className='task-card '+stateKey;
+    n.img.hidden=!(stateKey==='succeeded' && task.imageUrl);
+    if (!n.img.hidden && n.img.src!==task.imageUrl) n.img.src=task.imageUrl;
+    n.info.hidden=!n.img.hidden;
+    if (!n.info.hidden) {
+      n.info.textContent=stateKey==='queued'
+        ? '已提交到 CPR 后端队列，等待维护任务领取…'
+        :stateKey==='running'?'CPR 后端生成中，关闭页面不会停止…'
+        :stateKey==='succeeded'?'图片已保存在后端，读取预览中…'
+        :stateKey==='interrupted'?'维护任务曾被中断；不会自动重复扣费'
+        :'本次任务无可用图片';
     }
-    error.hidden = !(task.state === 'failed' && task.error);
-    error.textContent = task.error || '';
-    requestId.hidden = !task.requestId;
-    requestId.textContent = task.requestId ? '请求 ID · ' + task.requestId : '';
-    cancel.hidden = !(task.state === 'queued' || task.state === 'running');
-    download.hidden = !task.imageUrl || task.state !== 'succeeded';
-    if (!download.hidden) download.href = task.imageUrl;
+    n.error.hidden=!(task.error && ['failed','interrupted'].includes(stateKey));
+    n.error.textContent=task.error||'';
+    n.requestId.hidden=!task.requestId;
+    n.requestId.textContent=task.requestId?'请求 ID · '+task.requestId:'';
+    n.cancel.hidden=!['queued','running'].includes(stateKey);
+    n.download.hidden=!(stateKey==='succeeded'&&task.imageUrl);
+    if(!n.download.hidden)n.download.href=task.imageUrl;
   }
   function forgetTask(task) {
-    if (task.imageUrl) {
-      URL.revokeObjectURL(task.imageUrl);
-      task.imageUrl = null;
-    }
+    if(task.imageUrl)URL.revokeObjectURL(task.imageUrl);
     task.node?.card.remove();
-    const i=tasks.indexOf(task);
-    if (i>=0) tasks.splice(i,1);
+    const at=tasks.indexOf(task);
+    if(at>=0)tasks.splice(at,1);
   }
-  function retainImageBudget() {
-    const withImages=tasks.filter((task)=>task.state==='succeeded' && task.imageUrl);
-    while (withImages.length > MAX_RETAINED_IMAGES) {
-      forgetTask(withImages.shift());
-    }
-  }
-  function cleanupOldCompleted(required=0) {
-    while (tasks.length+required > MAX_TASKS) {
-      const finished=tasks.find((task)=>['succeeded','failed','canceled'].includes(task.state));
-      if (!finished) break;
-      forgetTask(finished);
-    }
-  }
-  function cancelTask(task) {
-    if (!['queued','running'].includes(task.state)) return;
-    task.state='canceled';
-    task.controller?.abort();
-    renderTask(task);
-    updateQueueInfo();
-    pumpTasks();
-  }
-  function cancelAllTasks() {
-    // 批量取消时不能逐个调用 pumpTasks，否则可能在取消两个任务的间隙
-    // 把下一张待处理图片错误启动。
-    for (const task of tasks) {
-      if (task.state !== 'queued' && task.state !== 'running') continue;
-      task.state = 'canceled';
-      task.controller?.abort();
-      renderTask(task);
-    }
-    updateQueueInfo();
-  }
-  function clearFinishedTasks() {
-    for (const task of tasks.slice()) {
-      if (!['queued','running'].includes(task.state)) forgetTask(task);
-    }
-    updateQueueInfo();
-  }
-  async function runTask(task) {
-    const signal=task.controller.signal;
-    const started=performance.now();
-    try {
-      const response = await host().models.responses({
-        clientKeyId:task.clientKeyId,
-        signal,
-        body:{
-          model:task.driverModel,stream:true,store:false,
-          input:[{type:'message',role:'user',content:[{type:'input_text',text:task.prompt}]}],
-          instructions:'Create exactly one image using image_generation. Follow the given prompt faithfully, retaining its language and composition.',
-          tools:[{
-            type:'image_generation',model:task.imageModel,action:'generate',
-            size:task.size,quality:task.quality,output_format:'png'
-          }],
-          tool_choice:'auto',
-          parallel_tool_calls:false,
-          include:['reasoning.encrypted_content']
-        }
-      });
-      task.httpStatus=response.status;
-      task.requestId=response.headers?.get('x-codex-imagegen-request-id')
-        || response.headers?.get('x-gateway-request-id')
-        || response.headers?.get('x-request-id') || '';
-      if (!response.ok) {
-        const raw=(await response.text()).slice(0,1200);
-        let message=raw;
-        try {
-          const parsed=JSON.parse(raw);
-          message=parsed.error?.message || parsed.message || raw;
-        } catch {}
-        throw new Error('HTTP '+response.status+' '+String(message).slice(0,500));
+  async function downloadImage(task) {
+    if (fetching.has(task.id) || task.imageUrl || !task.resultBytes || task.status!=='succeeded')return;
+    fetching.add(task.id);
+    try{
+      let offset=0;
+      const chunks=[];
+      while (offset<task.resultBytes && !closed && task.status==='succeeded') {
+        const response=await host().request({
+          method:'POST',path:'api/jobs/image',
+          contentType:'application/json',
+          body:JSON.stringify({id:task.id,offset})
+        });
+        if (response.status!==200)throw Error('读取图片分片失败：HTTP '+response.status);
+        const data=new Uint8Array(response.body);
+        if (data.length<1 || data.length>256*1024)throw Error('图片分片无效');
+        offset+=data.length;
+        if (offset>task.resultBytes || offset>120*1024*1024)throw Error('图片大小超过限制');
+        chunks.push(data);
       }
-      const parsed=await consumeResponse(response,signal);
-      if (signal.aborted || task.state==='canceled') return;
-      if (!parsed.image?.result) {
-        throw new Error((parsed.text || '上游未执行 image_generation 工具').slice(0,500));
+      if (offset===task.resultBytes && !closed && task.status==='succeeded') {
+        const url=URL.createObjectURL(new Blob(chunks,{type:'image/png'}));
+        if (task.imageUrl)URL.revokeObjectURL(task.imageUrl);
+        task.imageUrl=url;
+        renderTask(task);
       }
-      const url=requireImage(parsed.image.result);
-      if (signal.aborted || task.state==='canceled') {
-        URL.revokeObjectURL(url);
-        return;
-      }
-      task.imageUrl=url;
-      task.responseId=parsed.document?.id || '';
-      task.state='succeeded';
-      task.elapsed=((performance.now()-started)/1000).toFixed(1)+'s';
-      renderTask(task);
-      retainImageBudget();
-    } catch (cause) {
-      if (signal.aborted || task.state==='canceled') {
-        task.state='canceled';
-      } else {
-        task.state='failed';
-        task.error=String(cause?.message || cause || '生成失败').slice(0,600);
-      }
-      renderTask(task);
-    } finally {
-      activeTasks=Math.max(0,activeTasks-1);
-      task.controller=null;
-      renderTask(task);
-      updateQueueInfo();
-      pumpTasks();
-    }
+    }catch(error){
+      // 文件可能因后端清理、目录未挂载等原因暂时不可用。
+      if (!closed)notice('图片 #'+task.id.slice(0,8)+' 无法读取：'+(error.message||error),true);
+    }finally{fetching.delete(task.id);}
   }
-  function pumpTasks() {
-    if (closed) return;
-    const parallelism=Math.max(1,Math.min(MAX_PARALLEL,Number(fields.parallelism.value)||2));
-    while(activeTasks<parallelism) {
-      const next=tasks.find((task)=>task.state==='queued');
-      if (!next) break;
-      next.state='running';
-      next.controller=new AbortController();
-      activeTasks++;
-      renderTask(next);
-      void runTask(next);
+  function updateQueueInfo() {
+    const running=tasks.filter((t)=>t.status==='running').length;
+    const queued=tasks.filter((t)=>t.status==='queued').length;
+    const done=tasks.filter((t)=>t.status==='succeeded').length;
+    const failed=tasks.filter((t)=>t.status==='failed'||t.status==='interrupted').length;
+    const canceled=tasks.filter((t)=>t.status==='canceled').length;
+    fields.queueInfo.textContent=running+' 运行中 · '+queued+' 排队 · '+done+' 完成 · '
+      +failed+' 失败/中断 · '+canceled+' 取消';
+    fields.empty.hidden=tasks.length>0;
+    if (running||queued)status('working','后端执行中');
+    else if(done)status('success','已完成');
+    else if(failed)status('error','部分任务失败');
+    else status('',tasks.length?'暂无进行中的任务':'尚无任务');
+    fields.clearFinished.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
+    fields.cancel.disabled=!(running||queued);
+    count();
+  }
+  function refreshTasks(remoteJobs) {
+    const items=Array.isArray(remoteJobs)?remoteJobs:[];
+    const byId=new Map(tasks.map((task)=>[task.id,task]));
+    const remoteIds=new Set(items.map((job)=>job.id));
+    for(const task of tasks.slice()){
+      if(!remoteIds.has(task.id)){
+        forgetTask(task);
+      }
+    }
+    for(const item of items){
+      if (!item || typeof item.id!=='string' || hiddenFinished.has(item.id))continue;
+      let task=byId.get(item.id);
+      if(!task){
+        task={...item,imageUrl:null,node:null};
+        tasks.push(task);
+        createTaskCard(task);
+      }else{
+        const savedUrl=task.imageUrl;
+        const savedNode=task.node;
+        Object.assign(task,item);
+        task.imageUrl=savedUrl;
+        task.node=savedNode;
+        renderTask(task);
+      }
+      if(task.status==='succeeded' && !task.imageUrl)void downloadImage(task);
     }
     updateQueueInfo();
   }
-  function queueBatch() {
-    const copies=Number(fields.batchCount.value);
-    if (!Number.isInteger(copies) || copies<1 || copies>10 ||
-       !fields.clientKey.value || !fields.driver.value || !fields.imageModel.value ||
-       !fields.prompt.value.trim()) return;
-    cleanupOldCompleted(copies);
-    if (liveTaskCount()+copies>MAX_TASKS) {
-      notice('任务队列已满。请先完成或取消部分任务，再添加。',true);
-      count();
+  async function pollJobs() {
+    if (closed)return;
+    if (polling)return;
+    polling=true;
+    try{
+      const response=await invoke('GET','api/jobs');
+      if(!closed){
+        backendEnabled=!!response.backendEnabled;
+        refreshTasks(response.jobs);
+      }
+    }catch(error){
+      if(!closed)notice('读取后端队列失败：'+(error.message||error),true);
+    }finally{
+      polling=false;
+      if(!closed)pollTimer=setTimeout(()=>{void pollJobs();},2000);
+    }
+  }
+  function startPolling() {
+    if(pollStarted)return;
+    pollStarted=true;
+    stopwatchTimer=setInterval(refreshStopwatches,100);
+    void pollJobs();
+  }
+
+  async function queueBatch() {
+    const n=Number(fields.batchCount.value);
+    if(closed || !fields.clientKey.value || !fields.imageModel.value ||
+      !fields.prompt.value.trim() || !Number.isInteger(n) || n<1 || n>10)return;
+    if(!backendEnabled){
+      notice('后端任务未启用：请展开配置生成器，设置 imageStorageDir 绝对持久目录并保存插件参数。',true);
       return;
     }
-    const snapshot={
-      clientKeyId:fields.clientKey.value,
-      driverModel:fields.driver.value,
-      imageModel:fields.imageModel.value,
-      size:fields.size.value,
-      quality:fields.quality.value,
-      prompt:fields.prompt.value.trim()
-    };
-    for(let i=0;i<copies;i++) {
-      const task={...snapshot,id:++taskCounter,state:'queued',controller:null,node:null,
-        requestId:'',responseId:'',httpStatus:null,elapsed:'',error:'',imageUrl:null};
-      tasks.push(task);
-      createTaskCard(task);
+    fields.generate.disabled=true;
+    try {
+      const response=await invoke('POST','api/jobs',{
+        clientKeyId:fields.clientKey.value,
+        imageModel:fields.imageModel.value,
+        prompt:fields.prompt.value.trim(),
+        size:fields.size.value,
+        quality:fields.quality.value,
+        count:n
+      });
+      notice('已向 CPR 后端提交 '+response.ids.length+' 张。页面关闭后任务仍将继续。');
+      await pollJobs();
+    }catch(error){
+      notice('后端任务提交失败：'+(error.message||error),true);
+    }finally{count();}
+  }
+  async function cancelTask(task) {
+    if(!['queued','running'].includes(task.status))return;
+    try{
+      await invoke('POST','api/jobs/cancel',{id:task.id});
+      task.status='canceled';
+      renderTask(task);
+      updateQueueInfo();
+      notice('任务已标记取消。已发往上游的请求可能继续消耗额度。');
+    }catch(error){notice('取消失败：'+(error.message||error),true);}
+  }
+  async function cancelAllTasks() {
+    const ids=tasks.filter((t)=>['queued','running'].includes(t.status)).map((t)=>t.id);
+    await Promise.all(ids.map((id)=>{
+      const task=tasks.find((item)=>item.id===id);
+      return cancelTask(task);
+    }));
+  }
+  function clearFinishedTasks() {
+    for(const task of tasks.slice()) {
+      if(['queued','running'].includes(task.status))continue;
+      hiddenFinished.add(task.id);
+      forgetTask(task);
     }
-    notice('已添加 '+copies+' 张图片。可在这些任务执行期间继续修改提示词并提交下一批。');
-    pumpTasks();
+    updateQueueInfo();
   }
   function closePage() {
     closed=true;
     scanEpoch++;
+    if(pollTimer)clearTimeout(pollTimer);
+    if(stopwatchTimer)clearInterval(stopwatchTimer);
     if(preferenceTimer!==null)clearTimeout(preferenceTimer);
-    for(const task of tasks) {
-      task.controller?.abort();
-      if(task.imageUrl) URL.revokeObjectURL(task.imageUrl);
-      task.imageUrl=null;
-    }
+    // 不取消后台生图；这里只清理浏览器内存与观察器。
+    for(const task of tasks)if(task.imageUrl)URL.revokeObjectURL(task.imageUrl);
   }
 
   fields.prompt.addEventListener('input',()=>{
@@ -983,8 +1030,9 @@
   [fields.size,fields.quality,fields.batchCount].forEach((el)=>
     el.addEventListener('change',()=>{queuePreferenceSave();count();}));
   fields.parallelism.addEventListener('change',()=>{
+    // 此选择属于旧版页面并发偏好；真正运行槽位由后端 backgroundConcurrency 管理。
     queuePreferenceSave();
-    pumpTasks();
+    count();
   });
   fields.generate.addEventListener('click',queueBatch);
   fields.cancel.addEventListener('click',cancelAllTasks);

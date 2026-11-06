@@ -51,6 +51,18 @@
           <div><label for="configDriver">默认对话主控模型</label><input id="configDriver" value="gpt-5.6-luna" maxlength="128"></div>
           <div><label for="configMode">图片请求策略</label><select id="configMode"><option value="auto">auto · 优先原生 Images</option><option value="responses">responses · 统一工具桥接</option></select></div>
         </div>
+        <label for="configStorageDir">后端图片持久目录（绝对路径）</label>
+        <input id="configStorageDir" type="text" placeholder="/var/lib/cpr-image-bridge/images（Docker 要挂载 volume）" autocomplete="off">
+        <div class="field-note">必填。生图任务由后端执行，完成的 PNG 写入此目录；重启要保留目录对应持久卷。</div>
+        <div class="two-up">
+          <div><label for="configBackendConcurrency">后端同时执行</label>
+            <select id="configBackendConcurrency"><option value="1">1 张</option><option value="2">2 张（推荐）</option><option value="3">3 张</option></select></div>
+          <div><label for="configQuotaAge">额度证据有效期</label>
+            <select id="configQuotaAge"><option value="60">60 秒</option><option value="300">300 秒</option><option value="900">900 秒</option><option value="3600">3600 秒</option></select></div>
+        </div>
+        <label for="configQuotaRules">额度保护规则（可选 JSON 数组）</label>
+        <textarea id="configQuotaRules" rows="3" spellcheck="false" placeholder='[{"accountId":"账号ID","fiveHourLimitPercent":95,"weeklyLimitPercent":95}]'></textarea>
+        <div class="field-note">与生图调度共用同一个 scheduler；启用后要解绑旧 quota-guard 的 scheduler，避免作用范围重叠。空数组代表不启用。</div>
         <label for="configTimeout">请求超时</label>
         <select id="configTimeout"><option value="60000">60 秒</option><option value="180000">180 秒</option><option value="300000">300 秒</option><option value="600000">600 秒</option></select>
         <div class="label-line config-preview-label"><label for="configJson">生成的配置 JSON</label><span class="hint">实时生成</span></div>
@@ -105,13 +117,13 @@
           <option value="7">7 张</option><option value="8">8 张</option><option value="9">9 张</option>
           <option value="10">10 张</option>
         </select></div>
-        <div><label for="parallelism">本页面同时执行</label><select id="parallelism">
+        <div><label for="parallelism">后端并发（插件参数控制）</label><select id="parallelism" disabled>
           <option value="1">1 个任务（保守）</option>
           <option value="2" selected>2 个任务（推荐）</option>
           <option value="3">3 个任务</option>
         </select></div>
       </div>
-      <p class="field-note">每张图片单独调用 Responses 工具，任务独立运行、取消与预览。并发受此页面上限和 CPR 账号并发租约双重控制。</p>
+      <p class="field-note">每张图片作为独立的 CPR 后端任务排队执行。后端并发由上方配置生成器的 backgroundConcurrency 控制，并受 CPR 账号、Key 的额度和并发租约限制。</p>
       <div class="divider"></div>
       <div class="section-title"><span class="section-index">02</span><h2>创作提示词</h2></div>
       <div class="label-line"><span class="label-text">快速预设</span><span class="hint">点击载入，可继续编辑</span></div>
@@ -124,6 +136,7 @@
         <button id="cancel" class="secondary-btn" disabled>停止全部</button>
       </div>
       <div id="validationMessage" class="notice" role="status"></div>
+      <div id="backendNotice" class="notice" role="status"></div>
     </section>
     <section class="panel results" aria-label="异步生成任务">
       <div class="results-top">
@@ -132,7 +145,7 @@
       </div>
       <div class="task-toolbar">
         <span id="queueInfo">0 运行中 · 0 排队 · 0 完成</span>
-        <button id="clearFinished" class="text-action" type="button" disabled>清理已完成</button>
+        <button id="clearFinished" class="text-action" type="button" disabled>隐藏已结束</button>
       </div>
       <div id="taskGrid" class="task-grid" aria-live="polite" aria-relevant="additions text">
         <div class="task-placeholder" id="empty">
@@ -141,10 +154,10 @@
           <p>提交一张或多张，等待时也可以继续添加新任务。</p>
         </div>
       </div>
-      <p class="task-note">任务只在此页面打开时运行。关闭页面会停止未完成任务；只有选择设置保存到当前插件实例。</p>
+      <p class="task-note">任务由 CPR 后端的维护工作器执行；关闭页面不会停止队列或上游生图。状态和结果保存在后端，重新打开页面可继续查看。请先在配置生成器指定持久目录。</p>
     </section>
   </div>
-  <footer>使用 CPR 官方 Responses 模型桥 · 生图会消耗账号配额 · 偏好保存在插件私有状态中（同一插件实例共用）· 图片不会持久存储</footer>
+  <footer>任务由 CPR 插件后端维护工作器执行与持久保存 · 页面断连不取消任务 · 原生 Images 通过 CPR Core 账号租约、额度与计费</footer>
 </div>
 </body>
 </html>

@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.6.0 (official SDK)
+# CPR Image Bridge v0.7.0 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -123,3 +123,55 @@ GitHub Actions 使用官方 SDK 提交和官方 cpr-plugin packaging CLI，运�
 ### 验收覆盖
 
 Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢复、Key 过滤、6 Luna 不存在时回退 5.6、4K、两批各 2 张的独立并发结果、总取消不会启动后续任务；并用 GitHub Actions 官方 SDK 完成 Cargo 单测、三平台 Release 构建及可安装包验证。此处不宣称已通过真实 OAuth 上游的生产生成验收。
+
+
+## v0.7.0 — 后端持久任务与额度保护合并
+
+### 后端任务如何运行
+
+这一版**不再由浏览器直接发起 models.responses 并维持生图连接**。
+管理页 POST api/jobs 把当前 Key ID、图片模型、Prompt、尺寸、画质和张数保存到 CPR 官方插件私有状态 image-jobs；
+宿主对该插件的 maintenance 定时维护回调与浏览器访问无关，大约每 30 秒领取一次队列。
+领取后由 host.model.execute_stream 通过 CPR Core 执行并按原生 Key、账号、租约、配额和计费规则结算。
+每个任务通过管理接口 GET api/jobs 轮询状态（queued/running/succeeded/failed/interrupted/canceled），前端每 0.1 秒根据服务器 startedMs 更新计时。PNG 使用文件写入到服务器持久目录，浏览器通过 POST api/jobs/image 按 256 KiB 分块下载并预览。
+
+**必须先在插件配置中设置 imageStorageDir 为服务器绝对路径，保证该路径存在或可被插件运行用户创建。Docker/容器部署必须绑定持久卷。** 若为空，后端任务不接受提交。
+例：imageStorageDir=/var/lib/cpr-image-bridge/images，backgroundConcurrency=2。
+请勿使用 /tmp、容器未挂载路径或可能被清理的缓存目录作为永久结果存储。服务器关闭或插件进程替换期间，排队中的任务仍保存在 CPR 私有状态；先前已经在上游执行的 running 任务会标为 interrupted，**不自动重试**，以避免上游已扣费但下游还没存储的情况下重复执行。
+网页关闭、断网或刷新只影响轮询和预览，不会取消已经交给后端的维护任务。显式点“取消”会标记任务不再交付图片；若上游已受理，取消仍可能产生计费。
+状态由同一 CPR 实例的管理员共享，不是 per-browser。插件状态包括 Prompt（属于业务敏感信息），只有具有插件管理权限的管理员可访问；API Key 明文不写入状态或 PNG 文件。
+
+本版本保留 900 秒 maintenance 父调用预算、每轮最多 backgroundConcurrency 个并发任务。后台任务不是无限期守护 daemon：维护被取消、插件升级或服务器关闭会导致当前 in-flight 请求中断，重启后明确标记 interrupted 而不是重试；任务完成后保存在 imageStorageDir 的 PNG 可以在后续管理会话中继续读取。任务队列最多 30 项，保存时会回收最旧已结束记录及对应图片。
+
+**协议边界**：CPR 当前 host.model.execute_stream 的单个 GPE2 模型事件与批次具有 8 MiB 载荷限制。部分 4K 原生图片如果上游以一个超过 8 MiB 的 base64 事件返回，后端回调会失败并标记 failed，不能视为已经支持任意尺寸图片输出。需宿主新增分片原生 Images/文件对象能力，才能保证所有大型结果可以无损交付。
+
+### 合并 cpr-quota-guard
+
+基于 Mr-xiongyq/cpr-quota-guard v0.2.3、Apache-2.0（详见 THIRD_PARTY_NOTICES.md），将 5 小时、周额度证据检查加入 Image Bridge 的同一个 scheduler 回调，并提供以下新插件配置：
+
+- quotaGuard: 数组，每项 {accountId, fiveHourLimitPercent, weeklyLimitPercent}；例如两个百分比均为 95。数组为空时不启用额度保护。
+- maxObservationAgeSeconds: 默认 300；达到阈值、缺少/过期额度证据或窗口不可用时排除对应受保护账号。
+- Image Bridge 自身维护任务还会定期刷新配额观测，额度是否恢复仍以 CPR 宿主新事实为准。
+
+额度过滤对该 scheduler 绑定范围内的所有 OpenAI 请求有效，与生图账号白名单使用集合交集；宿主为后台生图的模型子调用屏蔽发起者的 scheduler 时，后台工作器会独立调用同一份额度筛选，选定 Key 当前允许、可生图且未触发保护的账号后，显式把账号交给 Core 执行。
+
+**这并不会自动消除两个仍在启用的 scheduler 绑定的冲突。** 升级后必须在原 cpr-quota-guard 插件的高级设置中**禁用其账号调度绑定**或停用原插件调度，确保只保留 Image Bridge 的调度。新的单 scheduler 才能兼容两种账号过滤行为。若用户不希望合并，也可以保持 quotaGuard=[]，并通过不同 Client Key 的作用范围分区避免重叠。
+
+### 典型参数
+
+{
+  "timeoutMs": 300000,
+  "bridgeMode": "auto",
+  "driverModel": "gpt-5.6-luna",
+  "imageModels": ["gpt-image-2.6-sunburst", "gpt-image-2.5-sunburst"],
+  "imageGroupIds": ["实际分组ID"],
+  "imageAccountIds": [],
+  "imageStorageDir": "/var/lib/cpr-image-bridge/images",
+  "backgroundConcurrency": 2,
+  "quotaGuard": [
+    {"accountId": "实际账号ID", "fiveHourLimitPercent": 95, "weeklyLimitPercent": 95}
+  ],
+  "maxObservationAgeSeconds": 300
+}
+
+后端状态经 host.state.get/put 的 CAS 版本控制，文件按 UUID 路径管理并做 PNG 签名校验，下载每次至多传回 256 KiB，不通过巨型数据 URL 返回图片。当前未在生产账号实测 OAuth 生成/大图片，CI 编译与浏览器模拟只能证明代码路径，不能替代生产验收。

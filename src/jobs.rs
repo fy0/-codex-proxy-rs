@@ -485,6 +485,23 @@ impl BackendJobs {
             .filter(|account| account.allowed)
             .map(|account| account.account_id)
             .collect::<Vec<_>>();
+        // Responses 桥接必须确认同一账号也允许对应的对话主控模型。
+        if self.config.use_responses(&job.image_model) && !eligible.is_empty() {
+            let checked = host
+                .check_access(AccessQuery {
+                    client_key_id: job.client_key_id.clone(),
+                    account_ids: eligible.clone(),
+                    upstream_model: Some(self.config.driver.clone()),
+                })
+                .await?;
+            let approved = checked
+                .accounts
+                .into_iter()
+                .filter(|account| account.allowed)
+                .map(|account| account.account_id)
+                .collect::<std::collections::HashSet<_>>();
+            eligible.retain(|id| approved.contains(id));
+        }
         eligible.sort();
         let blocked = quota_guard::protected_ids(host, &eligible, &self.config.quota_guard).await?;
         eligible.retain(|id| !blocked.contains(id));
@@ -506,23 +523,50 @@ impl BackendJobs {
         job: &ImageJob,
     ) -> Result<(String, String, u64), PluginFault> {
         let account = self.choose_account(host, job).await?;
+        let via_responses = self.config.use_responses(&job.image_model);
         let request = ModelExecuteRequest {
             client_key_id: Some(job.client_key_id.clone()),
-            model: job.image_model.clone(),
+            model: if via_responses {
+                self.config.driver.clone()
+            } else {
+                job.image_model.clone()
+            },
             protocol: "openai".into(),
-            operation: ModelOperation::GenerateImage,
+            operation: if via_responses {
+                ModelOperation::Generate
+            } else {
+                ModelOperation::GenerateImage
+            },
             provider: Some("openai".into()),
             account_id: Some(account.clone()),
             previous_response_id: None,
         };
-        let body = serde_json::to_vec(&json!({
-            "model":job.image_model,
-            "prompt":job.prompt,
-            "size":job.size,
-            "quality":job.quality,
-            "n":1
-        }))
-        .map_err(|_| fault("encode image model request"))?;
+        let request_body = if via_responses {
+            json!({
+                "model":self.config.driver,
+                "input":[{"role":"user","content":[{"type":"input_text","text":job.prompt}]}],
+                "tools":[{
+                    "type":"image_generation",
+                    "model":job.image_model,
+                    "size":job.size,
+                    "quality":job.quality,
+                    "action":"generate"
+                }],
+                "tool_choice":"auto",
+                "store":false,
+                "stream":false
+            })
+        } else {
+            json!({
+                "model":job.image_model,
+                "prompt":job.prompt,
+                "size":job.size,
+                "quality":job.quality,
+                "n":1
+            })
+        };
+        let body =
+            serde_json::to_vec(&request_body).map_err(|_| fault("encode image model request"))?;
         let reply = host
             .call(
                 host::MODEL_EXECUTE_STREAM,
