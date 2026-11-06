@@ -248,8 +248,20 @@ impl BackendJobs {
         let (mut queue, version) = self.load(host).await?;
         let mut expired_ids = Vec::new();
         let now = now_ms();
+        let mut missing_files = std::collections::HashSet::new();
+        // 如果容器重建使默认目录丢失，清掉仅剩元数据的“成功”记录。
+        // 暂时权限错误不等于图片丢失，只处理明确 NotFound。
+        for job in queue.jobs.iter().filter(|job| job.status == "succeeded") {
+            if let Ok(path) = self.result_path(&job.id) {
+                if let Err(error) = tokio::fs::metadata(path).await {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        missing_files.insert(job.id.clone());
+                    }
+                }
+            }
+        }
         queue.jobs.retain(|job| {
-            if expired(job, now) {
+            if expired(job, now) || missing_files.contains(&job.id) {
                 expired_ids.push(job.id.clone());
                 false
             } else {
@@ -618,9 +630,22 @@ impl BackendJobs {
                 };
                 job.completed_ms = Some(now_ms());
                 if let Some(bytes) = recovered {
-                    job.status = "succeeded".into();
-                    job.result_bytes = Some(bytes);
-                    job.error = None;
+                    let keep_marked = if job.keep {
+                        match self.keep_marker_path(&job.id) {
+                            Ok(path) => tokio::fs::write(path, b"keep").await.is_ok(),
+                            Err(_) => false,
+                        }
+                    } else {
+                        true
+                    };
+                    if keep_marked {
+                        job.status = "succeeded".into();
+                        job.result_bytes = Some(bytes);
+                        job.error = None;
+                    } else {
+                        job.status = "interrupted".into();
+                        job.error = Some("restored PNG but could not preserve keep marker".into());
+                    }
                 } else {
                     job.status = "interrupted".into();
                     job.error=Some("backend worker interrupted; manual retry required to avoid duplicate billing".into());
