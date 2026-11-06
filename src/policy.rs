@@ -161,46 +161,60 @@ pub async fn schedule(
         .as_ref()
         .map(|item| item.image_model.as_str())
         .or_else(|| req.model.as_deref().filter(|m| Config::is_image_model(m)));
-    let Some(model) = image_model else {
-        return Ok(TypedReply::new(AccountScheduleDecision::Delegate));
-    };
-    if !config.enabled_image_model(model) || !config.has_image_scope() {
-        return Ok(TypedReply::new(AccountScheduleDecision::Reject));
-    }
-    let group = group_accounts(&call.host, &config.image_group_ids).await?;
-    let explicit = config
-        .image_account_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let candidates = req
-        .candidates
-        .iter()
-        .filter(|c| explicit.contains(c.account_id.as_str()) || group.contains(&c.account_id))
-        .map(|c| c.account_id.clone())
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Ok(TypedReply::new(AccountScheduleDecision::Reject));
-    }
-    let mut approved = candidates.iter().cloned().collect::<HashSet<_>>();
-    // 对 Responses 主控模型的账号，额外要求相同 Key 对实际图片模型拥有权限。
-    if let Some(intent) = intent.as_ref() {
-        let check = call
-            .host
-            .check_access(AccessQuery {
-                client_key_id: intent.client_key_id.clone(),
-                account_ids: candidates,
-                upstream_model: Some(model.to_owned()),
-            })
-            .await?;
-        let permitted = check
-            .accounts
-            .into_iter()
-            .filter(|entry| entry.allowed)
-            .map(|entry| entry.account_id)
+    // 额度保护对所有 OpenAI 请求有效；生图白名单仅对实际图片请求生效。
+    let mut approved = if let Some(model) = image_model {
+        if !config.enabled_image_model(model) || !config.has_image_scope() {
+            return Ok(TypedReply::new(AccountScheduleDecision::Reject));
+        }
+        let group = group_accounts(&call.host, &config.image_group_ids).await?;
+        let explicit = config
+            .image_account_ids
+            .iter()
+            .map(String::as_str)
             .collect::<HashSet<_>>();
-        approved.retain(|id| permitted.contains(id));
+        let candidates = req
+            .candidates
+            .iter()
+            .filter(|c| explicit.contains(c.account_id.as_str()) || group.contains(&c.account_id))
+            .map(|c| c.account_id.clone())
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(TypedReply::new(AccountScheduleDecision::Reject));
+        }
+        let mut approved = candidates.iter().cloned().collect::<HashSet<_>>();
+        if let Some(intent) = intent.as_ref() {
+            let check = call
+                .host
+                .check_access(AccessQuery {
+                    client_key_id: intent.client_key_id.clone(),
+                    account_ids: candidates,
+                    upstream_model: None,
+                })
+                .await?;
+            let permitted = check
+                .accounts
+                .into_iter()
+                .filter(|entry| entry.allowed)
+                .map(|entry| entry.account_id)
+                .collect::<HashSet<_>>();
+            approved.retain(|id| permitted.contains(id));
+        }
+        approved
+    } else {
+        req.candidates
+            .iter()
+            .map(|candidate| candidate.account_id.clone())
+            .collect::<HashSet<_>>()
+    };
+    if approved.is_empty() {
+        return Ok(TypedReply::new(AccountScheduleDecision::Reject));
     }
+    // 按原额度插件的保守证据策略过滤，额度缺失/过期时拒绝使用受保护账号。
+    let quota_candidates = approved.iter().cloned().collect::<Vec<_>>();
+    let blocked =
+        crate::quota_guard::protected_ids(&call.host, &quota_candidates, &config.quota_guard)
+            .await?;
+    approved.retain(|id| !blocked.contains(id));
     if approved.is_empty() {
         return Ok(TypedReply::new(AccountScheduleDecision::Reject));
     }

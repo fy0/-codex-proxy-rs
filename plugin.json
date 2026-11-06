@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.6.0",
-  "description": "Codex Image Bridge: Images 2.6, per-Key image models, concurrent image workbench, persisted selections, visual config builder.",
+  "version": "0.7.0",
+  "description": "Codex Image Bridge with backend durable image job queue, quota guard in one scheduler, Images 2.6 and persistent workbench preferences.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -30,6 +30,9 @@
     },
     "management": {
       "version": 2
+    },
+    "maintenance": {
+      "version": 1
     }
   },
   "configurationSchema": {
@@ -109,6 +112,68 @@
           "gpt-image-2",
           "gpt-image-1.5"
         ]
+      },
+      "imageStorageDir": {
+        "type": "string",
+        "title": "后端持久化图片目录",
+        "description": "启用后端异步生图必填。填写宿主系统的绝对目录；Docker 必须挂载此目录为持久卷，后台会将 PNG 存入该目录。空值会禁用异步任务提交。",
+        "maxLength": 1024,
+        "default": ""
+      },
+      "backgroundConcurrency": {
+        "type": "integer",
+        "title": "后端生图并发",
+        "description": "每个插件实例后台每轮最多同时执行多少张（还受 CPR Core 账号/Key 并发额度限制）。",
+        "minimum": 1,
+        "maximum": 3,
+        "default": 2
+      },
+      "quotaGuard": {
+        "type": "array",
+        "title": "额度保护账号规则",
+        "description": "可选：整合 quota-guard v0.2.3 的 5 小时/每周额度保护功能；与生图账号过滤在同一个 scheduler 内执行。禁用旧 quota-guard 的 scheduler 绑定以防重叠。",
+        "maxItems": 1000,
+        "default": [],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "accountId"
+          ],
+          "properties": {
+            "accountId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "fiveHourLimitPercent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 100,
+              "default": 95
+            },
+            "weeklyLimitPercent": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 100,
+              "default": 95
+            }
+          }
+        }
+      },
+      "maxObservationAgeSeconds": {
+        "type": "integer",
+        "title": "额度观测有效期（秒）",
+        "description": "超过有效期视为未知，不对受保护账号放行。",
+        "minimum": 60,
+        "maximum": 86400,
+        "default": 300
       }
     },
     "additionalProperties": false
@@ -176,6 +241,30 @@
       "maximumRecords": 1,
       "maximumBytes": 4096,
       "maximumValueBytes": 2048,
+      "migratesFrom": []
+    },
+    {
+      "namespace": "image-jobs",
+      "schemaVersion": 1,
+      "schema": {
+        "type": "object",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "maxItems": 30,
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "maximumRecords": 1,
+      "maximumBytes": 262144,
+      "maximumValueBytes": 250000,
       "migratesFrom": []
     }
   ]

@@ -28,6 +28,10 @@ pub struct Config {
     pub image_group_ids: Vec<String>,
     /// 对外发布和实际允许调用的生图模型；仅配置在此处的模型开放。
     pub image_models: Vec<String>,
+    /// 后端异步任务结果的持久化目录，必须位于主机/容器持久卷。
+    pub image_storage_dir: String,
+    pub background_concurrency: usize,
+    pub quota_guard: crate::quota_guard::QuotaGuardConfig,
 }
 
 impl Config {
@@ -66,6 +70,36 @@ impl Config {
         let image_account_ids = id_list(config.get("imageAccountIds"), "imageAccountIds")?;
         let image_group_ids = id_list(config.get("imageGroupIds"), "imageGroupIds")?;
         let image_models = image_model_list(config.get("imageModels"))?;
+        let image_storage_dir = match config.get("imageStorageDir") {
+            Some(Value::String(value)) => value.clone(),
+            None => String::new(),
+            _ => return Err("imageStorageDir must be a string".into()),
+        };
+        if !image_storage_dir.is_empty()
+            && (!std::path::Path::new(&image_storage_dir).is_absolute()
+                || image_storage_dir.len() > 1024
+                || std::path::Path::new(&image_storage_dir)
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir)))
+        {
+            return Err("imageStorageDir must be an absolute persistent path without '..'".into());
+        }
+        let background_concurrency = config
+            .get("backgroundConcurrency")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or("backgroundConcurrency must be an integer")
+            })
+            .transpose()?
+            .unwrap_or(2);
+        if !(1..=3).contains(&background_concurrency) {
+            return Err("backgroundConcurrency must be between 1 and 3".into());
+        }
+        let quota_guard = crate::quota_guard::QuotaGuardConfig::parse(
+            config.get("quotaGuard"),
+            config.get("maxObservationAgeSeconds"),
+        )?;
         if config.keys().any(|key| {
             !matches!(
                 key.as_str(),
@@ -75,6 +109,10 @@ impl Config {
                     | "imageAccountIds"
                     | "imageGroupIds"
                     | "imageModels"
+                    | "imageStorageDir"
+                    | "backgroundConcurrency"
+                    | "quotaGuard"
+                    | "maxObservationAgeSeconds"
             )
         }) {
             return Err("plugin configuration contains unknown fields".into());
@@ -86,6 +124,9 @@ impl Config {
             image_account_ids,
             image_group_ids,
             image_models,
+            image_storage_dir,
+            background_concurrency: background_concurrency as usize,
+            quota_guard,
         })
     }
 

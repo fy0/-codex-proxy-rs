@@ -1,5 +1,8 @@
 //! 插件独立管理页面；密钥只通过宿主模型桥按 ID 选择，不传入前端。
-use crate::config::{Config, IMAGE_MODELS, Mode};
+use crate::{
+    config::{Config, IMAGE_MODELS, Mode},
+    jobs::BackendJobs,
+};
 use gateway_plugin_sdk::call::data::AccountFacts;
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
@@ -47,6 +50,30 @@ pub fn registration() -> ManagementRegistration {
                 path: "api/preferences".into(),
                 request_content_types: vec![JSON.into()],
                 response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "GET".into(),
+                path: "api/jobs".into(),
+                request_content_types: vec![],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "POST".into(),
+                path: "api/jobs".into(),
+                request_content_types: vec![JSON.into()],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "POST".into(),
+                path: "api/jobs/cancel".into(),
+                request_content_types: vec![JSON.into()],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "POST".into(),
+                path: "api/jobs/image".into(),
+                request_content_types: vec![JSON.into()],
+                response_content_types: vec!["application/octet-stream".into()],
             },
         ],
         resources: ["web/index.html", "web/app.js", "web/app.css"]
@@ -260,6 +287,7 @@ async fn preference_write(
 pub async fn handle(
     call: TypedCall<ManagementRequest>,
     config: &Config,
+    jobs: &BackendJobs,
 ) -> Result<TypedReply<ManagementResponse>, PluginFault> {
     if !call.request.query.is_empty() {
         return bad("查询参数不受支持");
@@ -293,6 +321,9 @@ pub async fn handle(
                     "imageModels": config.image_models,
                     "candidateImageModels": IMAGE_MODELS,
                     "enabled": config.has_image_scope(),
+                    "backendJobsEnabled": jobs.enabled(),
+                    "backgroundConcurrency": config.background_concurrency,
+                    "imageStorageDir": config.image_storage_dir,
                     "accountCount": config.image_account_ids.len(),
                     "groupCount": config.image_group_ids.len(),
                     "accountOptions": accounts,
@@ -309,6 +340,10 @@ pub async fn handle(
                         "imageModels": config.image_models,
                         "imageGroupIds": config.image_group_ids,
                         "imageAccountIds": config.image_account_ids,
+                        "imageStorageDir": config.image_storage_dir,
+                        "backgroundConcurrency": config.background_concurrency,
+                        "quotaGuard": config.quota_guard.accounts,
+                        "maxObservationAgeSeconds": config.quota_guard.max_observation_age_seconds,
                     }
                 }),
             )
@@ -340,6 +375,47 @@ pub async fn handle(
             };
             let version = preference_write(&call.host, selection.clone(), expected_version).await?;
             json_response(200, json!({"version": version}))
+        }
+        ("GET", "api/jobs") => {
+            if !call.payload.is_empty() {
+                return bad("GET 不允许请求体");
+            }
+            json_response(200, jobs.list(&call.host).await?)
+        }
+        ("POST", "api/jobs") => {
+            let body: Value = serde_json::from_slice(&call.payload)
+                .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid job JSON"))?;
+            json_response(202, jobs.submit(&call.host, &body).await?)
+        }
+        ("POST", "api/jobs/cancel") => {
+            let body: Value = serde_json::from_slice(&call.payload)
+                .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid cancel JSON"))?;
+            json_response(200, jobs.cancel(&call.host, &body).await?)
+        }
+        ("POST", "api/jobs/image") => {
+            let body: Value = serde_json::from_slice(&call.payload).map_err(|_| {
+                PluginFault::new(ErrorCode::InvalidInput, "invalid image chunk JSON")
+            })?;
+            let (chunk, complete, total) = jobs.image_chunk(&call.host, &body).await?;
+            Ok(TypedReply::new(ManagementResponse {
+                status: 200,
+                content_type: "application/octet-stream".into(),
+                headers: vec![
+                    gateway_plugin_sdk::call::middleware::MiddlewareHeader {
+                        name: "cache-control".into(),
+                        value: b"no-store".to_vec(),
+                    },
+                    gateway_plugin_sdk::call::middleware::MiddlewareHeader {
+                        name: "x-image-total-bytes".into(),
+                        value: total.to_string().into_bytes(),
+                    },
+                    gateway_plugin_sdk::call::middleware::MiddlewareHeader {
+                        name: "x-image-complete".into(),
+                        value: complete.to_string().into_bytes(),
+                    },
+                ],
+            })
+            .with_payload(chunk))
         }
         ("POST", "api/models") => {
             let request: Value = match serde_json::from_slice(&call.payload) {
@@ -420,7 +496,7 @@ mod tests {
     #[test]
     fn management_route_and_page_are_registered() {
         let registration = registration();
-        assert_eq!(registration.routes.len(), 4);
+        assert_eq!(registration.routes.len(), 8);
         assert_eq!(registration.pages[0].entry, "web/index.html");
         assert_eq!(registration.pages[0].title, "画图测试");
     }

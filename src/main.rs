@@ -1,15 +1,17 @@
 mod access;
 mod bridge;
 mod config;
+mod jobs;
 mod management;
 mod models;
 mod policy;
+mod quota_guard;
 mod response;
 
 use std::sync::Arc;
 
 use gateway_plugin_sdk::{
-    ErrorCode, PluginFault,
+    CallBudgets, ErrorCode, PluginFault, Stage,
     call::middleware::MiddlewareHeader,
     client::{
         HttpBody, HttpCall, HttpFrame, HttpRequest, HttpResponse, MiddlewareCall,
@@ -31,13 +33,19 @@ const MAX_RESPONSES_INPUT_BYTES: usize = 60 * 1024 * 1024;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_config = SessionConfig::default();
-    let session =
+    let mut session =
         PluginSession::accept(tokio::io::stdin(), tokio::io::stdout(), session_config).await?;
+    // 独立维护父调用可继续执行长耗时图片模型任务，不与管理页连接寿命绑定。
+    session.set_call_budgets(CallBudgets::from([(Stage::Maintenance, 900_000)]))?;
     let config = Arc::new(
         Config::from_configuration(&session.handshake().configuration)
             .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?,
     );
     let registry = Arc::new(policy::ImageRegistry::default());
+    let jobs = Arc::new(jobs::BackendJobs::new(Arc::clone(&config)));
+    let quota = Arc::new(quota_guard::QuotaGuard::new(Arc::new(
+        config.quota_guard.clone(),
+    )));
     let handler = PluginBuilder::from_json(include_bytes!("../plugin.json"))?
         .middleware({
             let config = Arc::clone(&config);
@@ -69,9 +77,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?
         .management(management::registration(), {
             let config = Arc::clone(&config);
+            let jobs = Arc::clone(&jobs);
             move |call| {
                 let config = Arc::clone(&config);
-                async move { management::handle(call, &config).await }
+                let jobs = Arc::clone(&jobs);
+                async move { management::handle(call, &config, &jobs).await }
+            }
+        })?
+        .on(methods::RECONCILE, {
+            let jobs = Arc::clone(&jobs);
+            let quota = Arc::clone(&quota);
+            move |call| {
+                let jobs = Arc::clone(&jobs);
+                let quota = Arc::clone(&quota);
+                async move {
+                    // 同一官方维护任务同时执行额度刷新与独立后台生图队列。
+                    quota.reconcile(&call.host).await?;
+                    jobs.reconcile(&call.host).await?;
+                    Ok(gateway_plugin_sdk::client::TypedReply::new(
+                        gateway_plugin_sdk::client::Empty {},
+                    ))
+                }
             }
         })?
         .build()?;
