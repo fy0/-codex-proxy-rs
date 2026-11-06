@@ -654,8 +654,7 @@
     }
   }
   function requireImage(base64) {
-    // 4K PNG 图片可能远超早期的 32 MiB base64 限制。分片解码为 Blob URL，
-    // 不在 DOM 中保留大型 data: URL；清除卡片/关闭页面会 revoke。
+    // CPR 管理页 iframe 的 CSP 是 img-src data:，不能使用 blob: URL。
     if (typeof base64 !== 'string' || !base64.length || base64.length > 160 * 1024 * 1024) {
       throw new Error('没有生成图片，或结果超过 160 MiB 的安全展示上限');
     }
@@ -663,18 +662,47 @@
     if (![137,80,78,71,13,10,26,10].every((byte,index)=>prefix.charCodeAt(index)===byte)) {
       throw new Error('上游没有返回合法的 PNG 图像数据');
     }
-    const chunks=[];
-    // 长度是 4 的倍数；分片 atob 可避免一次解码多十兆像素图片的内存尖峰。
-    for (let i=0;i<base64.length;i+=262144) {
-      const decoded=atob(base64.slice(i,i+262144));
-      const bytes=new Uint8Array(decoded.length);
-      for (let j=0;j<decoded.length;j++) bytes[j]=decoded.charCodeAt(j);
-      chunks.push(bytes);
-    }
-    const blob=new Blob(chunks,{type:'image/png'});
-    if (blob.size>120*1024*1024) throw new Error('单张图片超过 120 MiB 显示上限');
-    return URL.createObjectURL(blob);
+    return 'data:image/png;base64,' + base64;
   }
+  function releaseImageUrl(url) {
+    if (typeof url === 'string' && url.startsWith('blob:')) URL.revokeObjectURL(url);
+  }
+  function pngChunksToDataUrl(chunks, expectedBytes) {
+    if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 8 || expectedBytes > 120*1024*1024) {
+      throw new Error('后端图片长度不合法或超过 120 MiB');
+    }
+    // 分块 base64：每段都按 3 字节对齐，尾部 0～2 字节留给下一块。
+    // 直接把每个任意分片 btoa 后拼接，会产生填充字符，破坏 PNG。
+    const encoded = [];
+    let pending = new Uint8Array(0);
+    let observedBytes = 0;
+    let magic = [];
+    const chunkSize = 24576; // 同时是 3 的倍数，避免大数组 spread。
+    for (const chunk of chunks) {
+      if (!(chunk instanceof Uint8Array)) throw new Error('PNG 分片不是字节数组');
+      observedBytes += chunk.length;
+      if (observedBytes > expectedBytes) throw new Error('PNG 分片长度超出预期');
+      if (magic.length < 8) {
+        for (let i=0;i<chunk.length && magic.length<8;i++) magic.push(chunk[i]);
+      }
+      const combined = new Uint8Array(pending.length + chunk.length);
+      combined.set(pending,0);
+      combined.set(chunk,pending.length);
+      const aligned = combined.length - combined.length % 3;
+      for (let offset=0;offset<aligned;offset+=chunkSize) {
+        encoded.push(btoa(String.fromCharCode(...combined.subarray(
+          offset,Math.min(offset+chunkSize,aligned)))));
+      }
+      pending = combined.slice(aligned);
+    }
+    if (observedBytes !== expectedBytes) throw new Error('PNG 字节数与后端响应不一致');
+    if (![137,80,78,71,13,10,26,10].every((value,index)=>magic[index]===value)) {
+      throw new Error('后端没有返回 PNG 文件头');
+    }
+    if (pending.length)encoded.push(btoa(String.fromCharCode(...pending)));
+    return 'data:image/png;base64,' + encoded.join('');
+  }
+
   function imageItem(event) {
     const item = event && event.item;
     if (item && item.type === 'image_generation_call' && typeof item.result === 'string') return item;
@@ -850,7 +878,7 @@
     if(!n.download.hidden)n.download.href=task.imageUrl;
   }
   function forgetTask(task) {
-    if(task.imageUrl)URL.revokeObjectURL(task.imageUrl);
+    if(task.imageUrl)releaseImageUrl(task.imageUrl);
     task.node?.card.remove();
     const at=tasks.indexOf(task);
     if(at>=0)tasks.splice(at,1);
@@ -875,8 +903,8 @@
         chunks.push(data);
       }
       if (offset===task.resultBytes && !closed && task.status==='succeeded') {
-        const url=URL.createObjectURL(new Blob(chunks,{type:'image/png'}));
-        if (task.imageUrl)URL.revokeObjectURL(task.imageUrl);
+        const url=pngChunksToDataUrl(chunks,task.resultBytes);
+        if (task.imageUrl)releaseImageUrl(task.imageUrl);
         task.imageUrl=url;
         renderTask(task);
       }
@@ -1010,7 +1038,7 @@
     if(stopwatchTimer)clearInterval(stopwatchTimer);
     if(preferenceTimer!==null)clearTimeout(preferenceTimer);
     // 不取消后台生图；这里只清理浏览器内存与观察器。
-    for(const task of tasks)if(task.imageUrl)URL.revokeObjectURL(task.imageUrl);
+    for(const task of tasks)if(task.imageUrl)releaseImageUrl(task.imageUrl);
   }
 
   fields.prompt.addEventListener('input',()=>{

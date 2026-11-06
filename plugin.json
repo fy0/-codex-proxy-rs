@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.0",
-  "description": "Codex Image Bridge with backend durable image job queue, quota guard in one scheduler, Images 2.6 and persistent workbench preferences.",
+  "version": "0.7.1",
+  "description": "Codex Image Bridge with Quota Guard and durable image jobs; CSP-compliant PNG data URL previews.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"

@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.7.0 (official SDK)
+# CPR Image Bridge v0.7.1 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -181,3 +181,10 @@ Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢
 当前宿主的插件维护工作器在**每个实例的本地进程**内串行运行，并通过实例私有状态做 CAS 持久化。后台任务目前按“一个插件实例只有一个有效维护工作器”设计；如果高可用部署让两个宿主副本同时维护相同的插件实例，它们可能观察到另一副本已经领取的 running 任务并将其误判为 interrupted。因此正式生产建议单实例执行该 worker，或在 CPR 宿主增加跨副本租约/owner 与 fencing token 后再启用多副本后台执行。
 
 服务端单张图像最长受 maintenance 父调用预算 900 秒限制；等待最多约 30 秒才会由维护轮询领取，若需要立即响应、长于预算或可跨宿主副本自动恢复，应升级到具备专用持久任务 worker 和租约队列的宿主 API/独立服务。
+
+
+## v0.7.1 CSP 图像显示修复
+
+CPR 官方插件 iframe 的 CSP 为 img-src data:，不允许 blob:。v0.7.0 从后台持久队列以二进制分片读取 PNG、用 URL.createObjectURL 显示，导致 blob:null/... 被拦截。v0.7.1 直接将 PNG 分片按 3 字节对齐编码为 data:image/png;base64 URL，保证跨任意大小分片边界时 Base64 不破坏 PNG；保留 120 MiB 最大图片约束和文件头检查。原 Responses 直接返回的 Base64 图片同样使用 data URL。
+
+不更改合并后的 Quota Guard 五小时/每周额度保护、宿主维护/持久队列、账号路由或图片模型配置。测试覆盖真实的 img-src data: CSP、后端二进制分片模拟、图片的自然宽高加载与多张图片独立显示。
