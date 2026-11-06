@@ -392,13 +392,42 @@ impl BackendJobs {
             let (mut queue, version) = self.load(host).await?;
             let mut dirty = false;
             // 上次维护中断后不能盲目重试：上游可能已受理并计费。
+            // 文件若已原子写入，说明结果实际上完成，直接恢复而不是误报中断。
             for job in &mut queue.jobs {
-                if job.status == "running" {
-                    job.status = "interrupted".into();
-                    job.completed_ms = Some(now_ms());
-                    job.error=Some("backend worker interrupted; manual retry required to avoid duplicate billing".into());
-                    dirty = true;
+                if job.status != "running" {
+                    continue;
                 }
+                let recovered = match self.result_path(&job.id) {
+                    Ok(path) => match tokio::fs::metadata(&path).await {
+                        Ok(meta) if (8..=MAX_PNG_BYTES as u64).contains(&meta.len()) => {
+                            match tokio::fs::File::open(&path).await {
+                                Ok(mut file) => {
+                                    let mut header = [0_u8; 8];
+                                    if file.read_exact(&mut header).await.is_ok()
+                                        && header == *b"\x89PNG\r\n\x1a\n"
+                                    {
+                                        Some(meta.len())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                        _ => None,
+                    },
+                    Err(_) => None,
+                };
+                job.completed_ms = Some(now_ms());
+                if let Some(bytes) = recovered {
+                    job.status = "succeeded".into();
+                    job.result_bytes = Some(bytes);
+                    job.error = None;
+                } else {
+                    job.status = "interrupted".into();
+                    job.error=Some("backend worker interrupted; manual retry required to avoid duplicate billing".into());
+                }
+                dirty = true;
             }
             let mut started = Vec::new();
             for job in queue
