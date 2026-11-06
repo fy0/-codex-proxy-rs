@@ -51,18 +51,20 @@
           <div><label for="configDriver">默认对话主控模型</label><input id="configDriver" value="gpt-5.6-luna" maxlength="128"></div>
           <div><label for="configMode">图片请求策略</label><select id="configMode"><option value="auto">auto · 优先原生 Images</option><option value="responses">responses · 统一工具桥接</option></select></div>
         </div>
-        <label for="configStorageDir">后端图片持久目录（绝对路径）</label>
-        <input id="configStorageDir" type="text" placeholder="/var/lib/cpr-image-bridge/images（Docker 要挂载 volume）" autocomplete="off">
-        <div class="field-note">必填。生图任务由后端执行，完成的 PNG 写入此目录；重启要保留目录对应持久卷。</div>
         <div class="two-up">
-          <div><label for="configBackendConcurrency">后端同时执行</label>
-            <select id="configBackendConcurrency"><option value="1">1 张</option><option value="2">2 张（推荐）</option><option value="3">3 张</option></select></div>
-          <div><label for="configQuotaAge">额度证据有效期</label>
-            <select id="configQuotaAge"><option value="60">60 秒</option><option value="300">300 秒</option><option value="900">900 秒</option><option value="3600">3600 秒</option></select></div>
+          <div><label for="configBackendConcurrency">单账号生图并发上限</label>
+            <select id="configBackendConcurrency">
+              <option value="1">1 个/账号</option><option value="2">2 个/账号</option>
+              <option value="4">4 个/账号</option><option value="8" selected>8 个/账号（默认）</option>
+              <option value="12">12 个/账号</option><option value="16">16 个/账号</option>
+              <option value="24">24 个/账号</option><option value="32">32 个/账号</option>
+            </select>
+          </div>
+          <div><label>图片结果存储</label>
+            <p class="field-note">默认系统临时目录（容器可清理），无需配置路径。</p>
+          </div>
         </div>
-        <label for="configQuotaRules">额度保护规则（可选 JSON 数组）</label>
-        <textarea id="configQuotaRules" rows="3" spellcheck="false" placeholder='[{"accountId":"账号ID","fiveHourLimitPercent":95,"weeklyLimitPercent":95}]'></textarea>
-        <div class="field-note">与生图调度共用同一个 scheduler；启用后要解绑旧 quota-guard 的 scheduler，避免作用范围重叠。空数组代表不启用。</div>
+        <div class="field-note">账号总执行容量按可用账号数相加，同时受 CPR Core 并发租约限制。额度规则请使用独立的「账号额度保护」页面，原版账号卡片及五小时／每周窗口界面均已保留。</div>
         <label for="configTimeout">请求超时</label>
         <select id="configTimeout"><option value="60000">60 秒</option><option value="180000">180 秒</option><option value="300000">300 秒</option><option value="600000">600 秒</option></select>
         <div class="label-line config-preview-label"><label for="configJson">生成的配置 JSON</label><span class="hint">实时生成</span></div>
@@ -117,13 +119,14 @@
           <option value="7">7 张</option><option value="8">8 张</option><option value="9">9 张</option>
           <option value="10">10 张</option>
         </select></div>
-        <div><label for="parallelism">后端并发（插件参数控制）</label><select id="parallelism" disabled>
-          <option value="1">1 个任务（保守）</option>
-          <option value="2" selected>2 个任务（推荐）</option>
-          <option value="3">3 个任务</option>
+        <div><label for="parallelism">单账号后台并发（由插件参数控制）</label><select id="parallelism" disabled>
+          <option value="1">1 /账号</option><option value="2">2 /账号</option>
+          <option value="4">4 /账号</option><option value="8" selected>8 /账号</option>
+          <option value="12">12 /账号</option><option value="16">16 /账号</option>
+          <option value="24">24 /账号</option><option value="32">32 /账号</option>
         </select></div>
       </div>
-      <p class="field-note">每张图片作为独立的 CPR 后端任务排队执行。后端并发由上方配置生成器的 backgroundConcurrency 控制，并受 CPR 账号、Key 的额度和并发租约限制。</p>
+      <p class="field-note">每张图片作为独立的 CPR 后端任务排队执行。后端并发按每账号 concurrencyPerAccount × 当前可用账号数计算，并受 CPR 账号、Key 的额度和并发租约限制。</p>
       <div class="divider"></div>
       <div class="section-title"><span class="section-index">02</span><h2>创作提示词</h2></div>
       <div class="label-line"><span class="label-text">快速预设</span><span class="hint">点击载入，可继续编辑</span></div>

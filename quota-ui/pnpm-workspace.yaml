@@ -1,0 +1,6 @@
+autoInstallPeers: false
+
+# Git 依赖通过 prepack 生成产物；信任自有 UI 仓库，实际提交仍由锁文件固定。
+allowBuilds:
+  '@codex-proxy/ui@git+https://github.com/zyycn/codex-proxy-ui.git': true
+  esbuild@0.25.12: true

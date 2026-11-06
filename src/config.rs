@@ -28,9 +28,10 @@ pub struct Config {
     pub image_group_ids: Vec<String>,
     /// 对外发布和实际允许调用的生图模型；仅配置在此处的模型开放。
     pub image_models: Vec<String>,
-    /// 后端异步任务结果的持久化目录，必须位于主机/容器持久卷。
-    pub image_storage_dir: String,
-    pub background_concurrency: usize,
+    /// 兼容旧配置的结果目录；未填写时自动使用 CPR_DATA_DIR 或操作系统临时目录。
+    pub legacy_image_storage_dir: Option<String>,
+    /// 同一生图账号同时运行的任务数，实际还受 CPR Core 账号租约限制。
+    pub concurrency_per_account: usize,
     pub quota_guard: crate::quota_guard::QuotaGuardConfig,
 }
 
@@ -70,31 +71,44 @@ impl Config {
         let image_account_ids = id_list(config.get("imageAccountIds"), "imageAccountIds")?;
         let image_group_ids = id_list(config.get("imageGroupIds"), "imageGroupIds")?;
         let image_models = image_model_list(config.get("imageModels"))?;
-        let image_storage_dir = match config.get("imageStorageDir") {
-            Some(Value::String(value)) => value.clone(),
-            None => String::new(),
-            _ => return Err("imageStorageDir must be a string".into()),
+        // imageStorageDir 和 backgroundConcurrency 仅用于旧版配置升级兼容，
+        // 不再是新安装的必填项。旧设置不影响新的每账号并发配置。
+        let legacy_image_storage_dir = match config.get("imageStorageDir") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if value.is_empty() => None,
+            Some(Value::String(value)) => {
+                let path = std::path::Path::new(value);
+                if !path.is_absolute()
+                    || value.len() > 1024
+                    || path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err("old imageStorageDir must be an absolute path".into());
+                }
+                Some(value.clone())
+            }
+            _ => return Err("old imageStorageDir must be a string".into()),
         };
-        if !image_storage_dir.is_empty()
-            && (!std::path::Path::new(&image_storage_dir).is_absolute()
-                || image_storage_dir.len() > 1024
-                || std::path::Path::new(&image_storage_dir)
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir)))
-        {
-            return Err("imageStorageDir must be an absolute persistent path without '..'".into());
+        if let Some(old) = config.get("backgroundConcurrency") {
+            if old
+                .as_u64()
+                .is_none_or(|number| !(1..=64).contains(&number))
+            {
+                return Err("legacy backgroundConcurrency must be within 1..64".into());
+            }
         }
-        let background_concurrency = config
-            .get("backgroundConcurrency")
+        let concurrency_per_account = config
+            .get("concurrencyPerAccount")
             .map(|value| {
                 value
                     .as_u64()
-                    .ok_or("backgroundConcurrency must be an integer")
+                    .ok_or("concurrencyPerAccount must be an integer")
             })
             .transpose()?
-            .unwrap_or(2);
-        if !(1..=3).contains(&background_concurrency) {
-            return Err("backgroundConcurrency must be between 1 and 3".into());
+            .unwrap_or(8);
+        if !(1..=32).contains(&concurrency_per_account) {
+            return Err("concurrencyPerAccount must be within 1..32".into());
         }
         let quota_guard = crate::quota_guard::QuotaGuardConfig::parse(
             config.get("quotaGuard"),
@@ -111,6 +125,7 @@ impl Config {
                     | "imageModels"
                     | "imageStorageDir"
                     | "backgroundConcurrency"
+                    | "concurrencyPerAccount"
                     | "quotaGuard"
                     | "maxObservationAgeSeconds"
             )
@@ -124,8 +139,8 @@ impl Config {
             image_account_ids,
             image_group_ids,
             image_models,
-            image_storage_dir,
-            background_concurrency: background_concurrency as usize,
+            legacy_image_storage_dir,
+            concurrency_per_account: concurrency_per_account as usize,
             quota_guard,
         })
     }
@@ -273,6 +288,25 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_eight_per_account_and_accepts_old_config() {
+        let cfg = Config::from_configuration(&serde_json::json!({})).unwrap();
+        assert_eq!(cfg.concurrency_per_account, 8);
+        assert!(cfg.legacy_image_storage_dir.is_none());
+        let old = Config::from_configuration(&serde_json::json!({
+            "backgroundConcurrency": 2, "imageStorageDir": "/tmp/my-old-images"
+        }))
+        .unwrap();
+        assert_eq!(old.concurrency_per_account, 8);
+        assert_eq!(
+            old.legacy_image_storage_dir.as_deref(),
+            Some("/tmp/my-old-images")
+        );
+        let high =
+            Config::from_configuration(&serde_json::json!({"concurrencyPerAccount": 16})).unwrap();
+        assert_eq!(high.concurrency_per_account, 16);
+    }
+
+    #[test]
     fn rejects_invalid_configuration() {
         for value in [
             serde_json::json!({"driverModel":"../../bad"}),
@@ -280,6 +314,8 @@ mod tests {
             serde_json::json!({"timeoutMs":100}),
             serde_json::json!({"timeoutMs":null}),
             serde_json::json!({"bridgeMode":"unknown"}),
+            serde_json::json!({"concurrencyPerAccount":0}),
+            serde_json::json!({"concurrencyPerAccount":33}),
             serde_json::json!({"imageGroupIds":"wrong"}),
             serde_json::json!({"imageAccountIds":["same","same"]}),
             serde_json::json!({"imageModels":"gpt-image-2"}),

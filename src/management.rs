@@ -240,7 +240,7 @@ fn is_valid_preference(value: &Value) -> bool {
     let count = fields.get("count").and_then(Value::as_u64);
     let parallelism = fields.get("parallelism").and_then(Value::as_u64);
     if !count.is_some_and(|v| (1..=10).contains(&v))
-        || !parallelism.is_some_and(|v| (1..=3).contains(&v))
+        || !parallelism.is_some_and(|v| (1..=32).contains(&v))
     {
         return false;
     }
@@ -322,8 +322,8 @@ pub async fn handle(
                     "candidateImageModels": IMAGE_MODELS,
                     "enabled": config.has_image_scope(),
                     "backendJobsEnabled": jobs.enabled(),
-                    "backgroundConcurrency": config.background_concurrency,
-                    "imageStorageDir": config.image_storage_dir,
+                     "concurrencyPerAccount": config.concurrency_per_account,
+                    "imageStorageDir": config.legacy_image_storage_dir,
                     "accountCount": config.image_account_ids.len(),
                     "groupCount": config.image_group_ids.len(),
                     "accountOptions": accounts,
@@ -340,8 +340,7 @@ pub async fn handle(
                         "imageModels": config.image_models,
                         "imageGroupIds": config.image_group_ids,
                         "imageAccountIds": config.image_account_ids,
-                        "imageStorageDir": config.image_storage_dir,
-                        "backgroundConcurrency": config.background_concurrency,
+                         "concurrencyPerAccount": config.concurrency_per_account,
                         "quotaGuard": config.quota_guard.accounts,
                         "maxObservationAgeSeconds": config.quota_guard.max_observation_age_seconds,
                     }

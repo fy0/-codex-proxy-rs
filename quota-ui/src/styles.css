@@ -1,0 +1,18 @@
+/* Use the official UI package's source CSS; GitHub source dependency has no dist/styles.css. */
+@import '../node_modules/@codex-proxy/ui/src/styles/tokens.css';
+@import '../node_modules/@codex-proxy/ui/src/styles/base.css';
+@import '../node_modules/@codex-proxy/ui/src/styles/controls.css';
+@import 'tailwindcss/theme.css' layer(theme);
+@import '@codex-proxy/ui/tailwind.css';
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+@layer base {
+  body {
+    margin: 0;
+    background: transparent;
+  }
+
+  #app {
+    min-height: inherit;
+  }
+}

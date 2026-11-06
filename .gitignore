@@ -1,3 +1,4 @@
-/target/
-/dist/
-*.tmp
+quota-ui/node_modules/
+quota-ui/dist/
+quota-ui/package-lock.json
+quota-ui/.vite/

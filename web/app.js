@@ -19,8 +19,7 @@
     accountExtra: byId('configAccountExtra'), groupExtra: byId('configGroupExtra'),
     modelNew: byId('configModelNew'), modelAdd: byId('configModelAdd'),
     driver: byId('configDriver'), mode: byId('configMode'),
-    storageDir: byId('configStorageDir'), backendConcurrency: byId('configBackendConcurrency'),
-    quotaRules: byId('configQuotaRules'), quotaAge: byId('configQuotaAge'),
+    backendConcurrency: byId('configBackendConcurrency'),
     timeout: byId('configTimeout'), json: byId('configJson'),
     copy: byId('copyConfig'), reset: byId('resetConfig'), notice: byId('configNotice')
   };
@@ -163,12 +162,6 @@
     if (accounts.length > 256 || groups.length > 256) {
       throw new Error('账号或分组数量超过上限 256');
     }
-    let quotaGuard;
-    try { quotaGuard=JSON.parse(configFields.quotaRules.value.trim() || '[]'); }
-    catch {throw new Error('额度保护规则必须是合法 JSON 数组');}
-    if(!Array.isArray(quotaGuard) || quotaGuard.length>1000) {
-      throw new Error('额度保护规则必须是长度不超过 1000 的数组');
-    }
     return {
       timeoutMs: Number(configFields.timeout.value),
       bridgeMode: configFields.mode.value,
@@ -176,10 +169,9 @@
       imageModels,
       imageGroupIds: groups,
       imageAccountIds: accounts,
-      imageStorageDir: configFields.storageDir.value.trim(),
-      backgroundConcurrency: Number(configFields.backendConcurrency.value),
-      quotaGuard,
-      maxObservationAgeSeconds: Number(configFields.quotaAge.value)
+      concurrencyPerAccount: Number(configFields.backendConcurrency.value),
+      quotaGuard: Array.isArray(builderState.saved?.quotaGuard) ? builderState.saved.quotaGuard : [],
+      maxObservationAgeSeconds: Number(builderState.saved?.maxObservationAgeSeconds || 300)
     };
   }
   function refreshConfigJson() {
@@ -212,10 +204,7 @@
     configFields.groupExtra.value = '';
     configFields.driver.value = config.driverModel || 'gpt-5.6-luna';
     configFields.mode.value = config.bridgeMode === 'responses' ? 'responses' : 'auto';
-    configFields.storageDir.value = config.imageStorageDir || '';
-    configFields.backendConcurrency.value = String(config.backgroundConcurrency || 2);
-    configFields.quotaRules.value = JSON.stringify(config.quotaGuard || [], null, 2);
-    configFields.quotaAge.value = String(config.maxObservationAgeSeconds || 300);
+    configFields.backendConcurrency.value = String(config.concurrencyPerAccount || 8);
     const timeout = String(config.timeoutMs || 300000);
     configFields.timeout.value = [...configFields.timeout.options].some((option) => option.value === timeout)
       ? timeout : '300000';
@@ -599,7 +588,7 @@
       if (closed || epoch !== scanEpoch) return;
       loadConfigBuilder(state);
       backendEnabled=!!state.backendJobsEnabled;
-      const actualConcurrency=String(state.backgroundConcurrency||2);
+      const actualConcurrency=String(state.concurrencyPerAccount||8);
       if ([...fields.parallelism.options].some(option=>option.value===actualConcurrency)) {
         fields.parallelism.value=actualConcurrency;
       }
@@ -607,8 +596,8 @@
       const warning=byId('backendNotice');
       if(warning) {
         warning.textContent=backendEnabled
-          ? '后台任务已启用：关闭页面不会取消队列，结果存储在服务器持久目录。'
-          : '后台任务未配置：请展开配置生成器，设置 imageStorageDir 并保存插件参数。';
+          ? '后台任务已启用：关闭页面后仍继续执行，图片放在服务器临时目录；每账号默认并发 8。'
+          : '后台任务不可用：请检查 CPR 插件维护调度。';
         warning.classList.toggle('error',!backendEnabled);
       }
       startPolling();
@@ -653,54 +642,48 @@
       if (epoch === scanEpoch) fields.refresh.disabled = false;
     }
   }
+  function detectImageMime(magic) {
+    if ([137,80,78,71,13,10,26,10].every((v,i)=>magic[i]===v)) return 'image/png';
+    if (magic[0]===255 && magic[1]===216 && magic[2]===255) return 'image/jpeg';
+    if ([82,73,70,70].every((v,i)=>magic[i]===v)
+       && [87,69,66,80].every((v,i)=>magic[i+8]===v)) return 'image/webp';
+    throw new Error('图片文件格式无效，仅支持 PNG、JPEG、WebP');
+  }
   function requireImage(base64) {
-    // CPR 管理页 iframe 的 CSP 是 img-src data:，不能使用 blob: URL。
-    if (typeof base64 !== 'string' || !base64.length || base64.length > 160 * 1024 * 1024) {
-      throw new Error('没有生成图片，或结果超过 160 MiB 的安全展示上限');
+    if (typeof base64 !== 'string' || !base64.length || base64.length > 160*1024*1024) {
+      throw new Error('没有生成图片，或结果超过 160 MiB 的显示上限');
     }
-    const prefix = atob(base64.slice(0,32));
-    if (![137,80,78,71,13,10,26,10].every((byte,index)=>prefix.charCodeAt(index)===byte)) {
-      throw new Error('上游没有返回合法的 PNG 图像数据');
-    }
-    return 'data:image/png;base64,' + base64;
+    const head=atob(base64.slice(0,24));
+    const mime=detectImageMime(Array.from(head,c=>c.charCodeAt(0)));
+    return 'data:'+mime+';base64,'+base64;
   }
   function releaseImageUrl(url) {
     if (typeof url === 'string' && url.startsWith('blob:')) URL.revokeObjectURL(url);
   }
-  function pngChunksToDataUrl(chunks, expectedBytes) {
-    if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 8 || expectedBytes > 120*1024*1024) {
-      throw new Error('后端图片长度不合法或超过 120 MiB');
-    }
-    // 分块 base64：每段都按 3 字节对齐，尾部 0～2 字节留给下一块。
-    // 直接把每个任意分片 btoa 后拼接，会产生填充字符，破坏 PNG。
-    const encoded = [];
-    let pending = new Uint8Array(0);
-    let observedBytes = 0;
-    let magic = [];
-    const chunkSize = 24576; // 同时是 3 的倍数，避免大数组 spread。
-    for (const chunk of chunks) {
-      if (!(chunk instanceof Uint8Array)) throw new Error('PNG 分片不是字节数组');
-      observedBytes += chunk.length;
-      if (observedBytes > expectedBytes) throw new Error('PNG 分片长度超出预期');
-      if (magic.length < 8) {
-        for (let i=0;i<chunk.length && magic.length<8;i++) magic.push(chunk[i]);
-      }
-      const combined = new Uint8Array(pending.length + chunk.length);
-      combined.set(pending,0);
+  function imageChunksToDataUrl(chunks, expectedBytes, declaredMime) {
+    if(!Number.isSafeInteger(expectedBytes) || expectedBytes<16 || expectedBytes>120*1024*1024)
+      throw Error('后端图片长度不合法或超出大小限制');
+    const encoded=[];
+    let pending=new Uint8Array(0), observedBytes=0, signature=[];
+    for(const chunk of chunks) {
+      if(!(chunk instanceof Uint8Array))throw Error('图片分片不是字节数组');
+      observedBytes+=chunk.length;
+      if(observedBytes>expectedBytes)throw Error('图片分片长度超出预期');
+      for(let i=0;i<chunk.length && signature.length<12;i++)signature.push(chunk[i]);
+      const combined=new Uint8Array(pending.length+chunk.length);
+      combined.set(pending);
       combined.set(chunk,pending.length);
-      const aligned = combined.length - combined.length % 3;
-      for (let offset=0;offset<aligned;offset+=chunkSize) {
-        encoded.push(btoa(String.fromCharCode(...combined.subarray(
-          offset,Math.min(offset+chunkSize,aligned)))));
+      const aligned=combined.length-combined.length%3;
+      for(let offset=0;offset<aligned;offset+=24576) {
+        encoded.push(btoa(String.fromCharCode(...combined.subarray(offset,Math.min(offset+24576,aligned)))));
       }
-      pending = combined.slice(aligned);
+      pending=combined.slice(aligned);
     }
-    if (observedBytes !== expectedBytes) throw new Error('PNG 字节数与后端响应不一致');
-    if (![137,80,78,71,13,10,26,10].every((value,index)=>magic[index]===value)) {
-      throw new Error('后端没有返回 PNG 文件头');
-    }
-    if (pending.length)encoded.push(btoa(String.fromCharCode(...pending)));
-    return 'data:image/png;base64,' + encoded.join('');
+    if(observedBytes!==expectedBytes)throw Error('图片字节数与后端响应不一致');
+    const mime=detectImageMime(signature);
+    if(declaredMime && declaredMime!==mime) throw Error('图片文件格式与后台元数据不一致');
+    if(pending.length)encoded.push(btoa(String.fromCharCode(...pending)));
+    return 'data:'+mime+';base64,'+encoded.join('');
   }
 
   function imageItem(event) {
@@ -821,13 +804,13 @@
     cancel.addEventListener('click',()=>{void cancelTask(task);});
     const download=document.createElement('a');
     download.className='task-button';
-    download.textContent='保存 PNG';
+    download.textContent='保存图片';
     download.hidden=true;
-    download.download='codex-image-'+task.id.slice(0,8)+'.png';
+    download.download='codex-image-'+task.id.slice(0,8)+'.'+(task.resultMime==='image/jpeg'?'jpg':task.resultMime==='image/webp'?'webp':'png');
     actions.append(cancel,download);
     card.append(head,preview,details,actions);
     fields.taskGrid.append(card);
-    task.node={card,state,info,img,error,requestId,cancel,download};
+    task.node={card,state,info,img,model,error,requestId,cancel,download};
     renderTask(task);
   }
 
@@ -875,7 +858,14 @@
     n.requestId.textContent=task.requestId?'请求 ID · '+task.requestId:'';
     n.cancel.hidden=!['queued','running'].includes(stateKey);
     n.download.hidden=!(stateKey==='succeeded'&&task.imageUrl);
-    if(!n.download.hidden)n.download.href=task.imageUrl;
+    if(!n.download.hidden) {
+      n.download.href=task.imageUrl;
+      n.download.download='codex-image-'+task.id.slice(0,8)+'.'+(
+        task.resultMime==='image/jpeg'?'jpg':task.resultMime==='image/webp'?'webp':'png');
+    }
+    const dimensions=task.actualWidth && task.actualHeight
+      ? ' · 实际 '+task.actualWidth+'×'+task.actualHeight : '';
+    n.model.textContent=task.imageModel+' · 选择 '+task.size+dimensions+' · '+task.quality;
   }
   function forgetTask(task) {
     if(task.imageUrl)releaseImageUrl(task.imageUrl);
@@ -903,7 +893,7 @@
         chunks.push(data);
       }
       if (offset===task.resultBytes && !closed && task.status==='succeeded') {
-        const url=pngChunksToDataUrl(chunks,task.resultBytes);
+        const url=imageChunksToDataUrl(chunks,task.resultBytes,task.resultMime);
         if (task.imageUrl)releaseImageUrl(task.imageUrl);
         task.imageUrl=url;
         renderTask(task);
@@ -987,7 +977,7 @@
     if(closed || !fields.clientKey.value || !fields.imageModel.value ||
       !fields.prompt.value.trim() || !Number.isInteger(n) || n<1 || n>10)return;
     if(!backendEnabled){
-      notice('后端任务未启用：请展开配置生成器，设置 imageStorageDir 绝对持久目录并保存插件参数。',true);
+      notice('后端任务不可用：请检查维护回调与插件配置。',true);
       return;
     }
     fields.generate.disabled=true;
@@ -1058,7 +1048,7 @@
   [fields.size,fields.quality,fields.batchCount].forEach((el)=>
     el.addEventListener('change',()=>{queuePreferenceSave();count();}));
   fields.parallelism.addEventListener('change',()=>{
-    // 此选择属于旧版页面并发偏好；真正运行槽位由后端 backgroundConcurrency 管理。
+    // 后端实际每账号并发由 concurrencyPerAccount 配置与 CPR Core 租约决定。
     queuePreferenceSave();
     count();
   });

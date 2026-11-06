@@ -6,6 +6,7 @@ mod management;
 mod models;
 mod policy;
 mod quota_guard;
+mod quota_management;
 mod response;
 
 use std::sync::Arc;
@@ -41,6 +42,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Config::from_configuration(&session.handshake().configuration)
             .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?,
     );
+    let raw_config = Arc::new(session.handshake().configuration.clone());
+    let artifact_sha256 = Arc::new(session.handshake().artifact_sha256.clone());
+    let mut management_registration = management::registration();
+    let quota_registration = quota_management::registration();
+    management_registration
+        .routes
+        .extend(quota_registration.routes);
+    management_registration
+        .resources
+        .extend(quota_registration.resources);
+    management_registration
+        .pages
+        .extend(quota_registration.pages);
+    management_registration
+        .callbacks
+        .extend(quota_registration.callbacks);
+
     let registry = Arc::new(policy::ImageRegistry::default());
     let jobs = Arc::new(jobs::BackendJobs::new(Arc::clone(&config)));
     let quota = Arc::new(quota_guard::QuotaGuard::new(Arc::new(
@@ -75,13 +93,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 async move { policy::schedule(call, config, registry).await }
             }
         })?
-        .management(management::registration(), {
+        .management(management_registration, {
             let config = Arc::clone(&config);
             let jobs = Arc::clone(&jobs);
+            let raw_config = Arc::clone(&raw_config);
+            let artifact_sha256 = Arc::clone(&artifact_sha256);
             move |call| {
                 let config = Arc::clone(&config);
                 let jobs = Arc::clone(&jobs);
-                async move { management::handle(call, &config, &jobs).await }
+                let raw_config = Arc::clone(&raw_config);
+                let artifact_sha256 = Arc::clone(&artifact_sha256);
+                async move {
+                    if call.request.path.starts_with("quota/") {
+                        quota_management::handle(
+                            call,
+                            &raw_config,
+                            &config.quota_guard,
+                            &artifact_sha256,
+                        )
+                        .await
+                    } else {
+                        management::handle(call, &config, &jobs).await
+                    }
+                }
             }
         })?
         .on(methods::RECONCILE, {

@@ -1,6 +1,6 @@
 [package]
 name = "cpr-image-bridge"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ description = "Images API to Codex Responses image_generation bridge for codex-p
 
 [dependencies]
 gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "96e8443ede051abdd8f0bac69462a7cfe2945633", features = ["io"] }
-tokio = { version = "1.52", features = ["io-std", "rt-multi-thread", "macros", "time", "fs", "sync", "io-util"] }
+tokio = { version = "1.52", features = ["io-std", "rt-multi-thread", "macros", "time", "fs", "sync", "io-util", "net"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
@@ -16,6 +16,8 @@ base64 = "0.22"
 multer = "3.1"
 bytes = "1.10"
 futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
 # No network, credentials, or running gateway are needed for the pure conversion tests.

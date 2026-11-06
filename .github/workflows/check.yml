@@ -3,7 +3,7 @@ name: Build CPR image bridge plugin
 on:
   push:
     branches:
-      - builds/cpr-image-bridge-v0.7.1-official
+      - builds/cpr-image-bridge-v0.7.2-official
   workflow_dispatch:
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}-image-bridge-v7
+          key: ${{ matrix.target }}-image-bridge-v72
       - name: Generate dependency lock
         run: cargo generate-lockfile
       - name: Test plugin
@@ -62,14 +62,14 @@ jobs:
           set -euo pipefail
           test -f cargo-test.log || printf 'cargo test did not start\n' > cargo-test.log
           tail -n 300 cargo-test.log > "$RUNNER_TEMP/test-output.txt"
-          git checkout --orphan 'logs/cpr-image-bridge-v0.7.1-official-${{ matrix.target }}'
+          git checkout --orphan 'logs/cpr-image-bridge-v0.7.2-official-${{ matrix.target }}'
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/test-output.txt" ./test-output.txt
           git add -- test-output.txt
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'ci: capture image bridge cargo failure'
-          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.1-official-${{ matrix.target }}
+          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.2-official-${{ matrix.target }}
       - name: Build release executable
         run: cargo build --locked --release --target '${{ matrix.target }}'
       - name: Build official plugin packaging CLI
@@ -120,11 +120,11 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/ci-packages"
           cp dist/* "$RUNNER_TEMP/ci-packages/"
-          git checkout --orphan compiled/cpr-image-bridge-v0.7.1-official
+          git checkout --orphan compiled/cpr-image-bridge-v0.7.2-official
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/ci-packages/"* .
           git add -- *.tar.gz *.sha256
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'build: publish image bridge v0.3.0 packages'
-          git push --force origin HEAD:refs/heads/compiled/cpr-image-bridge-v0.7.1-official
+          git push --force origin HEAD:refs/heads/compiled/cpr-image-bridge-v0.7.2-official

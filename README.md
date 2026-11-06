@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.7.1 (official SDK)
+# CPR Image Bridge v0.7.2 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -188,3 +188,31 @@ Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢
 CPR 官方插件 iframe 的 CSP 为 img-src data:，不允许 blob:。v0.7.0 从后台持久队列以二进制分片读取 PNG、用 URL.createObjectURL 显示，导致 blob:null/... 被拦截。v0.7.1 直接将 PNG 分片按 3 字节对齐编码为 data:image/png;base64 URL，保证跨任意大小分片边界时 Base64 不破坏 PNG；保留 120 MiB 最大图片约束和文件头检查。原 Responses 直接返回的 Base64 图片同样使用 data URL。
 
 不更改合并后的 Quota Guard 五小时/每周额度保护、宿主维护/持久队列、账号路由或图片模型配置。测试覆盖真实的 img-src data: CSP、后端二进制分片模拟、图片的自然宽高加载与多张图片独立显示。
+
+
+## v0.7.2：4K、WebP 优先、临时图片与 Quota Guard 原生管理页
+
+### 图片格式与 4K
+
+依据 OpenAI 的 Images API 和 Responses image_generation 官方协议，两条路径都支持 webp、png、jpeg 和 output_compression（压缩参数只对 WebP/JPEG 有效）。插件发起请求前按模型 ID 选择格式：明确列出的 GPT Image 1.5、2、2.5、2.6 默认 WebP、output_compression=85；自定义/未知模型预先选择 PNG 且不发送 output_compression。**不会在失败后重试另一次收费生图**。不再默认优先 JPEG。
+
+对于官方支持的自定义尺寸，原样传递 3840x2160 或 2160x3840 等 WIDTHxHEIGHT，并在返回时验证实际图片格式、宽高；若返回 1024x1024 则报告请求尺寸与实际尺寸不一致，不计为成功 4K。超过单个宿主模型事件容量的返回仍可能失败；WebP 优先是减少此风险，不是伪造无大小限制的传输。
+
+参考：
+- https://developers.openai.com/api/reference/resources/images/methods/generate
+- https://developers.openai.com/api/reference/resources/responses/methods/create
+- https://developers.openai.com/api/docs/guides/image-generation
+
+### 临时文件
+
+不再要求设置 imageStorageDir。新安装使用系统临时目录下的 cpr-image-bridge/images（例如 /tmp/cpr-image-bridge/images）；文件扩展名 .img 与任务 UUID 关联，客户端通过管理分片接口加载图片，不通过公共 URL 暴露。宿主设置 CPR_DATA_DIR 不强制改变临时存储；容器重启或临时目录清理后，旧结果可能丢失。旧配置中的 imageStorageDir 字段保留兼容用法，若用户明确设置了绝对路径会继续使用。
+
+后台图片可以是 PNG、WebP、JPEG：文件格式由内容识别，元数据记录 resultMime、actualWidth、actualHeight，页面按真实 MIME 构造 CSP 允许的 data URL 和带正确扩展名的保存链接。兼容已有 .png 后缀的结果文件恢复。
+
+### 账号额度和并发
+
+新的 concurrencyPerAccount 默认 8（可配置 1 到 32），不再以 backgroundConcurrency=3 限制整池并发。执行任务以账号 ID 使用独立信号量，候选账号池容量按当前可用账号个数累加；最终仍以 CPR Core 的账号并发租约、Key 配额和原生调度允许容量为准，若宿主账号并发上限低于 8，请在 CPR 自身设置中调大后再并行执行。
+
+保留 Quota Guard 的 5 小时和每周额度保护。新增独立管理页「账号额度保护」，**直接移植 Mr-xiongyq/cpr-quota-guard 的 Vue 账号卡片、额度进度条、账号选择和保存交互**（Apache License 2.0）；仅对 API 路径和保存的宿主配置合并做适配，不会用保存额度规则覆盖图片模型、账号白名单等其它 Image Bridge 配置。源代码位于 quota-ui/，构建资源位于 web/quota/。本地模拟测试不能代替真实 CPR 宿主管理员授权、真实 OAuth 生图和额度交互验收。
+
+仍须停用原 cpr-quota-guard 的 scheduler 绑定，保留 Image Bridge 的单个 scheduler；使用失败时拒绝策略，防止额度保护筛选失效。

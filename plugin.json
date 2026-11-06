@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.1",
-  "description": "Codex Image Bridge with Quota Guard and durable image jobs; CSP-compliant PNG data URL previews.",
+  "version": "0.7.2",
+  "description": "Official CPR Image Bridge: WebP-first 4K generation, temporary result files, per-account concurrency, original Quota Guard management.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -115,17 +115,17 @@
       },
       "imageStorageDir": {
         "type": "string",
-        "title": "后端持久化图片目录",
-        "description": "启用后端异步生图必填。填写宿主系统的绝对目录；Docker 必须挂载此目录为持久卷，后台会将 PNG 存入该目录。空值会禁用异步任务提交。",
+        "title": "旧版图片路径（兼容项）",
+        "description": "可选旧版兼容设置。留空时自动使用本地系统临时目录，无需挂载持久卷；容器重启后图片可能被删除。建议新安装留空。",
         "maxLength": 1024,
         "default": ""
       },
       "backgroundConcurrency": {
         "type": "integer",
-        "title": "后端生图并发",
-        "description": "每个插件实例后台每轮最多同时执行多少张（还受 CPR Core 账号/Key 并发额度限制）。",
+        "title": "旧版整体并发（兼容项）",
+        "description": "旧版配置兼容字段，现已不参与并发调度；请使用 concurrencyPerAccount。",
         "minimum": 1,
-        "maximum": 3,
+        "maximum": 64,
         "default": 2
       },
       "quotaGuard": {
@@ -174,6 +174,14 @@
         "minimum": 60,
         "maximum": 86400,
         "default": 300
+      },
+      "concurrencyPerAccount": {
+        "type": "integer",
+        "title": "每账号生图并发",
+        "description": "每个被授权生图账号允许同时处理的后端图片任务数（默认8）；总容量随可用生图账号数增长，仍受 CPR Core 并发租约约束。",
+        "minimum": 1,
+        "maximum": 32,
+        "default": 8
       }
     },
     "additionalProperties": false
@@ -181,7 +189,10 @@
   "resources": {
     "web/index.html": "text/html",
     "web/app.js": "text/javascript",
-    "web/app.css": "text/css"
+    "web/app.css": "text/css",
+    "web/quota/index.html": "text/html",
+    "web/quota/assets/app.js": "application/javascript",
+    "web/quota/assets/app.css": "text/css"
   },
   "state": [
     {
@@ -233,7 +244,7 @@
           "parallelism": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 3
+            "maximum": 32
           }
         },
         "additionalProperties": false

@@ -1,0 +1,30 @@
+{
+  "name": "cpr-quota-guard-ui",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@12.6.0",
+  "scripts": {
+    "build": "vue-tsc --noEmit && vite build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "dependencies": {
+    "@codex-proxy/ui": "github:zyycn/codex-proxy-ui#v0.7.0",
+    "@lucide/vue": "1.61.0",
+    "vue": "3.5.44"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "10.0.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.6.5",
+    "@vitejs/plugin-vue": "6.0.10",
+    "@vue/tsconfig": "0.9.1",
+    "eslint": "10.13.0",
+    "eslint-plugin-format": "2.0.1",
+    "eslint-plugin-vuejs-accessibility": "2.6.3",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vue-tsc": "3.3.13"
+  }
+}
