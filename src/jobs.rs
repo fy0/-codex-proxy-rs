@@ -34,7 +34,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::AsyncReadExt,
     sync::{Mutex, Semaphore},
 };
 use uuid::Uuid;

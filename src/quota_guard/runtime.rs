@@ -292,8 +292,9 @@ pub async fn refresh_daily_overview(
         .accounts
         .iter()
         .filter(|rule| rule.daily_limit_usd.is_some())
+        .cloned()
         .filter_map(|rule| {
-            let usage = daily_usage(rule, now, config.max_observation_age_seconds);
+            let usage = daily_usage(&rule, now, config.max_observation_age_seconds);
             let observed = usage.observed_at_ms.unwrap_or(i64::MIN);
             if observed == i64::MIN || now.saturating_sub(observed) >= 15_000 {
                 Some((observed, rule))
@@ -304,7 +305,7 @@ pub async fn refresh_daily_overview(
         .collect::<Vec<_>>();
     rules.sort_by_key(|(observed, _)| *observed);
     let work = stream::iter(rules.into_iter().take(MAX_CHECKS))
-        .map(|(_, rule)| refresh_daily_usage(host, rule, now))
+        .map(|(_, rule)| async move { refresh_daily_usage(host, &rule, now).await })
         .buffer_unordered(MAX_PARALLEL_REFRESHES)
         .collect::<Vec<_>>();
     if let Ok(results) = tokio::time::timeout(OVERVIEW_BUDGET, work).await {
