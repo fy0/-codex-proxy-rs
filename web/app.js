@@ -529,11 +529,15 @@
       setOptions(fields.clientKey, [{value:'',label:'正在核实可生图客户端 Key…'}],'');
       fields.clientKey.disabled = true;
     } else {
+      const selectedChanged = current !== keyId;
       setOptions(fields.clientKey, eligibleKeys.map((key)=>({
         value:key.id,label:key.name+' · '+key.id
       })), keyId);
       fields.clientKey.disabled = false;
-      applyModelsForKey();
+      // 后台探测新的 Key 时，不反复重置用户正在编辑的模型选择。
+      if (selectedChanged || !fields.driver.value || !fields.imageModel.value) {
+        applyModelsForKey();
+      }
     }
   }
   async function scanKeys(keys, epoch) {
