@@ -37,7 +37,8 @@
         <div id="configGroups" class="option-list" aria-label="生图分组多选"><div class="placeholder">读取 CPR 分组中…</div></div>
         <label for="configGroupExtra">补充分组 ID（可选）</label>
         <textarea id="configGroupExtra" class="id-entry" rows="2" placeholder="输入未列出的分组 ID，用逗号或换行分隔"></textarea>
-        <p class="field-note">账号和分组取并集；生图仍受 Client Key 的账号范围与分组「允许图像生成」开关约束。</p>
+        <p class="field-note">账号和分组取并集；生图仍受 Client Key 的账号范围与分组「允许图像生成」开关约束。
+          <strong>调度插件提示：</strong>多个 scheduler 的绑定范围不能重叠。如还有其它账号调度插件，双方须按不相交的 Client Key（或可明确区分的 Provider／模型）划分；仅区分账号分组不足以通过 CPR 的静态重叠检查。</p>
       </div>
       <div class="config-column">
         <h3>绘图模型与执行策略</h3>
@@ -131,10 +132,10 @@
         <span class="status" id="status" role="status">尚无任务</span>
       </div>
       <div class="task-toolbar">
-        <span id="queueInfo">0 运行中 · 0 排队 · 0 完成</span>
+        <span id="queueInfo" aria-live="polite">0 运行中 · 0 排队 · 0 完成</span>
         <button id="clearFinished" class="text-action" type="button" disabled>清理已完成</button>
       </div>
-      <div id="taskGrid" class="task-grid" aria-live="polite" aria-relevant="additions text">
+      <div id="taskGrid" class="task-grid" aria-live="off">
         <div class="task-placeholder" id="empty">
           <div class="empty-art">✦</div>
           <h3>生成任务在这里展示</h3>

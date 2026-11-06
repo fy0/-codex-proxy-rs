@@ -306,6 +306,8 @@
   let preferenceSaving = false;
   let preferenceTimer = null;
   let activeTasks = 0;
+  // 全页面共享一个 100ms 计时器；仅更新生成中标签，不重绘任务卡片/图片。
+  let clockInterval = null;
   let taskCounter = 0;
   let tasks = [];
   const MAX_TASKS = 30;
@@ -356,6 +358,29 @@
     fields.cancel.disabled = liveTaskCount() === 0;
     fields.clearFinished.disabled = !tasks.some((task) => !['queued','running'].includes(task.state));
   }
+  function elapsedLabel(task) {
+    if (!Number.isFinite(task.startedAt)) return '';
+    const until = Number.isFinite(task.endedAt) ? task.endedAt : performance.now();
+    return (Math.max(0, until - task.startedAt) / 1000).toFixed(1) + 's';
+  }
+  function refreshTaskClocks() {
+    if (closed) return;
+    for (const task of tasks) {
+      if (task.state !== 'running' || !task.node?.state) continue;
+      const value = '生成中 · ' + elapsedLabel(task);
+      if (task.node.state.textContent !== value) task.node.state.textContent = value;
+    }
+  }
+  function syncTaskClock() {
+    const shouldRun = !closed && tasks.some((task) => task.state === 'running');
+    if (shouldRun && clockInterval === null) {
+      refreshTaskClocks();
+      clockInterval = setInterval(refreshTaskClocks, 100);
+    } else if (!shouldRun && clockInterval !== null) {
+      clearInterval(clockInterval);
+      clockInterval = null;
+    }
+  }
   function updateQueueInfo() {
     const running = tasks.filter((task) => task.state === 'running').length;
     const waiting = tasks.filter((task) => task.state === 'queued').length;
@@ -369,6 +394,7 @@
     else if (failed) status('error', '存在失败');
     else status('', tasks.length ? '已停止' : '尚无任务');
     fields.empty.hidden = tasks.length !== 0;
+    syncTaskClock();
     count();
   }
   function presetButtons() {
@@ -781,7 +807,9 @@
       queued:'排队中',running:'生成中',succeeded:'已完成',
       failed:'生成失败',canceled:'已取消'
     };
-    state.textContent = labels[task.state] || task.state;
+    const duration = elapsedLabel(task);
+    state.textContent = (labels[task.state] || task.state)
+      + (duration ? ' · ' + duration : '');
     state.className = 'task-state ' + task.state;
     card.className = 'task-card ' + task.state;
     img.hidden = !(task.state==='succeeded' && task.imageUrl);
@@ -825,6 +853,7 @@
   }
   function cancelTask(task) {
     if (!['queued','running'].includes(task.state)) return;
+    task.endedAt=Number.isFinite(task.startedAt) ? performance.now() : null;
     task.state='canceled';
     task.controller?.abort();
     renderTask(task);
@@ -836,6 +865,7 @@
     // 把下一张待处理图片错误启动。
     for (const task of tasks) {
       if (task.state !== 'queued' && task.state !== 'running') continue;
+      task.endedAt=Number.isFinite(task.startedAt) ? performance.now() : null;
       task.state = 'canceled';
       task.controller?.abort();
       renderTask(task);
@@ -850,7 +880,8 @@
   }
   async function runTask(task) {
     const signal=task.controller.signal;
-    const started=performance.now();
+    const started=task.startedAt ?? performance.now();
+    task.startedAt=started;
     try {
       const response = await host().models.responses({
         clientKeyId:task.clientKeyId,
@@ -893,8 +924,9 @@
       }
       task.imageUrl=url;
       task.responseId=parsed.document?.id || '';
+      task.endedAt=performance.now();
       task.state='succeeded';
-      task.elapsed=((performance.now()-started)/1000).toFixed(1)+'s';
+      task.elapsed=elapsedLabel(task);
       renderTask(task);
       retainImageBudget();
     } catch (cause) {
@@ -904,8 +936,10 @@
         task.state='failed';
         task.error=String(cause?.message || cause || '生成失败').slice(0,600);
       }
+      if (!Number.isFinite(task.endedAt)) task.endedAt=performance.now();
       renderTask(task);
     } finally {
+      if (!Number.isFinite(task.endedAt)) task.endedAt=performance.now();
       activeTasks=Math.max(0,activeTasks-1);
       task.controller=null;
       renderTask(task);
@@ -919,6 +953,8 @@
     while(activeTasks<parallelism) {
       const next=tasks.find((task)=>task.state==='queued');
       if (!next) break;
+      next.startedAt=performance.now();
+      next.endedAt=null;
       next.state='running';
       next.controller=new AbortController();
       activeTasks++;
@@ -948,7 +984,8 @@
     };
     for(let i=0;i<copies;i++) {
       const task={...snapshot,id:++taskCounter,state:'queued',controller:null,node:null,
-        requestId:'',responseId:'',httpStatus:null,elapsed:'',error:'',imageUrl:null};
+        requestId:'',responseId:'',httpStatus:null,elapsed:'',error:'',imageUrl:null,
+        startedAt:null,endedAt:null};
       tasks.push(task);
       createTaskCard(task);
     }
@@ -959,6 +996,7 @@
     closed=true;
     scanEpoch++;
     if(preferenceTimer!==null)clearTimeout(preferenceTimer);
+    if(clockInterval!==null){clearInterval(clockInterval);clockInterval=null;}
     for(const task of tasks) {
       task.controller?.abort();
       if(task.imageUrl) URL.revokeObjectURL(task.imageUrl);

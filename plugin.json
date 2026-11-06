@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.6.0",
-  "description": "Codex Image Bridge: Images 2.6, per-Key image models, concurrent image workbench, persisted selections, visual config builder.",
+  "version": "0.6.1",
+  "description": "Codex Image Bridge: Images 2.6, concurrent image workbench with live per-task elapsed timers, persisted selections, visual config builder.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"

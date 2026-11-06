@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.6.0 (official SDK)
+# CPR Image Bridge v0.6.1 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -123,3 +123,19 @@ GitHub Actions 使用官方 SDK 提交和官方 cpr-plugin packaging CLI，运�
 ### 验收覆盖
 
 Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢复、Key 过滤、6 Luna 不存在时回退 5.6、4K、两批各 2 张的独立并发结果、总取消不会启动后续任务；并用 GitHub Actions 官方 SDK 完成 Cargo 单测、三平台 Release 构建及可安装包验证。此处不宣称已通过真实 OAuth 上游的生产生成验收。
+
+
+## v0.6.1：图片任务实时耗时与账号调度绑定兼容说明
+
+- 每个进入“生成中”的图片任务，从 0.0s 开始显示每 0.1 秒更新的计时；用 performance.now() 单调时钟计时，任务完成/失败/取消时固定耗时并停止跳动。
+- 多个并行任务共享一个 100ms setInterval，计时更新只修改任务状态标签文本，不重新绘制图片和卡片。所有运行任务结束或页面关闭后会清理 Interval。排队时间不计入生成中时长，未开始就取消的任务不显示伪造耗时。
+- 浏览器读屏器不会被 100ms 状态更新持续打扰：任务网格 aria-live=off，只对汇总任务数播报。
+- Edge headless 测试验证 0.0s 起跳、实时秒数推进、完成及单任务取消后耗时冻结和结束计时器；其它队列和模型配置逻辑保持 v0.6.0 行为。
+
+### 与其他账号调度插件共存
+
+官方 CPR runtime 的 PluginRequestPolicyPlan::compile 对所有启用 scheduler 绑定对比 BindingScope::overlaps；若两者有可能匹配同一请求，拒绝启动并报“账号调度绑定作用范围重叠”。这是宿主静态检验，调整执行顺序或失败策略无效。
+
+静态证明互斥需双方的 **Client Key ID**、**Provider** 或 **模型 ID** 范围在同一维度上都明确收窄且完全不相交；账号分组不作为互斥证明（同一 Key 可命中多个分组）。绑定“应用于所有请求”的插件会与任何同条件调度插件重叠。
+
+Image Bridge v0.6.1 不自动修改调度绑定，也不合并第三方调度器。若有独立 cpr-quota-guard 等全局额度保护 scheduler，应通过专用 Client Key 分割范围，并在另一插件中明确排除这些 Key；或将额度保护过滤与图片账号白名单合入同一个 scheduler 后停用旧的调度绑定。合并后仍由 CPR Core 执行租约和负载均衡，并保留 fail-closed 的账号权限限制。

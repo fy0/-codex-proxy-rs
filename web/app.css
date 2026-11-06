@@ -165,3 +165,6 @@ footer {font-size:12px;color:var(--muted);text-align:center;margin:23px 0 0; }
 @media (max-width:530px){.task-grid{grid-template-columns:1fr;}.task-preview{min-height:235px;}}
 
 .task-placeholder[hidden], .task-preview img[hidden], .task-preview-text[hidden], .task-button[hidden], .task-error[hidden], .task-model[hidden] {display:none!important;}
+
+/* 运行中实时小数秒计时不改变行内宽度；状态更新不向读屏器每 100ms 播报。 */
+.task-state { font-variant-numeric: tabular-nums; }
