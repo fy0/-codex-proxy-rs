@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply 1.15.0 native-scoring overlays to a clean Victor-Tau/cpr-jzjc v1.14.0 checkout.
+"""Apply 1.15.1 native-scoring overlays to a clean Victor-Tau/cpr-jzjc v1.14.0 checkout.
 
 Edits happen exclusively on the GitHub Actions runner. This script is deliberately
 strict: changed upstream source must fail rather than silently ship an invalid package.
@@ -32,7 +32,7 @@ for file in ("engine.rs", "native_score.rs"):
 edit("backend/src/main.rs", lambda s: replace_once(s, "mod engine;\n", "mod engine;\nmod native_score;\n"))
 
 def cargo(s):
-    s = replace_once(s, 'version = "1.14.0"', 'version = "1.15.0"')
+    s = replace_once(s, 'version = "1.14.0"', 'version = "1.15.1"')
     s = replace_once(s, 'rev = "e0b7a841ca074f17e11dad73f39a159c75cb2fb1"',
                      'rev = "7a3c8d33ecbdacfe36f0127c1056cce24a29172c"')
     return s
@@ -110,8 +110,8 @@ manifest = json.loads(p.read_text(encoding="utf-8"))
 assert manifest["version"] == "1.14.0"
 assert manifest["engines"]["codex-proxy-rs"] == ">=3.38.1, <3.39.0"
 assert manifest["resources"]["runtime/runtime.tar.gz"] == "application/gzip"
-manifest["version"] = "1.15.0"
-manifest["engines"]["codex-proxy-rs"] = ">=3.40.0, <3.41.0"
+manifest["version"] = "1.15.1"
+manifest["engines"]["codex-proxy-rs"] = ">=0.0.0"
 manifest["description"] = "原生 Rust ModelTrace 账户指纹检测、定时检查和指纹库在线更新，无 Python/NumPy 运行时"
 manifest["resources"].pop("runtime/runtime.tar.gz")
 # All bundled runtime library notices go away. Keep the upstream project notice.
@@ -122,4 +122,4 @@ p.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding
 # numerical reference, but it is no longer a package resource.
 assert not any(key.startswith("runtime/") for key in manifest["resources"])
 assert (repo / "vendor/modeltrace/data/unified_bank.json").is_file()
-print("JZJC 1.15.0 native scorer prepared; no Python runtime packaged")
+print("JZJC 1.15.1 native scorer prepared; no Python runtime packaged")

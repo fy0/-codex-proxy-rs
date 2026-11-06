@@ -1,4 +1,4 @@
-name: Build lightweight JZJC for CPR 3.40.0 (Linux ARM64)
+name: Build both CPR plugins (Linux ARM64 AMD64, no host version ceiling)
 
 on:
   push:
@@ -6,147 +6,298 @@ on:
     paths:
       - '.github/workflows/build-cpr-arm64.yml'
       - '.github/jzjc-native/**'
+      - '.github/dualarch/**'
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
-    name: Native Rust scorer / aarch64 / CPR 3.40.0
-    runs-on: ubuntu-22.04-arm
-    timeout-minutes: 120
+    name: ${{ matrix.plugin }} / ${{ matrix.arch }} / protocol 7
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plugin: jzjc
+            arch: arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            node: '24'
+          - plugin: jzjc
+            arch: amd64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            node: '24'
+          - plugin: quota
+            arch: arm64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            node: '26'
+          - plugin: quota
+            arch: amd64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            node: '26'
     env:
-      TARGET: aarch64-unknown-linux-gnu
-      CARGO_BUILD_JOBS: 4
+      TARGET: ${{ matrix.target }}
+      PLUGIN: ${{ matrix.plugin }}
+      CARGO_BUILD_JOBS: '4'
       RUSTFLAGS: -C debuginfo=0
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
-      - name: Confirm native ARM64 build environment
+
+      - name: Validate native runner, bootstrap compiler deps
         shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = aarch64
+          uname -m
+          case "$TARGET" in
+            aarch64-*) test "$(uname -m)" = 'aarch64';;
+            x86_64-*)  test "$(uname -m)" = 'x86_64';;
+            *) exit 2;;
+          esac
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential pkg-config libssl-dev file binutils
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.99.1'
-          targets: aarch64-unknown-linux-gnu
+          targets: ${{ matrix.target }}
           components: rustfmt
+
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
-      - name: Checkout exact JZJC upstream source and apply versioned native overrides
+          node-version: ${{ matrix.node }}
+
+      - name: Checkout pinned source and apply version-unbounded manifest
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v1.14.0 https://github.com/Victor-Tau/cpr-jzjc.git jzjc
-          test "$(git -C jzjc rev-parse HEAD)" = a8a490fcfc2715ba59435d679907a8ee0e0941f9
-          python .github/jzjc-native/apply.py jzjc
-          git -C jzjc diff --check
-          echo "CPR 3.40.0 native Rust overrides applied"
-      - name: Build JZJC management UI
+          if [ "$PLUGIN" = "jzjc" ]; then
+            git clone --depth 1 --branch v1.14.0 https://github.com/Victor-Tau/cpr-jzjc.git jzjc
+            test "$(git -C jzjc rev-parse HEAD)" = a8a490fcfc2715ba59435d679907a8ee0e0941f9
+            python .github/jzjc-native/apply.py jzjc
+            test "$(python -c 'import json; print(json.load(open("jzjc/plugin.json"))["engines"]["codex-proxy-rs"])')" = '>=0.0.0'
+            git -C jzjc diff --check
+          else
+            git clone --depth 1 --branch v0.2.3 https://github.com/Mr-xiongyq/cpr-quota-guard.git quota
+            test "$(git -C quota rev-parse HEAD)" = 6df19fb028f3c3698462ce7ee249de9eccb9b3e7
+            python .github/dualarch/prepare-quota.py quota
+            test "$(python -c 'import json; print(json.load(open("quota/plugin.json"))["engines"]["codex-proxy-rs"])')" = '>=0.0.0'
+            git -C quota diff --check
+          fi
+
+      - name: Build frontend of ${{ matrix.plugin }}
         shell: bash
         run: |
           set -euo pipefail
-          npm install -g pnpm@10.14.0
-          pnpm --dir jzjc/frontend install --frozen-lockfile
-          pnpm --dir jzjc/frontend build
-      - name: Create Python/NumPy parity fixture (GitHub CI ONLY, not shipped)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check --only-binary=:all: numpy==2.4.3
-          python .github/jzjc-native/generate-fixture.py jzjc "$GITHUB_WORKSPACE/parity.json"
-          echo "CPR_PARITY_FIXTURE=$GITHUB_WORKSPACE/parity.json" >> "$GITHUB_ENV"
-      - name: Check native Rust formatting, numerical parity and existing tests
+          if [ "$PLUGIN" = "jzjc" ]; then
+            npm install --global pnpm@10.14.0
+          else
+            npm install --global pnpm@12.6.0
+          fi
+          pnpm --dir "$PLUGIN/frontend" install --frozen-lockfile
+          pnpm --dir "$PLUGIN/frontend" build
+
+      - name: Run unit tests; compare native JZJC with original Python reference (CI only)
         shell: bash
         run: |
           set -euo pipefail
           (
-            cargo +1.99.1 fmt --manifest-path jzjc/backend/Cargo.toml --all
-            cargo +1.99.1 fmt --manifest-path jzjc/backend/Cargo.toml --all -- --check
-            cargo +1.99.1 test --manifest-path jzjc/backend/Cargo.toml
+            if [ "$PLUGIN" = "jzjc" ]; then
+              python -m pip install --disable-pip-version-check --only-binary=:all: numpy==2.4.3
+              python .github/jzjc-native/generate-fixture.py jzjc "$GITHUB_WORKSPACE/parity.json"
+              export CPR_PARITY_FIXTURE="$GITHUB_WORKSPACE/parity.json"
+              cargo +1.99.1 fmt --manifest-path jzjc/backend/Cargo.toml --all
+              cargo +1.99.1 fmt --manifest-path jzjc/backend/Cargo.toml --all -- --check
+              cargo +1.99.1 test --manifest-path jzjc/backend/Cargo.toml
+            else
+              cargo +1.99.1 fmt --manifest-path quota/Cargo.toml --all -- --check
+              cargo +1.99.1 test --manifest-path quota/Cargo.toml --locked
+            fi
           ) 2>&1 | tee "$GITHUB_WORKSPACE/native-tests.log"
-      - name: Build release binary on native Linux ARM64
+
+      - name: Compile ${{ matrix.plugin }} on the target Linux CPU
         shell: bash
         run: |
           set -euo pipefail
           (
-            cargo +1.99.1 build --manifest-path jzjc/backend/Cargo.toml \
-              --release --locked --target "$TARGET"
-            file "jzjc/backend/target/$TARGET/release/modeltrace-health"
-            readelf -h "jzjc/backend/target/$TARGET/release/modeltrace-health" | grep AArch64
+            if [ "$PLUGIN" = "jzjc" ]; then
+              manifest='jzjc/backend/Cargo.toml'
+              binary="jzjc/backend/target/$TARGET/release/modeltrace-health"
+            else
+              manifest='quota/Cargo.toml'
+              binary="quota/target/$TARGET/release/cpr-quota-guard"
+            fi
+            cargo +1.99.1 build --manifest-path "$manifest" --locked --release --target "$TARGET"
+            file "$binary"
+            readelf -h "$binary" | grep -E 'Class:|Machine:'
           ) 2>&1 | tee "$GITHUB_WORKSPACE/native-build.log"
-      - name: Build matching CPR 3.40.0 plugin packaging CLI
+
+      - name: Build matching plugin packaging CLI (GitHub runner only)
         shell: bash
         run: |
           set -euo pipefail
-          cargo +1.99.1 install --locked \
-            --git https://github.com/zyycn/codex-proxy-rs.git --tag v3.40.0 \
-            codex-proxy-plugin-cli --root "$RUNNER_TEMP/cpr340-cli"
-      - name: Package native ARM64 plugin without Python runtime resource
+          if [ "$PLUGIN" = "quota" ]; then
+            cargo +1.99.1 install --locked \
+              --git https://github.com/zyycn/codex-proxy-rs.git \
+              --rev 12771aca8719ed4b23b0362b23d8d81f228190ca \
+              codex-proxy-plugin-cli --root "$RUNNER_TEMP/cpr-cli"
+          else
+            cargo +1.99.1 install --locked \
+              --git https://github.com/zyycn/codex-proxy-rs.git \
+              --tag v3.40.0 \
+              codex-proxy-plugin-cli --root "$RUNNER_TEMP/cpr-cli"
+          fi
+          "$RUNNER_TEMP/cpr-cli/bin/cpr-plugin" --version
+
+      - name: Package new 0.2.4 or 1.15.1 Linux installation artifact
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/dist"
+          mkdir -p dist
           (
-            cd jzjc
-            "$RUNNER_TEMP/cpr340-cli/bin/cpr-plugin" package --manifest plugin.json \
-              --binary "backend/target/$TARGET/release/modeltrace-health" \
+            if [ "$PLUGIN" = "quota" ]; then
+              cd quota
+              binary="target/$TARGET/release/cpr-quota-guard"
+            else
+              cd jzjc
+              binary="backend/target/$TARGET/release/modeltrace-health"
+            fi
+            "$RUNNER_TEMP/cpr-cli/bin/cpr-plugin" package \
+              --manifest plugin.json --binary "$binary" \
               --target "$TARGET" --resource-map web=frontend/dist \
               --output-dir "$GITHUB_WORKSPACE/dist"
             ls -lh "$GITHUB_WORKSPACE/dist"
           ) 2>&1 | tee "$GITHUB_WORKSPACE/native-package.log"
-      - name: Verify 3.40 manifest/ELF/size and mock-host detection lifecycle
+
+      - name: Verify package hashes, ELF, manifest 2/protocol 7, version range and runtime
         shell: bash
         run: |
           set -euo pipefail
           (
-            python .github/jzjc-native/verify-native.py \
-              "$GITHUB_WORKSPACE/dist/personal.modeltrace-health-1.15.0-$TARGET.tar.gz" \
-              "$GITHUB_WORKSPACE/jzjc"
+            if [ "$PLUGIN" = "quota" ]; then
+              python .github/dualarch/verify-quota.py \
+                "$GITHUB_WORKSPACE/dist/mr-xiongyq.quota-guard-0.2.4-$TARGET.tar.gz" "$TARGET"
+            else
+              python .github/jzjc-native/verify-native.py \
+                "$GITHUB_WORKSPACE/dist/personal.modeltrace-health-1.15.1-$TARGET.tar.gz" \
+                "$GITHUB_WORKSPACE/jzjc" "$TARGET"
+            fi
           ) 2>&1 | tee "$GITHUB_WORKSPACE/native-verify.log"
-      - name: Publish failure logs for troubleshooting
+
+      - name: Preserve failing compilation/verification logs
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          files=()
-          for file in native-tests.log native-build.log native-package.log native-verify.log; do
-            if [ -f "$file" ]; then files+=("$file"); fi
-          done
-          if [ "${#files[@]}" -gt 0 ]; then
-            gh release create "cpr-jzjc-native-debug-${GITHUB_SHA:0:12}" "${files[@]}" \
-              --title "JZJC 3.40.0 native ARM64 build diagnostics only" \
-              --target "$GITHUB_SHA" \
-              --notes "Diagnostic logs, not installable plugins" --prerelease
-          fi
-      - name: Upload validated lightweight installation package
         uses: actions/upload-artifact@v4
         with:
-          name: cpr-jzjc-native-linux-arm64-340
+          name: cpr-dualarch-error-${{ matrix.plugin }}-${{ matrix.arch }}
+          path: |
+            native-tests.log
+            native-build.log
+            native-package.log
+            native-verify.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload successfully verified new package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpr-unrestricted-${{ matrix.plugin }}-${{ matrix.arch }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
           retention-days: 30
           if-no-files-found: error
-      - name: Publish final ARM64 installation archive
+
+  release:
+    name: Release both plugins with two Linux architectures
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cpr-unrestricted-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify exactly four independent plugins, names and digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          dist=Path('dist')
+          names=[
+              f'personal.modeltrace-health-1.15.1-{arch}.tar.gz'
+              for arch in ('aarch64-unknown-linux-gnu','x86_64-unknown-linux-gnu')
+          ]+[
+              f'mr-xiongyq.quota-guard-0.2.4-{arch}.tar.gz'
+              for arch in ('aarch64-unknown-linux-gnu','x86_64-unknown-linux-gnu')
+          ]
+          assert sorted(x.name for x in dist.glob('*.tar.gz'))==sorted(names)
+          for name in names:
+              package=dist/name
+              actual=hashlib.sha256(package.read_bytes()).hexdigest()
+              expected=package.with_name(name+'.sha256').read_text().split()[0]
+              assert actual==expected,name
+              print(name,package.stat().st_size,actual)
+          PY
+
+      - name: Create JZJC lightweight Linux ARM64/AMD64 release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag='cpr-jzjc-native-arm64-v1.15.0-cpr3.40.0'
-          printf 'JZJC v1.15.0 native Rust scorer for Codex Proxy RS 3.40.0.\nSource: Victor-Tau/cpr-jzjc v1.14.0 + audited Rust scoring overlays.\nPython and NumPy are used only for CI numerical parity verification; NOT included in plugin.\nAArch64/Linux, manifestVersion 2, protocolVersion 7.\n' > release-notes.txt
-          gh release create "$tag" dist/* \
-            --title 'JZJC v1.15.0 native ARM64 / CPR 3.40.0' \
-            --notes-file release-notes.txt \
-            --target "$GITHUB_SHA" --prerelease
+          tag='cpr-jzjc-native-v1.15.1-unrestricted-linux'
+          cat > jzjc-notes.txt <<'EOF'
+          JZJC ModelTrace health v1.15.1, Linux ARM64 + AMD64.
+          Pure Rust scorer, no Python/NumPy in the installation archive.
+          Native scoring was compared to the upstream Python algorithm in CI.
+          Plugin engine version range >=0.0.0 (no upper bound).
+          Manifest v2, protocol v7: actual host/plugin protocol compatibility still applies.
+          Verified with the CPR 3.40.0 plugin SDK and mock-host integration.
+          Source: Victor-Tau/cpr-jzjc v1.14.0 plus feature overlays.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/personal.modeltrace-health-* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/personal.modeltrace-health-* \
+              --repo "$GITHUB_REPOSITORY" --title 'JZJC v1.15.1 unrestricted Linux ARM64/AMD64' \
+              --notes-file jzjc-notes.txt --target "$GITHUB_SHA" --prerelease
+          fi
+
+      - name: Create quota guard Linux ARM64/AMD64 release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='cpr-quota-guard-v0.2.4-unrestricted-linux'
+          cat > quota-notes.txt <<'EOF'
+          Quota guard v0.2.4, Linux ARM64 + AMD64.
+          Original business logic and pinned SDK are unchanged from v0.2.3.
+          Plugin engine version range >=0.0.0 (no upper bound).
+          Manifest v2, protocol v7: actual host/plugin protocol compatibility still applies.
+          Source: Mr-xiongyq/cpr-quota-guard v0.2.3 plus manifest/version update.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/mr-xiongyq.quota-guard-* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/mr-xiongyq.quota-guard-* \
+              --repo "$GITHUB_REPOSITORY" --title 'Quota guard v0.2.4 unrestricted Linux ARM64/AMD64' \
+              --notes-file quota-notes.txt --target "$GITHUB_SHA" --prerelease
+          fi
