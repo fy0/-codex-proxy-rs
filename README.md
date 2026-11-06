@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.6.1 (official SDK)
+# CPR Image Bridge v0.6.2 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -139,3 +139,9 @@ Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢
 静态证明互斥需双方的 **Client Key ID**、**Provider** 或 **模型 ID** 范围在同一维度上都明确收窄且完全不相交；账号分组不作为互斥证明（同一 Key 可命中多个分组）。绑定“应用于所有请求”的插件会与任何同条件调度插件重叠。
 
 Image Bridge v0.6.1 不自动修改调度绑定，也不合并第三方调度器。若有独立 cpr-quota-guard 等全局额度保护 scheduler，应通过专用 Client Key 分割范围，并在另一插件中明确排除这些 Key；或将额度保护过滤与图片账号白名单合入同一个 scheduler 后停用旧的调度绑定。合并后仍由 CPR Core 执行租约和负载均衡，并保留 fail-closed 的账号权限限制。
+
+
+## v0.6.2 CSP 图片预览修复
+
+CPR 官方管理插件 iframe 的 CSP 允许 img-src data:，但不允许 img-src blob:。
+因此 v0.6.0 / v0.6.1 将大型 Base64 图片转为 blob:null/... URL 的处理，会被浏览器拦截，导致画图成功但预览为空。v0.6.2 恢复使用 data:image/png;base64, 前缀，不再调用 URL.createObjectURL。保留 160 MiB Base64 大小上限、PNG 文件头检查、多张图片的清理与独立任务状态。测试将模拟与生产相同的 img-src data: CSP。

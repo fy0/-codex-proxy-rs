@@ -661,27 +661,23 @@
     }
   }
   function requireImage(base64) {
-    // 4K PNG 图片可能远超早期的 32 MiB base64 限制。分片解码为 Blob URL，
-    // 不在 DOM 中保留大型 data: URL；清除卡片/关闭页面会 revoke。
+    // 官方 CPR 管理页沙箱采用 CSP img-src data:，不允许 blob: URL。
+    // 保留 Base64 串并直接生成 data:image/png URL；不再创建 Blob URL。
+    // 对 4K 图像设置显式上限，避免无界占用浏览器内存。
     if (typeof base64 !== 'string' || !base64.length || base64.length > 160 * 1024 * 1024) {
       throw new Error('没有生成图片，或结果超过 160 MiB 的安全展示上限');
     }
-    const prefix = atob(base64.slice(0,32));
+    const prefix = atob(base64.slice(0, 32));
     if (![137,80,78,71,13,10,26,10].every((byte,index)=>prefix.charCodeAt(index)===byte)) {
       throw new Error('上游没有返回合法的 PNG 图像数据');
     }
-    const chunks=[];
-    // 长度是 4 的倍数；分片 atob 可避免一次解码多十兆像素图片的内存尖峰。
-    for (let i=0;i<base64.length;i+=262144) {
-      const decoded=atob(base64.slice(i,i+262144));
-      const bytes=new Uint8Array(decoded.length);
-      for (let j=0;j<decoded.length;j++) bytes[j]=decoded.charCodeAt(j);
-      chunks.push(bytes);
-    }
-    const blob=new Blob(chunks,{type:'image/png'});
-    if (blob.size>120*1024*1024) throw new Error('单张图片超过 120 MiB 显示上限');
-    return URL.createObjectURL(blob);
+    return 'data:image/png;base64,' + base64;
   }
+  function releaseImageUrl(url) {
+    // 兼容以前可能存在的 blob URL；data URL 无需 revoke。
+    if (typeof url === 'string' && url.startsWith('blob:')) releaseImageUrl(url);
+  }
+
   function imageItem(event) {
     const item = event && event.item;
     if (item && item.type === 'image_generation_call' && typeof item.result === 'string') return item;
@@ -831,7 +827,7 @@
   }
   function forgetTask(task) {
     if (task.imageUrl) {
-      URL.revokeObjectURL(task.imageUrl);
+      releaseImageUrl(task.imageUrl);
       task.imageUrl = null;
     }
     task.node?.card.remove();
@@ -919,7 +915,7 @@
       }
       const url=requireImage(parsed.image.result);
       if (signal.aborted || task.state==='canceled') {
-        URL.revokeObjectURL(url);
+        releaseImageUrl(url);
         return;
       }
       task.imageUrl=url;
@@ -999,7 +995,7 @@
     if(clockInterval!==null){clearInterval(clockInterval);clockInterval=null;}
     for(const task of tasks) {
       task.controller?.abort();
-      if(task.imageUrl) URL.revokeObjectURL(task.imageUrl);
+      if(task.imageUrl) releaseImageUrl(task.imageUrl);
       task.imageUrl=null;
     }
   }
