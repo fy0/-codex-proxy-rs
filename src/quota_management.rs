@@ -43,18 +43,20 @@ async fn read_assessment(
     rule: &AccountRule,
     max_age: u64,
 ) -> Result<(Assessment, Option<QuotaDetails>), PluginFault> {
-    match host
-        .quota_details(QuotaFactsQuery {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        quota_guard::limit_host_call(host.quota_details(QuotaFactsQuery {
             account_id: rule.account_id.clone(),
-        })
-        .await
+        })),
+    )
+    .await
     {
-        Ok(quota) => Ok((
+        Ok(Ok(quota)) => Ok((
             quota_guard::assess(rule, &quota, now_ms()?, max_age),
             Some(quota),
         )),
-        Err(fault) if fault.code == ErrorCode::Cancelled => Err(fault),
-        Err(_) => Ok((quota_guard::unavailable(rule), None)),
+        Ok(Err(fault)) if fault.code == ErrorCode::Cancelled => Err(fault),
+        _ => Ok((quota_guard::unavailable(rule), None)),
     }
 }
 
@@ -96,7 +98,7 @@ pub(crate) fn registration() -> ManagementRegistration {
         pages: vec![ManagementPage {
             id: "quota-guard-dashboard".into(),
             title: "账号额度保护".into(),
-            description: Some("为每个账号预留 5 小时与周额度".into()),
+            description: Some("账号 5 小时、每周与每日 USD 费用保护".into()),
             entry: "web/quota/index.html".into(),
             icon: None,
         }],
@@ -201,6 +203,7 @@ struct AccountView {
     enabled: Option<bool>,
     assessment: Assessment,
     quota: Option<QuotaView>,
+    daily_usage: quota_guard::DailyUsage,
 }
 
 #[derive(Serialize)]
@@ -252,6 +255,7 @@ async fn overview(
     artifact_sha256: &str,
 ) -> Result<Value, ManagementError> {
     let instance = own_instance(call, original, artifact_sha256).await?;
+    quota_guard::refresh_daily_overview(&call.host, quota_config).await?;
     let wanted: HashSet<_> = quota_config
         .accounts
         .iter()
@@ -287,7 +291,9 @@ async fn overview(
             let facts = Arc::clone(&facts);
             let host = host.clone();
             async move {
-                let (assessment, quota) = read_assessment(&host, &rule, max_age).await?;
+                let (mut assessment, quota) = read_assessment(&host, &rule, max_age).await?;
+                let daily_usage = quota_guard::daily_usage(&rule, now_ms()?, max_age);
+                quota_guard::add_daily(&mut assessment, &daily_usage);
                 let fact = facts.get(&rule.account_id);
                 Ok::<_, PluginFault>(AccountView {
                     account_id: rule.account_id.clone(),
@@ -296,6 +302,7 @@ async fn overview(
                     enabled: fact.map(|value| value.enabled),
                     assessment,
                     quota: quota.and_then(|value| quota_view(&rule.account_id, value)),
+                    daily_usage,
                 })
             }
         })
@@ -399,6 +406,21 @@ struct SaveConfiguration {
     configuration: Value,
 }
 
+fn merge_configuration(original: &Value, quota: &QuotaGuardConfig) -> Result<Value, String> {
+    let mut next = original.clone();
+    let object = next.as_object_mut().ok_or("插件配置格式不合法")?;
+    object.insert(
+        "quotaGuard".into(),
+        serde_json::to_value(&quota.accounts).map_err(|_| "额度保护配置无法编码")?,
+    );
+    object.insert(
+        "maxObservationAgeSeconds".into(),
+        json!(quota.max_observation_age_seconds),
+    );
+    Config::from_configuration(&next)?;
+    Ok(next)
+}
+
 async fn save_configuration(
     call: &TypedCall<ManagementRequest>,
     original: &Value,
@@ -407,17 +429,7 @@ async fn save_configuration(
     let input: SaveConfiguration =
         serde_json::from_slice(&call.payload).map_err(|_| invalid("配置保存请求格式不合法"))?;
     let next_quota = QuotaGuardConfig::from_value(input.configuration).map_err(invalid)?;
-    let mut next_config = original.clone();
-    let object = next_config.as_object_mut().ok_or_else(unavailable)?;
-    object.insert(
-        "quotaGuard".into(),
-        serde_json::to_value(&next_quota.accounts).map_err(|_| unavailable())?,
-    );
-    object.insert(
-        "maxObservationAgeSeconds".into(),
-        serde_json::json!(next_quota.max_observation_age_seconds),
-    );
-    Config::from_configuration(&next_config).map_err(invalid)?;
+    let next_config = merge_configuration(original, &next_quota).map_err(invalid)?;
     let instance = own_instance(call, original, artifact_sha256).await?;
     if input.expected_revision != instance.revision {
         return Err(conflict());
@@ -485,4 +497,61 @@ async fn admin_request(
         return Err(unavailable());
     }
     result.get("data").cloned().ok_or_else(unavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_daily_rules_preserves_image_configuration_and_old_window_rules() {
+        let original = json!({
+            "driverModel":"gpt-5.6-luna","bridgeMode":"responses","timeoutMs":480000,
+            "imageAccountIds":["images"],"imageGroupIds":["group"],"imageModels":["gpt-image-2"],
+            "imageStorageDir":"/tmp/previous-images","backgroundConcurrency":2,
+            "concurrencyPerAccount":8,
+            "quotaGuard":[{"accountId":"guard","fiveHourLimitPercent":80,"weeklyLimitPercent":90}],
+            "maxObservationAgeSeconds":300
+        });
+        let quota = QuotaGuardConfig::from_value(json!({
+            "accounts":[{"accountId":"guard","fiveHourLimitPercent":80,
+                "weeklyLimitPercent":90,"dailyLimitUsd":"12.345678901234"}],
+            "maxObservationAgeSeconds":120
+        }))
+        .unwrap();
+        let merged = merge_configuration(&original, &quota).unwrap();
+        for (key, value) in original.as_object().unwrap() {
+            if key != "quotaGuard" && key != "maxObservationAgeSeconds" {
+                assert_eq!(&merged[key], value, "{key}");
+            }
+        }
+        assert_eq!(merged["quotaGuard"][0]["dailyLimitUsd"], "12.345678901234");
+        assert_eq!(
+            merged["quotaGuard"][0]["fiveHourLimitPercent"].as_f64(),
+            Some(80.0)
+        );
+        assert_eq!(
+            merged["quotaGuard"][0]["weeklyLimitPercent"].as_f64(),
+            Some(90.0)
+        );
+        assert_eq!(merged["maxObservationAgeSeconds"], 120);
+        assert!(original["quotaGuard"][0].get("dailyLimitUsd").is_none());
+    }
+
+    #[test]
+    fn unknown_daily_usage_is_included_in_the_account_assessment() {
+        let rule: AccountRule = serde_json::from_value(json!({
+            "accountId":"daily-only","fiveHourLimitPercent":null,
+            "weeklyLimitPercent":null,"dailyLimitUsd":"1"
+        }))
+        .unwrap();
+        let mut assessment = quota_guard::unavailable(&rule);
+        assert!(!assessment.excluded);
+        let usage = quota_guard::daily_usage(&rule, 1_000, 300);
+        quota_guard::add_daily(&mut assessment, &usage);
+        let value = serde_json::to_value(assessment).unwrap();
+        assert_eq!(value["excluded"], true);
+        assert_eq!(value["reasons"][0]["code"], "daily_usage_unknown");
+        assert_eq!(value["reasons"][0]["windowSeconds"], 86_400);
+    }
 }

@@ -7,7 +7,7 @@ export function accountName(account?: AccountInfo) {
 export function cloneConfiguration(configuration: Configuration): Configuration {
   return {
     maxObservationAgeSeconds: configuration.maxObservationAgeSeconds,
-    accounts: configuration.accounts.map(rule => ({ ...rule })),
+    accounts: configuration.accounts.map(rule => ({ ...rule, dailyLimitUsd: rule.dailyLimitUsd ?? null })),
   }
 }
 
@@ -19,7 +19,20 @@ export function configurationKey(configuration: Configuration) {
 }
 
 export function isProtected(rule: AccountRule) {
-  return rule.fiveHourLimitPercent !== null || rule.weeklyLimitPercent !== null
+  return rule.fiveHourLimitPercent !== null || rule.weeklyLimitPercent !== null || rule.dailyLimitUsd != null
+}
+
+export function isValidUsd(value: string) {
+  return /^\d{1,18}(?:\.\d{1,12})?$/.test(value)
+}
+
+export function formatUsd(value: string | null | undefined) {
+  if (value == null || !/^\d+(?:\.\d+)?$/.test(value))
+    return '未知'
+  // 金额展示保留十进制字符串，避免大数和小额被浮点转换舍入
+  const [integer, fractional = ''] = value.split('.')
+  const grouped = integer.replace(/^0+(?=\d)/, '').replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return `$${grouped}.${fractional.replace(/0+$/, '').padEnd(2, '0')}`
 }
 
 export function formatDate(value: number | null | undefined) {

@@ -2,7 +2,7 @@ import type { AccountInfo, AccountRule, Configuration, Overview } from '../api/m
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { getAccounts, getOverview, saveConfiguration } from '../api/modules/quota'
 import { RequestError } from '../api/request'
-import { cloneConfiguration, configurationKey } from '../presenter'
+import { cloneConfiguration, configurationKey, isValidUsd } from '../presenter'
 
 export function useQuotaGuard() {
   const overview = shallowRef<Overview>()
@@ -20,6 +20,7 @@ export function useQuotaGuard() {
   const candidatesError = ref('')
   const nextCursor = ref<string | null>(null)
   const dirty = computed(() => baseline.value !== undefined && configurationKey(draft.value) !== configurationKey(baseline.value))
+  const invalidDailyLimits = computed(() => draft.value.accounts.some(rule => rule.dailyLimitUsd !== null && !isValidUsd(rule.dailyLimitUsd)))
   let disposed = false
   let timer: ReturnType<typeof setInterval> | undefined
 
@@ -34,6 +35,8 @@ export function useQuotaGuard() {
       const result = await getOverview()
       if (disposed)
         return
+      // 旧版响应省略日限额时按关闭处理，避免刷新后出现虚假的未保存修改
+      result.configuration = cloneConfiguration(result.configuration)
       overview.value = result
       // 刷新仅更新观测，不覆盖请求期间产生的草稿，也不静默接受新的保存版本
       if (!wasDirty && configurationKey(draft.value) === startedDraft) {
@@ -93,7 +96,12 @@ export function useQuotaGuard() {
   function addAccount(account: AccountInfo) {
     if (draft.value.accounts.some(rule => rule.accountId === account.accountId) || draft.value.accounts.length >= 1000)
       return
-    draft.value.accounts.push({ accountId: account.accountId, fiveHourLimitPercent: 95, weeklyLimitPercent: 95 })
+    draft.value.accounts.push({
+      accountId: account.accountId,
+      fiveHourLimitPercent: 95,
+      weeklyLimitPercent: 95,
+      dailyLimitUsd: null,
+    })
   }
 
   function updateRule(rule: AccountRule) {
@@ -117,7 +125,7 @@ export function useQuotaGuard() {
   }
 
   async function save() {
-    if (!dirty.value || baselineRevision.value === undefined || saving.value || conflict.value || saved.value)
+    if (!dirty.value || baselineRevision.value === undefined || saving.value || conflict.value || saved.value || invalidDailyLimits.value)
       return
     saving.value = true
     error.value = ''
@@ -165,6 +173,7 @@ export function useQuotaGuard() {
     error,
     conflict,
     dirty,
+    invalidDailyLimits,
     candidates,
     candidatesLoaded,
     candidatesLoading,

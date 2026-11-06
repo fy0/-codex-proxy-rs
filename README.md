@@ -1,6 +1,32 @@
-# CPR Image Bridge v0.7.4 (official SDK)
+# CPR Image Bridge v0.7.5 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
+
+## v0.7.5：后台执行合同、账号日费用与管理界面修复
+
+后台画图任务在发送前选择 **Responses `image_generation`** 路径，顶层模型使用本次选择的对话驱动模型，图片模型精确放在 `tools[0].model`。固定官方宿主的 `host.model` 原生 `GenerateImage` 路径会构造带 `upstream_model` 的普通模型候选，原生 Images Provider 会在发送前拒绝；修改尺寸或压缩参数不能修复这个路由矛盾。外部原生 Images HTTP 仍使用宿主正确的 Provider endpoint 路由。插件不在失败后自动重发图片请求。
+
+本版保存每个任务选择的驱动模型，并在提交和执行时检查同一账号的权限交集；Core 仍执行 Key 分组的图片权限检查。后台请求强制图片工具、使用流式 Responses、关闭并行工具调用，不强制驱动模型提供推理功能。事件解析支持 JSON、WebSocket 与原始 SSE，并等待完整完成事件后才校验图片格式、尺寸及写盘。
+
+任务按完成顺序立即持久化，额度维护与生图分支并行推进；生图尚未结束时，在同一维护父调用内每轮有界额度刷新结束后等待 15 秒继续刷新，防止长生图令日费用观测自然过期。界面区分“待后台唤醒”和“等待后台分派”，等待时间与后台处理时间分别显示。固定宿主在每次维护结束后约 30 秒再次唤醒，尚无公开插件唤醒 API；本版不把这个宿主调度空窗表述为账号队列满或全时立即执行。每轮限制 16 个不同 Client Key，避免超出宿主父调用身份缓存的合同；本版后台总并发上限为 16，仍受每账号配置和 Core 租约约束，并为额度维护、状态与管理回调保留余量。
+
+诊断增加插件版本、SDK 本地／宿主远端错误来源，以及严格白名单的错误原因。读取回调输入错误与 Core／Provider 拒绝分开记录，原始错误正文、完整 details、提示词、账号和凭据不写入诊断。
+
+### 账号每日 USD 费用保护
+
+`quotaGuard[]` 规则可增加 `dailyLimitUsd: "20"`；省略或 `null` 表示关闭，`"0"` 表示立即停止为该账号分配新请求。它覆盖该账号的**全部 CPR 请求**，不限制为图片或某个 Client Key。
+
+金额来自宿主 `usage.records.list` 持久账本，按请求开始时间归属 UTC 自然日；跨午夜完成的请求仍计入开始那天。每天 UTC 00:00 换日。限额输入使用精确十进制字符串（最多 18 位整数、12 位小数），账本成本精确保留最多 18 位小数，不使用浮点累计。
+
+达到费用阈值后 Guard 排除账号。冷缓存、过期、完整分页失败、币种异常或已结束请求费用未知时也保持阻止，界面显示未知或过期，不把未知费用显示成零。重启后从宿主账本重建，不能通过重启清零。每次读取最多 100 页、每页 200 条，单账号 5 秒；维护批次最多 20 个账号、4 并发、8 秒预算。超过预算会显示未知并停止该账号分配。
+
+这是已记录费用的**阈值保护**，不是原子预占预算：在途请求与记账延迟可能使最终金额超过阈值。在途数量单独显示。CPR 记录的 USD 成本与 OAuth 套餐的官方额度百分比是不同的计量口径，五小时／每周保护继续按宿主的原生额度事实运行。
+
+### 额度界面与验证
+
+额度管理页使用完整的浅色／深色样式默认值，并优先继承宿主主题变量；缺少主题注入时仍有卡片、输入、开关、进度条和按钮。保留搜索、账号筛选、刷新、撤销、版本冲突与精确保存。保存仅合并 Guard 配置，保留原有图片模型、账号白名单、驱动模型、并发和存储目录。
+
+CI 除插件 SDK/RPC 回归外，还在精确固定的官方源码中运行真实 Provider / 路由 / HTTP SSE 合同测试；只有两组测试及三平台构建均成功才发布安装包。浏览器测试使用实际打包资源与沙箱，账号和费用为测试数据。以上仍不替代真实 CPR 实例中的上游生图和实际额度调度验收。
 
 ## 功能
 
@@ -8,7 +34,7 @@
 - 兼容旧模型：支持用 Responses image_generation 工具桥接后返回 Images API 的 b64_json。
 - 指定账号和分组：分别配置 imageAccountIds、imageGroupIds，两者取并集，仅在当前 Client Key 真正允许的候选中调度。
 - 动态模型目录：使用官方 host.verify_client、host.check_access、host.data.accounts.list 做 Key、启用账号、分组及模型权限交集，保留原有对话模型并增补可调用的图片模型。
-- 插件页面“画图测试”：选择 Key、对话主控模型、图片模型、尺寸和画质；六款预置提示词可编辑，显示 PNG、取消生成、下载图片、错误信息和请求 ID。页面直接使用宿主注入的 models.responses 安全桥，不获取密钥明文。
+- 插件页面“画图测试”：选择 Key、对话主控模型、图片模型、尺寸和画质；六款预置提示词可编辑，支持后台任务、预览、下载、取消、耗时和结构化错误信息。页面通过管理桥提交任务，只使用 Key ID，不获取密钥明文。
 
 ### 为什么没有为独立 Images 注册 model_catalog v2 AdaptedModel
 
@@ -21,7 +47,7 @@
 | 参数 | 默认 | 作用 |
 | --- | --- | --- |
 | driverModel | gpt-5.6-luna | Responses 桥接和管理测试页的对话主控模型 |
-| bridgeMode | auto | auto：优先原生 Images；responses：通过 image_generation 工具桥接 |
+| bridgeMode | auto | 外部 Images HTTP 的路由策略：auto 优先原生 Images，responses 使用工具桥接；后台画图任务固定走 Responses |
 | timeoutMs | 300000 | Responses 桥接请求超时（毫秒） |
 | imageAccountIds | 空数组 | 可执行生图的 OpenAI 账号 ID |
 | imageGroupIds | 空数组 | 可执行生图的 OpenAI 账号分组 ID |
@@ -42,7 +68,7 @@
 5. 日系田野（绘本）
 6. 橙色图标（UI 设计）
 
-页面通过官方 models.responses({clientKeyId, body, signal}) 以选定 Key 的身份调用完整 Responses 请求链，图像工具请求在 request middleware 被识别并由 scheduler 按账号范围过滤。选择 Key 的驱动模型来自官方 host.models.list。
+页面通过管理桥的 api/jobs 提交任务，后台在维护回调中以选定 Key 的身份调用 host.model.execute_stream。后台自行复核白名单、所选驱动模型和额度保护；宿主继续执行账号授权、图片权限和并发租约。选择 Key 的驱动模型来自官方 host.models.list。
 
 注意：此页面验证的是 Responses 的 image_generation 工具链，不能宣称已测试独立 Images 原生 HTTP 端点；后者需要通过带 Client Key 的标准 Images API 请求实测。
 
@@ -56,7 +82,7 @@
 
 ## 安装与兼容
 
-GitHub Actions 使用官方 SDK 提交和官方 cpr-plugin packaging CLI，运行 Cargo 单测、Release 编译，并将 web/index.html、web/app.js、web/app.css 作为资源打入 CPR 插件 tar.gz 包。
+GitHub Actions 使用固定官方 SDK 和官方 cpr-plugin packaging CLI，运行插件与宿主合同回归、三平台 Release 编译，并将画图页及 Quota Guard 页的六项 HTML/JS/CSS 资源打入 CPR 插件 tar.gz 包。
 
 目标平台：Linux AMD64、Linux ARM64、macOS Apple Silicon。请根据实际服务器部署架构选包；当前不支持将该包安装到旧 RPC v2 的 CPR 宿主。
 

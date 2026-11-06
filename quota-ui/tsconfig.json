@@ -2,6 +2,9 @@
   "extends": "@vue/tsconfig/tsconfig.dom.json",
   "compilerOptions": {
     "target": "ES2024",
+    "customConditions": [
+      "codex-proxy-source"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
@@ -9,9 +12,6 @@
     "noUnusedParameters": true,
     "noEmit": true,
     "verbatimModuleSyntax": true,
-    "customConditions": [
-      "codex-proxy-source"
-    ],
     "skipLibCheck": true
   },
   "include": [

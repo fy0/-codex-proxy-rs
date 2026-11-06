@@ -128,9 +128,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let jobs = Arc::clone(&jobs);
                 let quota = Arc::clone(&quota);
                 async move {
-                    // 同一官方维护任务同时执行额度刷新与独立后台生图队列。
-                    quota.reconcile(&call.host).await?;
-                    jobs.reconcile(&call.host).await?;
+                    // 图片运行期间继续刷新额度，避免长生图使账号每日费用观测自然过期。
+                    // 两者仍属于同一个受管父调用；图片结束后完成当轮刷新再停止。
+                    let (quota_result, jobs_result) = quota
+                        .reconcile_with_jobs(&call.host, jobs.reconcile(&call.host))
+                        .await;
+                    quota_result?;
+                    jobs_result?;
                     Ok(gateway_plugin_sdk::client::TypedReply::new(
                         gateway_plugin_sdk::client::Empty {},
                     ))

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import type { AccountInfo } from './api/modules/quota'
-import { ZButton, ZCard, ZEmpty, ZInput, ZInputNumber, ZPagination, ZTag } from '@codex-proxy/ui'
-import { Check, CircleAlert, Clock3, LoaderCircle, Plus, RefreshCw, Search, ShieldCheck, ShieldOff, Users, X } from '@lucide/vue'
+import type { AccountInfo, AccountRule } from './api/modules/quota'
+import { Check, ChevronLeft, ChevronRight, CircleAlert, Clock3, LoaderCircle, Plus, RefreshCw, Save, Search, Settings2, ShieldCheck, ShieldOff, Users, X } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import AccountRuleCard from './components/AccountRuleCard.vue'
 import { useQuotaGuard } from './composables/useQuotaGuard'
@@ -16,6 +15,7 @@ const {
   error,
   conflict,
   dirty,
+  invalidDailyLimits,
   candidates,
   candidatesLoaded,
   candidatesLoading,
@@ -29,12 +29,14 @@ const {
   discard,
   save,
 } = useQuotaGuard()
+
 const search = ref('')
 const candidateSearch = ref('')
 const adding = ref(false)
 const page = ref(1)
 const pageSize = ref(20)
 const candidatePage = ref(1)
+const statusFilter = ref<'all' | 'available' | 'blocked' | 'off'>('all')
 const locked = computed(() => saving.value || saved.value)
 const states = computed(() => new Map(overview.value?.accounts.map(account => [account.accountId, account]) ?? []))
 const savedRules = computed(() => new Map(overview.value?.configuration.accounts.map(rule => [rule.accountId, rule]) ?? []))
@@ -44,20 +46,32 @@ const accountInfo = computed(() => new Map([
 ].map(account => [account.accountId, account])))
 const protectedCount = computed(() => overview.value?.configuration.accounts.filter(isProtected).length ?? 0)
 const blockedCount = computed(() => overview.value?.accounts.filter(account => account.assessment.excluded).length ?? 0)
-const filteredRules = computed(() => draft.value.accounts.filter(rule => matches(accountInfo.value.get(rule.accountId) ?? {
-  accountId: rule.accountId,
-  name: null,
-  email: null,
-  enabled: null,
-}, search.value)))
+const availableCount = computed(() => Math.max(0, protectedCount.value - blockedCount.value))
+const filteredRules = computed(() => draft.value.accounts.filter(rule =>
+  matches(infoFor(rule.accountId), search.value) && matchesStatus(rule),
+))
+const pageCount = computed(() => Math.max(1, Math.ceil(filteredRules.value.length / pageSize.value)))
 const visibleRules = computed(() => filteredRules.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
 const configuredIds = computed(() => new Set(draft.value.accounts.map(rule => rule.accountId)))
 const matchingCandidates = computed(() => candidates.value.filter(account => matches(account, candidateSearch.value)))
+const candidatePageCount = computed(() => Math.max(1, Math.ceil(matchingCandidates.value.length / 10)))
 const visibleCandidates = computed(() => matchingCandidates.value.slice((candidatePage.value - 1) * 10, candidatePage.value * 10))
 
 function matches(account: AccountInfo, query: string) {
   const value = query.trim().toLocaleLowerCase()
   return !value || [account.name, account.email, account.accountId].some(text => text?.toLocaleLowerCase().includes(value))
+}
+
+function matchesStatus(rule: AccountRule) {
+  const stored = savedRules.value.get(rule.accountId) ?? rule
+  const blocked = states.value.get(rule.accountId)?.assessment.excluded
+  if (statusFilter.value === 'off')
+    return !isProtected(stored)
+  if (statusFilter.value === 'blocked')
+    return blocked === true
+  if (statusFilter.value === 'available')
+    return isProtected(stored) && blocked === false
+  return true
 }
 
 function infoFor(accountId: string): AccountInfo {
@@ -75,221 +89,249 @@ function openAccounts() {
     void loadCandidates()
 }
 
-watch([search, pageSize], () => {
+function updateObservationAge(event: Event) {
+  const input = event.target as HTMLInputElement
+  const value = input.valueAsNumber
+  if (Number.isFinite(value))
+    draft.value.maxObservationAgeSeconds = Math.min(86400, Math.max(60, Math.round(value)))
+  input.value = String(draft.value.maxObservationAgeSeconds)
+}
+
+watch([search, pageSize, statusFilter], () => {
   page.value = 1
 })
 watch(candidateSearch, () => {
   candidatePage.value = 1
 })
-watch(() => filteredRules.value.length, (length) => {
-  page.value = Math.max(1, Math.min(page.value, Math.ceil(length / pageSize.value)))
+watch(pageCount, (value) => {
+  page.value = Math.min(page.value, value)
+})
+watch(candidatePageCount, (value) => {
+  candidatePage.value = Math.min(candidatePage.value, value)
 })
 </script>
 
 <template>
-  <main class="flex min-w-0 flex-col gap-4 text-cp-text">
-    <div v-if="error && !conflict" role="alert" class="flex items-start gap-2 rounded-cp bg-cp-error-container px-4 py-3 text-cp-sm text-cp-error-on-container">
-      <CircleAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+  <main class="qg-app" :aria-busy="loading && !overview">
+    <div v-if="error && !conflict" class="qg-notice qg-notice-error" role="alert">
+      <CircleAlert aria-hidden="true" />
       <span>{{ error }}</span>
-      <ZButton v-if="!overview" size="small" :loading="loading" class="ml-auto" @click="refresh">
+      <button v-if="!overview" type="button" class="qg-button qg-button-small" :disabled="loading" @click="refresh">
         重试
-      </ZButton>
+      </button>
     </div>
-    <div v-if="saved" role="status" class="flex items-start gap-2 rounded-cp bg-cp-success-container px-4 py-3 text-cp-sm text-cp-success-on-container">
-      <Check class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-      配置已保存，请点击页面右上角的“刷新页面”查看最新状态
+    <div v-if="saved" class="qg-notice qg-notice-success" role="status">
+      <Check aria-hidden="true" />
+      <span>配置已保存，请点击宿主右上角的“刷新页面”查看最新状态</span>
     </div>
-    <div v-if="conflict" role="alert" class="rounded-cp bg-cp-warning-container px-4 py-3 text-cp-sm text-cp-warning-on-container">
-      配置已被其他操作修改，草稿尚未保存，请点击宿主页面右上角刷新后重新编辑
+    <div v-if="conflict" class="qg-notice qg-notice-warning" role="alert">
+      <CircleAlert aria-hidden="true" />
+      <span>配置已被其他操作修改，草稿尚未保存，请点击宿主右上角刷新后重新编辑</span>
     </div>
 
-    <ZCard v-if="loading && !overview" padding="compact">
-      <div role="status" class="flex items-center gap-2 py-8 text-cp-sm text-cp-text-secondary">
-        <LoaderCircle class="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-        正在读取账号和额度状态
-      </div>
-    </ZCard>
+    <section v-if="loading && !overview" class="qg-empty" role="status">
+      <LoaderCircle class="qg-spin" aria-hidden="true" />
+      <h2>正在读取额度状态</h2>
+      <p>获取账号与已保存的保护规则</p>
+    </section>
 
     <template v-if="overview">
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <ZCard padding="compact">
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <p class="m-0 text-cp-sm font-emphasis text-cp-text-secondary">
-                已开启保护
-              </p>
-              <strong class="mt-2 block font-mono text-2xl font-heavy tabular-nums">{{ protectedCount }}</strong>
-            </div>
-            <Users class="size-5 text-cp-primary-text" aria-hidden="true" />
+      <section class="qg-overview" aria-label="额度保护概览">
+        <div class="qg-stat">
+          <div class="qg-stat-icon">
+            <Users aria-hidden="true" />
           </div>
-        </ZCard>
-        <ZCard padding="compact">
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <p class="m-0 text-cp-sm font-emphasis text-cp-text-secondary">
-                已拦截
-              </p>
-              <strong class="mt-2 block font-mono text-2xl font-heavy text-cp-warning-text tabular-nums">{{ blockedCount }}</strong>
-            </div>
-            <ShieldOff class="size-5 text-cp-warning-text" aria-hidden="true" />
-          </div>
-        </ZCard>
-        <ZCard padding="compact">
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <p class="m-0 text-cp-sm font-emphasis text-cp-text-secondary">
-                未拦截
-              </p>
-              <strong class="mt-2 block font-mono text-2xl font-heavy text-cp-success-text tabular-nums">{{ protectedCount - blockedCount }}</strong>
-            </div>
-            <ShieldCheck class="size-5 text-cp-success-text" aria-hidden="true" />
-          </div>
-        </ZCard>
-      </div>
-
-      <ZCard padding="compact">
-        <div class="flex flex-wrap items-center justify-between gap-4">
-          <div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-3">
-            <div>
-              <span id="observation-age-label" class="flex items-center gap-2 text-cp-sm font-heavy">
-                <Clock3 class="size-4 text-cp-text-secondary" aria-hidden="true" />
-                额度观测有效期
-              </span>
-              <p class="mt-1 mb-0 text-cp-xs text-cp-text-secondary">
-                超过有效期，等待新观测后再恢复分配
-              </p>
-            </div>
-            <ZInputNumber
-              id="observation-age"
-              v-model="draft.maxObservationAgeSeconds"
-              aria-label="额度观测有效期"
-              aria-labelledby="observation-age-label"
-              :min="60"
-              :max="86400"
-              :step="30"
-              :precision="0"
-              :disabled="locked"
-              unit="秒"
-              class="w-40"
-            />
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <span v-if="dirty && !saved" class="mr-1 text-cp-xs text-cp-warning-text">有未保存修改</span>
-            <ZButton :disabled="!dirty || locked" variant="text" @click="discard">
-              撤销修改
-            </ZButton>
-            <ZButton type="primary" :disabled="!dirty || locked || conflict" :loading="saving" @click="save">
-              保存配置
-            </ZButton>
-          </div>
+          <div><span class="qg-stat-label">已开启保护</span><strong>{{ protectedCount }}<small>个账号</small></strong></div>
         </div>
-      </ZCard>
+        <div class="qg-stat">
+          <div class="qg-stat-icon qg-icon-success">
+            <ShieldCheck aria-hidden="true" />
+          </div>
+          <div><span class="qg-stat-label">未触发保护</span><strong>{{ availableCount }}<small>可继续分配</small></strong></div>
+        </div>
+        <div class="qg-stat">
+          <div class="qg-stat-icon qg-icon-warning">
+            <ShieldOff aria-hidden="true" />
+          </div>
+          <div><span class="qg-stat-label">已暂停分配</span><strong>{{ blockedCount }}<small>等待额度恢复</small></strong></div>
+        </div>
+      </section>
 
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <ZInput v-model="search" aria-label="搜索保护配置" placeholder="搜索名称、邮箱或账号 ID" class="min-w-0 flex-1 sm:max-w-80">
-          <template #prefix>
-            <Search class="size-4 text-cp-text-quaternary" />
-          </template>
-        </ZInput>
-        <div class="flex flex-wrap items-center gap-2">
-          <ZButton :disabled="locked" :loading="loading" variant="text" @click="refresh">
-            <template #icon>
-              <RefreshCw class="size-4" />
-            </template>
+      <section class="qg-panel qg-settings-bar" aria-label="保护设置与保存">
+        <label class="qg-observation-setting" for="qg-observation-age">
+          <Settings2 aria-hidden="true" />
+          <span class="qg-setting-copy">
+            <span id="qg-observation-age-label" class="qg-setting-label">额度观测有效期</span>
+            <span id="qg-observation-age-help" class="qg-setting-description">超过有效期后暂停受保护账号</span>
+          </span>
+          <span class="qg-number-field qg-age-field">
+            <input id="qg-observation-age" type="number" aria-labelledby="qg-observation-age-label" aria-describedby="qg-observation-age-help" :value="draft.maxObservationAgeSeconds" min="60" max="86400" step="30" :disabled="locked" @change="updateObservationAge">
+            <span>秒</span>
+          </span>
+        </label>
+        <div class="qg-save-actions">
+          <span class="qg-save-state" :class="{ 'qg-save-state-dirty': dirty && !saved }">
+            <span class="qg-state-dot" />
+            {{ saved ? '已保存，待刷新' : dirty ? '有未保存修改' : '配置已同步' }}
+          </span>
+          <button type="button" class="qg-button qg-button-quiet" :disabled="!dirty || locked" @click="discard">
+            撤销修改
+          </button>
+          <button type="button" class="qg-button qg-button-primary" :disabled="!dirty || locked || conflict || invalidDailyLimits" @click="save">
+            <LoaderCircle v-if="saving" class="qg-spin" aria-hidden="true" />
+            <Save v-else aria-hidden="true" />
+            保存配置
+          </button>
+        </div>
+      </section>
+
+      <p v-if="invalidDailyLimits" class="qg-validation-note" role="alert">
+        请填写有效的每日 USD 限额后保存，或关闭对应账号的日费用保护。
+      </p>
+
+      <div class="qg-toolbar">
+        <label class="qg-search" for="qg-rule-search">
+          <Search aria-hidden="true" />
+          <input id="qg-rule-search" v-model="search" type="search" aria-label="搜索保护配置" placeholder="搜索名称、邮箱或账号 ID">
+        </label>
+        <div class="qg-filter" role="group" aria-label="保护状态筛选">
+          <button type="button" :aria-pressed="statusFilter === 'all'" @click="statusFilter = 'all'">
+            全部
+          </button>
+          <button type="button" :aria-pressed="statusFilter === 'available'" @click="statusFilter = 'available'">
+            未拦截
+          </button>
+          <button type="button" :aria-pressed="statusFilter === 'blocked'" @click="statusFilter = 'blocked'">
+            已拦截
+          </button>
+          <button type="button" :aria-pressed="statusFilter === 'off'" @click="statusFilter = 'off'">
+            未保护
+          </button>
+        </div>
+        <div class="qg-toolbar-actions">
+          <button type="button" class="qg-button" :disabled="locked || loading" @click="refresh">
+            <RefreshCw :class="{ 'qg-spin': loading }" aria-hidden="true" />
             刷新状态
-          </ZButton>
-          <ZButton :disabled="locked || draft.accounts.length >= 1000" @click="openAccounts">
-            <template #icon>
-              <Plus class="size-4" />
-            </template>
+          </button>
+          <button type="button" class="qg-button qg-button-accent" :disabled="locked || draft.accounts.length >= 1000" @click="openAccounts">
+            <Plus aria-hidden="true" />
             添加账号
-          </ZButton>
+          </button>
         </div>
       </div>
 
-      <ZCard v-if="adding" padding="compact">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <h2 class="m-0 text-cp font-heavy">
-            选择 OpenAI OAuth 账号
-          </h2>
-          <ZButton variant="text" size="small" aria-label="关闭账号选择" @click="adding = false">
-            <template #icon>
-              <X class="size-4" />
-            </template>
-            关闭
-          </ZButton>
+      <section v-if="adding" class="qg-panel qg-picker" aria-labelledby="qg-picker-title">
+        <div class="qg-section-heading">
+          <div>
+            <h2 id="qg-picker-title">
+              选择保护账号
+            </h2><p>添加 OpenAI OAuth 账号并设置额度阈值</p>
+          </div>
+          <button type="button" class="qg-icon-button" aria-label="关闭账号选择" @click="adding = false">
+            <X aria-hidden="true" />
+          </button>
         </div>
-        <p class="mt-2 mb-0 text-cp-xs text-cp-text-secondary">
-          仅支持具有 5 小时和周额度观测的 OAuth 账号
-        </p>
-        <ZInput v-model="candidateSearch" aria-label="搜索已加载账号" placeholder="搜索已加载的账号" class="mt-3 sm:max-w-80" />
-        <p v-if="candidatesError" role="alert" class="my-3 text-cp-sm text-cp-error-text">
+        <label class="qg-search qg-picker-search" for="qg-candidate-search">
+          <Search aria-hidden="true" />
+          <input id="qg-candidate-search" v-model="candidateSearch" type="search" aria-label="搜索已加载账号" placeholder="搜索已加载的账号">
+        </label>
+        <p v-if="candidatesError" class="qg-inline-error" role="alert">
           {{ candidatesError }}
         </p>
-        <div v-if="!candidatesLoaded && candidatesLoading" role="status" class="py-4 text-cp-sm text-cp-text-secondary">
+        <p v-if="!candidatesLoaded && candidatesLoading" class="qg-muted" role="status">
           正在读取账号
-        </div>
-        <div class="mt-3 grid gap-2 sm:grid-cols-2">
-          <div v-for="account in visibleCandidates" :key="account.accountId" class="flex min-w-0 items-center gap-3 rounded-cp bg-cp-fill-quaternary px-3 py-2.5">
-            <div class="min-w-0 flex-1">
-              <p class="m-0 truncate text-cp-sm font-emphasis">
-                {{ accountName(account) }}
-              </p>
-              <p class="mt-1 mb-0 truncate font-mono text-cp-xs text-cp-text-quaternary">
-                {{ account.email && account.email !== accountName(account) ? account.email : account.accountId }}
-              </p>
+        </p>
+        <div class="qg-candidates">
+          <div v-for="account in visibleCandidates" :key="account.accountId" class="qg-candidate">
+            <span class="qg-avatar qg-avatar-small" aria-hidden="true">{{ accountName(account).slice(0, 1).toLocaleUpperCase() }}</span>
+            <div class="qg-candidate-name">
+              <strong>{{ accountName(account) }}</strong>
+              <span>{{ account.email && account.email !== accountName(account) ? account.email : account.accountId }}</span>
             </div>
-            <ZTag v-if="account.enabled === false" size="small">
-              已停用
-            </ZTag>
-            <ZButton
-              size="small"
-              :disabled="locked || configuredIds.has(account.accountId) || draft.accounts.length >= 1000"
-              :aria-label="`添加 ${accountName(account)} 的保护配置`"
-              @click="addAccount(account)"
-            >
+            <span v-if="account.enabled === false" class="qg-badge qg-badge-neutral">已停用</span>
+            <button type="button" class="qg-button qg-button-small" :disabled="locked || configuredIds.has(account.accountId) || draft.accounts.length >= 1000" :aria-label="`添加 ${accountName(account)}`" @click="addAccount(account)">
+              <Check v-if="configuredIds.has(account.accountId)" aria-hidden="true" />
+              <Plus v-else aria-hidden="true" />
               {{ configuredIds.has(account.accountId) ? '已添加' : '添加' }}
-            </ZButton>
+            </button>
           </div>
         </div>
-        <ZEmpty v-if="candidatesLoaded && !matchingCandidates.length" size="small" title="没有匹配的账号" :description="nextCursor ? '可继续加载更多账号' : '请先在宿主添加 OpenAI OAuth 账号'" class="mt-3" />
-        <ZPagination v-if="matchingCandidates.length > 10" v-model:current-page="candidatePage" :page-size="10" :total="matchingCandidates.length" :page-sizes="[10]" class="mt-3" />
-        <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-          <span class="text-cp-xs text-cp-text-secondary">已加载 {{ candidates.length }} 个账号</span>
-          <ZButton v-if="nextCursor || candidatesError" :loading="candidatesLoading" size="small" @click="loadCandidates">
-            {{ candidatesError ? '重试' : '加载更多' }}
-          </ZButton>
+        <p v-if="candidatesLoaded && !matchingCandidates.length" class="qg-picker-empty">
+          没有匹配的账号{{ nextCursor ? '，可继续加载更多' : '' }}
+        </p>
+        <div class="qg-picker-footer">
+          <span class="qg-muted">已加载 {{ candidates.length }} 个账号</span>
+          <div class="qg-pagination">
+            <template v-if="candidatePageCount > 1">
+              <button type="button" class="qg-icon-button" aria-label="上一页候选账号" :disabled="candidatePage <= 1" @click="candidatePage--">
+                <ChevronLeft aria-hidden="true" />
+              </button>
+              <span>{{ candidatePage }} / {{ candidatePageCount }}</span>
+              <button type="button" class="qg-icon-button" aria-label="下一页候选账号" :disabled="candidatePage >= candidatePageCount" @click="candidatePage++">
+                <ChevronRight aria-hidden="true" />
+              </button>
+            </template>
+            <button v-if="nextCursor || candidatesError" type="button" class="qg-button qg-button-small" :disabled="candidatesLoading" @click="loadCandidates">
+              {{ candidatesError ? '重试' : '加载更多' }}
+            </button>
+          </div>
         </div>
-      </ZCard>
+      </section>
 
-      <p class="m-0 text-cp-xs leading-relaxed text-cp-text-secondary">
-        状态按已保存配置评估 · {{ formatDate(overview.evaluatedAtMs) }} · 达到上限即拦截
-      </p>
-      <AccountRuleCard
-        v-for="rule in visibleRules"
-        :key="rule.accountId"
-        :model-value="rule"
-        :info="infoFor(rule.accountId)"
-        :state="states.get(rule.accountId)"
-        :saved-rule="savedRules.get(rule.accountId)"
-        :awaiting-refresh="saved"
-        :disabled="locked"
-        @update:model-value="updateRule"
-        @remove="removeAccount(rule.accountId)"
-      />
-      <ZEmpty
-        v-if="!filteredRules.length"
-        :icon="ShieldCheck"
-        :title="draft.accounts.length ? '没有匹配的保护配置' : '还没有配置保护账号'"
-        :description="draft.accounts.length ? '尝试其他名称、邮箱或账号 ID' : '添加账号并设置使用率上限，保存后开始保护'"
-      >
-        <template v-if="!draft.accounts.length" #action>
-          <ZButton :disabled="locked" @click="openAccounts">
-            添加账号
-          </ZButton>
-        </template>
-      </ZEmpty>
-      <ZPagination v-if="filteredRules.length > 20" v-model:current-page="page" v-model:page-size="pageSize" :total="filteredRules.length" :page-sizes="[20, 50, 100]" />
+      <div class="qg-list-heading">
+        <h2>账号规则 <span>{{ filteredRules.length }}</span></h2>
+        <span class="qg-updated"><Clock3 aria-hidden="true" />{{ formatDate(overview.evaluatedAtMs) }}<span class="qg-auto-refresh"> · 每 30 秒自动刷新</span></span>
+      </div>
+      <div class="qg-account-list">
+        <AccountRuleCard
+          v-for="rule in visibleRules"
+          :key="rule.accountId"
+          :model-value="rule"
+          :info="infoFor(rule.accountId)"
+          :state="states.get(rule.accountId)"
+          :saved-rule="savedRules.get(rule.accountId)"
+          :awaiting-refresh="saved"
+          :disabled="locked"
+          @update:model-value="updateRule"
+          @remove="removeAccount(rule.accountId)"
+        />
+      </div>
+      <section v-if="!filteredRules.length" class="qg-empty">
+        <ShieldCheck aria-hidden="true" />
+        <h2>{{ draft.accounts.length ? '没有匹配的保护配置' : '还没有配置保护账号' }}</h2>
+        <p>{{ draft.accounts.length ? '尝试其他关键词或切换筛选条件' : '添加账号，设置阈值，保存后开始保护' }}</p>
+        <button v-if="!draft.accounts.length" type="button" class="qg-button qg-button-accent" :disabled="locked" @click="openAccounts">
+          <Plus aria-hidden="true" />添加第一个账号
+        </button>
+      </section>
+
+      <details class="qg-daily-help">
+        <summary>日费用如何统计与保护？</summary>
+        <p>每日费用按账号统计全部 CPR 请求，覆盖所有模型与 Client Key；使用 CPR 记录的实际或估算 USD 费用，不代表官方套餐额度。按请求开始时间归属 UTC 自然日，跨午夜的请求计入开始那天；每天 UTC 00:00 换日，默认关闭。</p>
+        <p>达到日限额后暂停新分配。费用未知、数据不完整或记录过期时也会暂停受保护账号；在途请求与结算延迟可能使最终费用超过阈值，因此日限额不是严格的原子预算。</p>
+      </details>
+
+      <footer class="qg-footer">
+        <span>状态按已保存规则评估，达到任一阈值即暂停分配</span>
+        <div v-if="filteredRules.length > 20" class="qg-pagination">
+          <select v-model.number="pageSize" aria-label="每页账号数">
+            <option :value="20">
+              20 / 页
+            </option><option :value="50">
+              50 / 页
+            </option><option :value="100">
+              100 / 页
+            </option>
+          </select>
+          <button type="button" class="qg-icon-button" aria-label="上一页保护账号" :disabled="page <= 1" @click="page--">
+            <ChevronLeft aria-hidden="true" />
+          </button>
+          <span>{{ page }} / {{ pageCount }}</span>
+          <button type="button" class="qg-icon-button" aria-label="下一页保护账号" :disabled="page >= pageCount" @click="page++">
+            <ChevronRight aria-hidden="true" />
+          </button>
+        </div>
+      </footer>
     </template>
   </main>
 </template>

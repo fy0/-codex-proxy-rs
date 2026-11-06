@@ -750,6 +750,8 @@
   }
   // 所有请求由 CPR 后端 maintenance 拥有；此处仅提交、轮询并取回已保存的 PNG。
   let backendEnabled=false;
+  let workerActive=false;
+  let dispatchIntervalMs=30000;
   let polling=false;
   let pollStarted=false;
   let pollTimer=null;
@@ -818,11 +820,19 @@
       :(Number.isFinite(job.completedMs)?job.completedMs:Date.now());
     return Math.max(0,(end-job.startedMs)/1000).toFixed(1)+'s';
   }
+  function queueLabel() {
+    if (!workerActive) return '待后台唤醒';
+    return tasks.some((task)=>task.status==='running') ? '等待后台分派' : '正在分派';
+  }
+  function waitingTime(task) {
+    return Number.isFinite(task.createdMs) ? Math.max(0,(Date.now()-task.createdMs)/1000).toFixed(1)+'s' : '';
+  }
   function refreshStopwatches() {
     if (closed)return;
     for (const task of tasks) {
-      if (task.status!=='running' || !task.node) continue;
-      task.node.state.textContent='生成中 '+elapsedTime(task);
+      if (!task.node) continue;
+      if (task.status==='running') task.node.state.textContent='生成中 '+elapsedTime(task);
+      else if (task.status==='queued') task.node.state.textContent=queueLabel()+' '+waitingTime(task);
     }
   }
   function renderTask(task) {
@@ -830,21 +840,23 @@
     const stateKey=task.status || 'queued';
     const n=task.node;
     const labels={
-      queued:'排队中',running:'生成中',succeeded:'已完成',
+      queued:queueLabel(),running:'生成中',succeeded:'已完成',
       failed:'失败',canceled:'已取消',interrupted:'中断（请手动重试）'
     };
     n.state.className='task-state '+(
       stateKey==='succeeded'?'succeeded':stateKey==='running'?'running':
         stateKey==='failed'||stateKey==='interrupted'?'failed':'');
     n.state.textContent=(labels[stateKey]||stateKey)
-      + (stateKey==='queued'?'':task.startedMs?' '+elapsedTime(task):'');
+      + (stateKey==='queued'?' '+waitingTime(task):task.startedMs?' '+elapsedTime(task):'');
     n.card.className='task-card '+stateKey;
     n.img.hidden=!(stateKey==='succeeded' && task.imageUrl);
     if (!n.img.hidden && n.img.src!==task.imageUrl) n.img.src=task.imageUrl;
     n.info.hidden=!n.img.hidden;
     if (!n.info.hidden) {
       n.info.textContent=stateKey==='queued'
-        ? '已提交到 CPR 后端队列，等待维护任务领取…'
+        ? (workerActive
+          ? '后台工作器已运行，将按账号权限与并发规则领取任务…'
+          : '等待 CPR 后台唤醒；宿主维护间隔约 '+Math.round(dispatchIntervalMs/1000)+' 秒，不代表账号队列已满。')
         :stateKey==='running'?'CPR 后端生成中，关闭页面不会停止…'
         :stateKey==='succeeded'?'图片已保存在后端，读取预览中…'
         :stateKey==='interrupted'?'维护任务曾被中断；不会自动重复扣费'
@@ -894,6 +906,8 @@
         const url=imageChunksToDataUrl(chunks,task.resultBytes,task.resultMime);
         if (task.imageUrl)releaseImageUrl(task.imageUrl);
         task.imageUrl=url;
+        const detectedMime=/^data:(image\/(?:png|jpeg|webp));base64,/.exec(url);
+        if (detectedMime) task.resultMime=detectedMime[1];
         renderTask(task);
       }
     }catch(error){
@@ -907,10 +921,11 @@
     const done=tasks.filter((t)=>t.status==='succeeded').length;
     const failed=tasks.filter((t)=>t.status==='failed'||t.status==='interrupted').length;
     const canceled=tasks.filter((t)=>t.status==='canceled').length;
-    fields.queueInfo.textContent=running+' 运行中 · '+queued+' 排队 · '+done+' 完成 · '
+    fields.queueInfo.textContent=running+' 运行中 · '+queued+' 待启动 · '+done+' 完成 · '
       +failed+' 失败/中断 · '+canceled+' 取消';
     fields.empty.hidden=tasks.length>0;
-    if (running||queued)status('working','后端执行中');
+    if (running)status('working','后端生成中');
+    else if (queued)status('working',queueLabel());
     else if(done)status('success','已完成');
     else if(failed)status('error','部分任务失败');
     else status('',tasks.length?'暂无进行中的任务':'尚无任务');
@@ -937,7 +952,9 @@
       }else{
         const savedUrl=task.imageUrl;
         const savedNode=task.node;
+        const detectedMime=task.resultMime;
         Object.assign(task,item);
+        if (!task.resultMime && savedUrl) task.resultMime=detectedMime;
         task.imageUrl=savedUrl;
         task.node=savedNode;
         renderTask(task);
@@ -954,6 +971,8 @@
       const response=await invoke('GET','api/jobs');
       if(!closed){
         backendEnabled=!!response.backendEnabled;
+        workerActive=response.workerActive===true;
+        if (Number.isFinite(response.dispatchIntervalMs)) dispatchIntervalMs=response.dispatchIntervalMs;
         refreshTasks(response.jobs);
       }
     }catch(error){
@@ -982,6 +1001,7 @@
     try {
       const response=await invoke('POST','api/jobs',{
         clientKeyId:fields.clientKey.value,
+        driverModel:fields.driver.value || undefined,
         imageModel:fields.imageModel.value,
         prompt:fields.prompt.value.trim(),
         size:fields.size.value,

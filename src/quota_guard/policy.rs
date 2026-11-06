@@ -45,6 +45,9 @@ pub enum ReasonCode {
     ResetUnknown,
     WindowExpired,
     LimitReached,
+    DailyLimitReached,
+    DailyUsageUnknown,
+    DailyObservationStale,
 }
 
 impl Reason {
@@ -89,7 +92,7 @@ impl Assessment {
 pub fn unavailable(rule: &AccountRule) -> Assessment {
     Assessment::new(
         rule,
-        if rule.is_enabled() {
+        if rule.windows_enabled() {
             vec![Reason::new(
                 ReasonCode::QuotaUnavailable,
                 "无法读取额度观测，暂不使用此账号",
@@ -107,7 +110,7 @@ pub fn assess(
     now_ms: i64,
     max_age_seconds: u64,
 ) -> Assessment {
-    if !rule.is_enabled() {
+    if !rule.windows_enabled() {
         return Assessment::new(rule, Vec::new());
     }
     if quota.schema_version != 1 {
@@ -193,6 +196,33 @@ pub fn assess(
         }
     }
     Assessment::new(rule, reasons)
+}
+
+/// 上游百分比窗口与本地已记录费用分别判断。
+/// 百分比保护全部关闭时，不要求宿主必须提供 quota_details。
+pub fn add_daily(assessment: &mut Assessment, usage: &super::daily::DailyUsage) {
+    use super::daily::DailyStatus;
+    let (code, message) = match usage.status {
+        DailyStatus::Disabled | DailyStatus::Ready => return,
+        DailyStatus::Reached => (
+            ReasonCode::DailyLimitReached,
+            "今日已记录 USD 费用达到保护上限",
+        ),
+        DailyStatus::Unknown => (
+            ReasonCode::DailyUsageUnknown,
+            "今日费用观测不完整或含未知费用，暂不使用此账号",
+        ),
+        DailyStatus::Stale => (
+            ReasonCode::DailyObservationStale,
+            "今日费用观测已过期，暂不使用此账号",
+        ),
+    };
+    assessment.excluded = true;
+    assessment.reasons.push(Reason {
+        window_seconds: Some(86_400),
+        reset_at_ms: Some(usage.reset_at_ms),
+        ..Reason::new(code, message)
+    });
 }
 
 fn assess_window(window: &QuotaWindowDetails, now_ms: i64, limit: f64) -> Option<Reason> {

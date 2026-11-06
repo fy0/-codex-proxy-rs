@@ -115,6 +115,29 @@ pub async fn allowed_models_for_key(
     ))
 }
 
+/// 后台任务总是使用 Responses；按本次选中的驱动模型检查同一账号交集。
+pub async fn allowed_models_for_driver(
+    host: &HostClient,
+    config: &Config,
+    client_key_id: &str,
+    driver: &str,
+) -> Result<Vec<String>, PluginFault> {
+    let candidates = account_ids(host, config).await?;
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope = access_set(host, client_key_id, &candidates, None).await?;
+    if scope.is_empty() {
+        return Ok(Vec::new());
+    }
+    let drivers = access_set(host, client_key_id, &candidates, Some(driver)).await?;
+    if drivers.is_disjoint(&scope) {
+        Ok(Vec::new())
+    } else {
+        Ok(config.image_models.clone())
+    }
+}
+
 fn eligible_image_models(
     config: &Config,
     scope: &HashSet<String>,

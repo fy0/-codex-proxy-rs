@@ -29,6 +29,7 @@ const HOST_READ_LIMIT: u32 = 1024 * 1024;
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CLIENT_KEY: &str = "private-key-id-regression-sentinel";
 const ACCOUNT: &str = "private-account-id-regression-sentinel";
+const DRIVER: &str = "gpt-selected-regression-driver";
 const PROMPT: &str = "private-prompt-regression-sentinel";
 const PRIVATE_MESSAGE: &str = "private-upstream-error-regression-sentinel";
 const PRIVATE_DETAILS: &str = "private-error-details-regression-sentinel";
@@ -80,6 +81,8 @@ struct FakeHost {
     model: &'static str,
     image: Vec<u8>,
     fail_read: bool,
+    slow_second: bool,
+    stream_reads: std::collections::HashMap<String, usize>,
     state: Option<StateRecord>,
     next_call: u64,
     executions: usize,
@@ -105,8 +108,10 @@ impl FakeHost {
         let configuration = json!({
             "imageAccountIds": [ACCOUNT],
             "imageModels": [model],
+            "driverModel": "gpt-config-default-driver",
+            "bridgeMode": if model.contains("2.6") { "responses" } else { "auto" },
             "imageStorageDir": directory.0,
-            "concurrencyPerAccount": 1
+            "concurrencyPerAccount": 2
         });
         let jobs = Arc::new(BackendJobs::new(Arc::new(
             Config::from_configuration(&configuration).unwrap(),
@@ -143,6 +148,8 @@ impl FakeHost {
             model,
             image: image.into_inner(),
             fail_read,
+            slow_second: false,
+            stream_reads: std::collections::HashMap::new(),
             state: None,
             next_call: 1,
             executions: 0,
@@ -295,7 +302,10 @@ impl FakeHost {
                 let query: data::AccessQuery = serde_json::from_slice(&payload).unwrap();
                 assert_eq!(query.client_key_id, CLIENT_KEY);
                 assert_eq!(query.account_ids, vec![ACCOUNT.to_owned()]);
-                assert!(query.upstream_model.is_none());
+                assert!(
+                    query.upstream_model.is_none()
+                        || query.upstream_model.as_deref() == Some(DRIVER)
+                );
                 return Ok((
                     json!({}),
                     serde_json::to_vec(&data::AccessFacts {
@@ -346,28 +356,39 @@ impl FakeHost {
             host::MODEL_EXECUTE_STREAM => {
                 self.executions += 1;
                 let request: ModelExecuteRequest = serde_json::from_value(params).unwrap();
-                assert_eq!(request.model, self.model);
+                assert_eq!(request.model, DRIVER);
                 assert_eq!(request.client_key_id.as_deref(), Some(CLIENT_KEY));
                 assert_eq!(request.account_id.as_deref(), Some(ACCOUNT));
                 assert_eq!(request.provider.as_deref(), Some("openai"));
                 assert_eq!(request.protocol, "openai");
-                assert!(matches!(
-                    request.operation,
-                    host::ModelOperation::GenerateImage
-                ));
+                assert!(matches!(request.operation, host::ModelOperation::Generate));
                 let body: Value = serde_json::from_slice(&payload).unwrap();
-                assert_eq!(body["model"], self.model);
-                assert_eq!(body["prompt"], PROMPT);
-                assert_eq!(body["size"], "1024x1024");
-                assert_eq!(body["n"], 1);
-                assert_eq!(body["output_format"], "webp");
-                assert_eq!(body["output_compression"], 85);
-                json!({"request_id": REQUEST_ID, "stream": STREAM_ID})
+                assert_eq!(body["model"], DRIVER);
+                assert_eq!(body["input"][0]["content"][0]["text"], PROMPT);
+                assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+                let tool = &body["tools"][0];
+                assert_eq!(tool["type"], "image_generation");
+                assert_eq!(tool["model"], self.model);
+                assert_eq!(tool["action"], "generate");
+                assert_eq!(tool["size"], "1024x1024");
+                assert_eq!(tool["output_format"], "webp");
+                assert_eq!(tool["output_compression"], 85);
+                assert_eq!(body["tool_choice"], json!({"type":"image_generation"}));
+                assert_eq!(body["stream"], true);
+                assert_eq!(body["store"], false);
+                assert_eq!(body["parallel_tool_calls"], false);
+                let stream = if self.executions == 1 {
+                    STREAM_ID.to_owned()
+                } else {
+                    format!("{STREAM_ID}-{}", self.executions)
+                };
+                self.stream_reads.insert(stream.clone(), 0);
+                json!({"request_id": REQUEST_ID, "stream": stream})
             }
             host::MODEL_STREAM_READ => {
                 assert!(payload.is_empty());
                 let request: ModelStreamReadRequest = serde_json::from_value(params).unwrap();
-                assert_eq!(request.stream, STREAM_ID);
+                assert!(self.stream_reads.contains_key(&request.stream));
                 self.read_limits.push(request.maximum_bytes);
                 if request.maximum_bytes == 0
                     || request.maximum_bytes > HOST_READ_LIMIT
@@ -384,26 +405,82 @@ impl FakeHost {
                     }));
                     return Err(error);
                 }
-                if self.read_limits.len() == 1 {
-                    let body = serde_json::to_vec(&json!({
-                        "data": [{"b64_json": base64::engine::general_purpose::STANDARD.encode(&self.image)}]
-                    })).unwrap();
-                    let batch = ModelEventBatch {
-                        events: vec![ExecutionEvent::wire(WireEvent {
-                            protocol: "openai".into(),
-                            payload: WirePayload::RawJson { body },
-                        })],
-                    }
-                    .encode()
-                    .unwrap();
+                // 第二张必须等第一张已持久化 succeeded 才结束，检测 join_all 的交付阻塞回归。
+                if self.slow_second
+                    && request.stream != STREAM_ID
+                    && !self
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.value["jobs"].as_array())
+                        .is_some_and(|jobs| jobs.iter().any(|job| job["status"] == "succeeded"))
+                {
+                    return Ok((json!({"events":0,"end":false}), Vec::new()));
+                }
+                let reads = self.stream_reads.get_mut(&request.stream).unwrap();
+                *reads += 1;
+                if *reads == 1 {
+                    let item = json!({
+                        "id": "image-regression",
+                        "type": "image_generation_call",
+                        "result": base64::engine::general_purpose::STANDARD.encode(&self.image)
+                    });
+                    let completed = json!({
+                        "type":"response.completed","response":{"status":"completed","output":[item.clone()]}
+                    });
+                    let payloads = if self.model.ends_with("flare") {
+                        vec![WirePayload::WebSocket {
+                            event: Some("response.completed".into()),
+                            message: serde_json::to_vec(&completed).unwrap(),
+                            data: Some(completed),
+                        }]
+                    } else if self.model.contains("2.6") {
+                        // 真实 SSE 解析后的 JSON 事件可能夹着原始心跳帧；三帧必须共享完成状态。
+                        vec![
+                            WirePayload::Json {
+                                event: Some("response.output_item.done".into()),
+                                data: json!({"type":"response.output_item.done","item":item}),
+                                id: None,
+                                retry: None,
+                                raw_sse: None,
+                            },
+                            WirePayload::RawSse {
+                                frame: b": ping\n\n".to_vec(),
+                            },
+                            WirePayload::Json {
+                                event: Some("response.completed".into()),
+                                data: json!({"type":"response.completed","response":{"status":"completed","output":[]}}),
+                                id: None,
+                                retry: None,
+                                raw_sse: None,
+                            },
+                        ]
+                    } else {
+                        vec![WirePayload::RawJson {
+                            body: serde_json::to_vec(&completed).unwrap(),
+                        }]
+                    };
+                    let events = payloads
+                        .into_iter()
+                        .map(|payload| {
+                            ExecutionEvent::wire(WireEvent {
+                                protocol: "openai".into(),
+                                payload,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let count = events.len();
+                    let batch = ModelEventBatch { events }.encode().unwrap();
                     assert!(batch.len() <= HOST_READ_LIMIT as usize);
-                    return Ok((json!({"events": 1, "end": false}), batch));
+                    return Ok((json!({"events": count, "end": false}), batch));
                 }
                 json!({"events": 0, "end": true})
             }
             host::MODEL_STREAM_CLOSE => {
                 assert!(payload.is_empty());
-                assert_eq!(params["stream"], STREAM_ID);
+                assert!(
+                    self.stream_reads
+                        .contains_key(params["stream"].as_str().unwrap())
+                );
                 self.closes += 1;
                 json!({})
             }
@@ -419,16 +496,21 @@ impl FakeHost {
     }
 
     async fn submit(&mut self) -> String {
+        self.submit_count(1).await
+    }
+
+    async fn submit_count(&mut self, count: u32) -> String {
         let (result, payload) = self
             .call(
                 "test.submit",
                 json!({
                     "clientKeyId": CLIENT_KEY,
+                    "driverModel": DRIVER,
                     "imageModel": self.model,
                     "prompt": PROMPT,
                     "size": "1024x1024",
                     "quality": "medium",
-                    "count": 1
+                    "count": count
                 }),
             )
             .await
@@ -479,6 +561,9 @@ async fn assert_success(model: &'static str, format: ImageFormat, mime: &str) {
     let job = host.job().await;
     assert_eq!(job["id"], id);
     assert_eq!(job["status"], "succeeded");
+    assert_eq!(job["driverModel"], DRIVER);
+    assert_eq!(job["diagnostic"]["executionModel"], DRIVER);
+    assert_eq!(job["diagnostic"]["operation"], "generate");
     assert_eq!(job["requestId"], REQUEST_ID);
     assert_eq!(job["resultMime"], mime);
     assert_eq!(job["actualWidth"], 1024);
@@ -535,14 +620,19 @@ async fn assert_success(model: &'static str, format: ImageFormat, mime: &str) {
 }
 
 #[tokio::test]
-async fn native_25_job_completes_with_webp_and_downloadable_1024_result() {
+async fn responses_25_job_completes_with_webp_and_downloadable_1024_result() {
     assert_success("gpt-image-2.5-sunburst", ImageFormat::WebP, "image/webp").await;
 }
 
 #[tokio::test]
-async fn native_26_job_preserves_png_content_and_mime_for_1024_result() {
+async fn responses_26_sse_job_preserves_png_content_and_mime_for_1024_result() {
     // 上游即使返回 PNG，也必须按真实文件签名交付，不能因请求 WebP 而错误标注。
     assert_success("gpt-image-2.6-sunburst", ImageFormat::Png, "image/png").await;
+}
+
+#[tokio::test]
+async fn responses_26_flare_websocket_job_preserves_selected_image_model() {
+    assert_success("gpt-image-2.6-flare", ImageFormat::WebP, "image/webp").await;
 }
 
 #[tokio::test]
@@ -558,9 +648,12 @@ async fn stream_read_failure_keeps_request_identity_and_closes_without_retry_or_
     assert!(job["resultBytes"].is_null());
     let diagnostic = &job["diagnostic"];
     assert_eq!(diagnostic["stage"], "model_stream_read");
-    assert_eq!(diagnostic["operation"], "generate_image");
+    assert_eq!(diagnostic["operation"], "generate");
     assert_eq!(diagnostic["modelId"], model);
-    assert_eq!(diagnostic["executionModel"], model);
+    assert_eq!(diagnostic["executionModel"], DRIVER);
+    assert_eq!(diagnostic["errorOrigin"], "host_remote");
+    assert_eq!(diagnostic["safeReason"], "host_error_unclassified");
+    assert_eq!(diagnostic["pluginVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(diagnostic["size"], "1024x1024");
     assert_eq!(diagnostic["outputFormat"], "webp");
     assert_eq!(diagnostic["executionAccepted"], true);
@@ -636,4 +729,277 @@ fn persisted_job_without_diagnostic_remains_readable() {
     assert!(restored.diagnostic.is_none());
     assert_eq!(restored.image_model, "gpt-image-2.5-sunburst");
     assert_eq!(restored.status, "queued");
+}
+#[tokio::test]
+async fn completed_image_is_persisted_before_a_slow_sibling_finishes() {
+    let mut host = FakeHost::start("gpt-image-2.5-sunburst", ImageFormat::WebP, false).await;
+    host.slow_second = true;
+    host.submit_count(2).await;
+    host.call("test.reconcile", json!({})).await.unwrap();
+    let (result, _) = host.call("test.list", json!({})).await.unwrap();
+    let jobs = result["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().all(|job| job["status"] == "succeeded"));
+    assert_eq!(host.executions, 2);
+    assert_eq!(host.closes, 0);
+    host.shutdown().await;
+}
+
+#[test]
+fn read_diagnostics_distinguish_callback_validation_from_provider_rejection() {
+    let config = Config::from_configuration(&json!({})).unwrap();
+    let job = ImageJob::new(
+        CLIENT_KEY.into(),
+        "gpt-image-2.5-sunburst".into(),
+        PROMPT.into(),
+        "1024x1024".into(),
+        "medium".into(),
+    );
+    let mut diagnostic = JobDiagnostic::new(&job, &config);
+    diagnostic.execution_accepted = true;
+    diagnostic.upstream_sent = None;
+    diagnostic.stage = "model_stream_read".into();
+    let error = PluginFault::new(ErrorCode::InvalidInput, "callback input is invalid");
+    diagnostic.record_session_error(SessionError::Remote(error), false);
+    assert_eq!(
+        diagnostic.safe_reason.as_deref(),
+        Some("callback_input_invalid")
+    );
+    assert_eq!(diagnostic.upstream_sent, None);
+
+    let mut error = PluginFault::new(ErrorCode::InvalidInput, PRIVATE_MESSAGE);
+    error.details =
+        Some(json!({"provider":{"kind":"invalid_request","raw_upstream_error":PRIVATE_TOKEN}}));
+    diagnostic.record_session_error(SessionError::Remote(error), false);
+    assert_eq!(
+        diagnostic.safe_reason.as_deref(),
+        Some("provider_invalid_request")
+    );
+    assert_eq!(diagnostic.upstream_sent, Some(false));
+    assert_private_values_absent(&serde_json::to_value(&diagnostic).unwrap());
+
+    diagnostic.upstream_sent = Some(true);
+    let mut error = PluginFault::new(ErrorCode::InvalidInput, PRIVATE_MESSAGE);
+    error.details = Some(json!({"provider":{"kind":"invalid_request"}}));
+    diagnostic.record_session_error(SessionError::Remote(error), false);
+    assert_eq!(diagnostic.upstream_sent, Some(true));
+}
+
+#[test]
+fn structured_response_requires_completion_and_rejects_failed_image_events() {
+    let config = Config::from_configuration(&json!({})).unwrap();
+    let job = ImageJob::new(
+        CLIENT_KEY.into(),
+        "gpt-image-2.5-sunburst".into(),
+        PROMPT.into(),
+        "1024x1024".into(),
+        "medium".into(),
+    );
+    let mut diagnostic = JobDiagnostic::new(&job, &config);
+    let mut image = None;
+    let mut url = None;
+    let mut completed = false;
+    let bytes = vec![42_u8; 32];
+    let item = json!({"type":"response.output_item.done","item":{
+        "id":"image-structured","type":"image_generation_call","result":base64::engine::general_purpose::STANDARD.encode(&bytes)
+    }});
+    super::record_image_event(&item, &mut image, &mut url, &mut completed, &mut diagnostic)
+        .unwrap();
+    assert_eq!(image, Some(bytes));
+    assert!(!completed);
+    let done = json!({"type":"response.completed","response":{"status":"completed","output":[]}});
+    super::record_image_event(&done, &mut image, &mut url, &mut completed, &mut diagnostic)
+        .unwrap();
+    assert!(completed);
+    let failed = json!({"type":"response.failed","response":{"status":"failed","error":{"message":PRIVATE_MESSAGE}}});
+    assert!(
+        super::record_image_event(
+            &failed,
+            &mut image,
+            &mut url,
+            &mut completed,
+            &mut diagnostic
+        )
+        .is_err()
+    );
+    assert_private_values_absent(&serde_json::to_value(&diagnostic).unwrap());
+}
+
+#[test]
+fn structured_response_rejects_multiple_distinct_image_calls() {
+    let config = Config::from_configuration(&json!({})).unwrap();
+    let job = ImageJob::new(
+        CLIENT_KEY.into(),
+        "gpt-image-2.5-sunburst".into(),
+        PROMPT.into(),
+        "1024x1024".into(),
+        "medium".into(),
+    );
+    let mut diagnostic = JobDiagnostic::new(&job, &config);
+    let mut image = None;
+    let mut url = None;
+    let mut completed = false;
+    let encoded = base64::engine::general_purpose::STANDARD.encode([42_u8; 32]);
+    let first = json!({"type":"response.output_item.done","item":{"id":"image-a","type":"image_generation_call","result":encoded}});
+    super::record_image_event(
+        &first,
+        &mut image,
+        &mut url,
+        &mut completed,
+        &mut diagnostic,
+    )
+    .unwrap();
+    let second = json!({"type":"response.output_item.done","item":{"id":"image-b","type":"image_generation_call","result":encoded}});
+    assert!(
+        super::record_image_event(
+            &second,
+            &mut image,
+            &mut url,
+            &mut completed,
+            &mut diagnostic
+        )
+        .is_err()
+    );
+    assert_eq!(
+        diagnostic.safe_reason.as_deref(),
+        Some("multiple_image_results")
+    );
+    assert!(
+        serde_json::to_value(&diagnostic)
+            .unwrap()
+            .get("imageCallId")
+            .is_none()
+    );
+}
+
+#[test]
+fn raw_body_never_promotes_unfinished_or_cancelled_responses_to_success() {
+    let config = Config::from_configuration(&json!({})).unwrap();
+    let job = ImageJob::new(
+        CLIENT_KEY.into(),
+        "gpt-image-2.5-sunburst".into(),
+        PROMPT.into(),
+        "1024x1024".into(),
+        "medium".into(),
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode([42_u8; 32]);
+    for status in [
+        None,
+        Some("in_progress"),
+        Some("cancelled"),
+        Some("incomplete"),
+    ] {
+        let mut body =
+            json!({"output":[{"id":"raw-image","type":"image_generation_call","result":encoded}]});
+        if let Some(status) = status {
+            body["status"] = json!(status);
+        }
+        let mut diagnostic = JobDiagnostic::new(&job, &config);
+        let mut image = None;
+        let mut url = None;
+        let mut completed = false;
+        let result = super::record_response_body(
+            &serde_json::to_vec(&body).unwrap(),
+            &mut image,
+            &mut url,
+            &mut completed,
+            &mut diagnostic,
+        );
+        assert!(
+            result.is_err() || !completed,
+            "status {status:?} cannot finish a task"
+        );
+    }
+    let mut diagnostic = JobDiagnostic::new(&job, &config);
+    let mut image = None;
+    let mut url = None;
+    let mut completed = false;
+    let missing_id =
+        json!({"status":"completed","output":[{"type":"image_generation_call","result":encoded}]});
+    assert!(
+        super::record_response_body(
+            &serde_json::to_vec(&missing_id).unwrap(),
+            &mut image,
+            &mut url,
+            &mut completed,
+            &mut diagnostic
+        )
+        .is_err()
+    );
+    assert_eq!(
+        diagnostic.safe_reason.as_deref(),
+        Some("image_result_id_missing")
+    );
+}
+
+#[test]
+fn raw_body_shares_call_identity_with_structured_events() {
+    let config = Config::from_configuration(&json!({})).unwrap();
+    let job = ImageJob::new(
+        CLIENT_KEY.into(),
+        "gpt-image-2.5-sunburst".into(),
+        PROMPT.into(),
+        "1024x1024".into(),
+        "medium".into(),
+    );
+    let encoded = base64::engine::general_purpose::STANDARD.encode([42_u8; 32]);
+    let mut diagnostic = JobDiagnostic::new(&job, &config);
+    let mut image = None;
+    let mut url = None;
+    let mut completed = false;
+    let first = json!({"type":"response.output_item.done","item":{"id":"image-a","type":"image_generation_call","result":encoded}});
+    super::record_image_event(
+        &first,
+        &mut image,
+        &mut url,
+        &mut completed,
+        &mut diagnostic,
+    )
+    .unwrap();
+    let same = json!({"status":"completed","output":[{"id":"image-a","type":"image_generation_call","result":encoded}]});
+    super::record_response_body(
+        &serde_json::to_vec(&same).unwrap(),
+        &mut image,
+        &mut url,
+        &mut completed,
+        &mut diagnostic,
+    )
+    .unwrap();
+    assert!(completed);
+    let other = json!({"status":"completed","output":[{"id":"image-b","type":"image_generation_call","result":encoded}]});
+    assert!(
+        super::record_response_body(
+            &serde_json::to_vec(&other).unwrap(),
+            &mut image,
+            &mut url,
+            &mut completed,
+            &mut diagnostic
+        )
+        .is_err()
+    );
+    assert_eq!(
+        diagnostic.safe_reason.as_deref(),
+        Some("multiple_image_results")
+    );
+}
+
+#[test]
+fn persisted_v074_diagnostic_accepts_new_optional_metadata() {
+    let config = Config::from_configuration(&json!({})).unwrap();
+    let job = ImageJob::new(
+        CLIENT_KEY.into(),
+        "gpt-image-2.5-sunburst".into(),
+        PROMPT.into(),
+        "1024x1024".into(),
+        "medium".into(),
+    );
+    let mut legacy = serde_json::to_value(JobDiagnostic::new(&job, &config)).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("pluginVersion");
+    object.remove("errorOrigin");
+    object.remove("safeReason");
+    let restored: JobDiagnostic = serde_json::from_value(legacy).unwrap();
+    assert!(restored.plugin_version.is_empty());
+    assert!(restored.error_origin.is_none());
+    assert!(restored.safe_reason.is_none());
 }

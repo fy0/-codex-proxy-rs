@@ -4,6 +4,7 @@ export interface AccountRule {
   accountId: string
   fiveHourLimitPercent: number | null
   weeklyLimitPercent: number | null
+  dailyLimitUsd: string | null
 }
 
 export interface Configuration {
@@ -33,9 +34,23 @@ export interface QuotaWindow {
   resetAtMs: number | null
 }
 
+export interface DailyUsage {
+  limitUsd: string | null
+  usedUsd: string | null
+  remainingUsd: string | null
+  status: 'disabled' | 'ready' | 'reached' | 'unknown' | 'stale'
+  unknownCostCount: number
+  inFlightCount: number
+  observedAtMs: number | null
+  resetAtMs: number
+  timezone: 'UTC'
+  currency: 'USD'
+}
+
 export interface AccountOverview extends AccountInfo {
   assessment: { accountId: string, excluded: boolean, reasons: Reason[] }
   quota: { observedAtMs: number | null, windows: QuotaWindow[] } | null
+  dailyUsage?: DailyUsage
 }
 
 export interface Overview {

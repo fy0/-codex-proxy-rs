@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.4",
-  "description": "Codex Image Bridge: host-compatible model stream reads, safe job diagnostics, temporary image delivery and integrated Quota Guard.",
+  "version": "0.7.5",
+  "description": "Codex Image Bridge: Responses-backed image jobs, precise diagnostics, redesigned account quota management and daily USD protection.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -49,7 +49,7 @@
       "bridgeMode": {
         "type": "string",
         "title": "生图路由策略",
-        "description": "auto: 采用 Sub2API 兼容策略，已知支持原生 Images 的图片模型走原生接口；responses: 所有列出的图片模型走 image_generation 工具。",
+        "description": "控制外部 Images HTTP：auto 优先使用原生 Images，responses 使用 image_generation 工具。后台画图任务固定使用 Responses 工具链。",
         "enum": [
           "auto",
           "responses"
@@ -131,7 +131,7 @@
       "quotaGuard": {
         "type": "array",
         "title": "额度保护账号规则",
-        "description": "可选：整合 quota-guard v0.2.3 的 5 小时/每周额度保护功能；与生图账号过滤在同一个 scheduler 内执行。禁用旧 quota-guard 的 scheduler 绑定以防重叠。",
+        "description": "账号 5 小时/每周额度与每日已记录 USD 费用保护，覆盖该账号全部 CPR 调度请求；与生图账号过滤在同一个 scheduler 内执行。禁用旧 quota-guard 的 scheduler 绑定以防重叠。",
         "maxItems": 1000,
         "default": [],
         "items": {
@@ -163,6 +163,13 @@
               "minimum": 0,
               "maximum": 100,
               "default": 95
+            },
+            "dailyLimitUsd": {
+              "type": ["string", "null"],
+              "title": "每日已记录费用上限（USD）",
+              "description": "默认关闭。覆盖该账号全部 CPR 请求，按 UTC 00:00 重置。精确十进制字符串，0 立即阻止。依据宿主持久用量记录；观测未知或过期时阻止调度；并发与记账延迟可能使最终费用超过此阈值，不是原子硬预算。",
+              "pattern": "^[0-9]{1,18}(\\.[0-9]{1,12})?$",
+              "default": null
             }
           }
         }
@@ -178,7 +185,7 @@
       "concurrencyPerAccount": {
         "type": "integer",
         "title": "每账号生图并发",
-        "description": "每个被授权生图账号允许同时处理的后端图片任务数（默认8）；总容量随可用生图账号数增长，仍受 CPR Core 并发租约约束。",
+        "description": "每个被授权生图账号允许同时处理的后端图片任务数（默认8）；本版后台总并发最多16，为额度和管理回调保留容量，仍受 CPR Core 并发租约约束。",
         "minimum": 1,
         "maximum": 32,
         "default": 8

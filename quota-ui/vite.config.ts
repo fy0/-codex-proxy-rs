@@ -1,14 +1,20 @@
 import { readFileSync } from 'node:fs'
-import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
   base: './',
-  resolve: { conditions: ['codex-proxy-source', 'module', 'browser', 'import', 'default'] },
+  resolve: {
+    conditions: [
+      'codex-proxy-source',
+      'module',
+      'browser',
+      'import',
+      'default',
+    ],
+  },
   plugins: [
     vue(),
-    tailwindcss(),
     {
       name: 'quota-guard-management-page',
       generateBundle() {
@@ -16,6 +22,11 @@ export default defineConfig({
           type: 'asset',
           fileName: 'index.html',
           source: readFileSync(new URL('./index.html', import.meta.url), 'utf8'),
+        })
+        this.emitFile({
+          type: 'asset',
+          fileName: 'LICENSE',
+          source: readFileSync(new URL('./LICENSE', import.meta.url), 'utf8'),
         })
       },
     },
