@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.5.1",
-  "description": "Codex images bridge: per-Key image models, visual configuration builder, email-labeled account choices and collapsed-by-default configuration.",
+  "version": "0.6.0",
+  "description": "Codex Image Bridge: Images 2.6, per-Key image models, concurrent image workbench, persisted selections, visual config builder.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -100,13 +100,14 @@
         "maxItems": 32,
         "uniqueItems": true,
         "default": [
-          "gpt-image-1",
-          "gpt-image-1.5",
-          "gpt-image-2",
-          "gpt-image-2.5-flare",
+          "gpt-image-2.6-sunburst",
+          "gpt-image-2.6-flare",
           "gpt-image-2.5-sunburst",
+          "gpt-image-2.5-flare",
+          "gpt-image-2.5-sunburst-2026-09-08",
           "gpt-image-2.5-flare-2026-09-08",
-          "gpt-image-2.5-sunburst-2026-09-08"
+          "gpt-image-2",
+          "gpt-image-1.5"
         ]
       }
     },
@@ -116,5 +117,66 @@
     "web/index.html": "text/html",
     "web/app.js": "text/javascript",
     "web/app.css": "text/css"
-  }
+  },
+  "state": [
+    {
+      "namespace": "image-workbench",
+      "schemaVersion": 1,
+      "schema": {
+        "type": "object",
+        "required": [
+          "clientKeyId",
+          "driverModel",
+          "imageModel",
+          "size",
+          "quality",
+          "count",
+          "parallelism"
+        ],
+        "properties": {
+          "clientKeyId": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "driverModel": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "imageModel": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "size": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "quality": {
+            "enum": [
+              "auto",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "parallelism": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          }
+        },
+        "additionalProperties": false
+      },
+      "maximumRecords": 1,
+      "maximumBytes": 4096,
+      "maximumValueBytes": 2048,
+      "migratesFrom": []
+    }
+  ]
 }

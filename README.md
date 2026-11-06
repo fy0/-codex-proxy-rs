@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.5.1 (official SDK)
+# CPR Image Bridge v0.6.0 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -89,3 +89,37 @@ GitHub Actions 使用官方 SDK 提交和官方 cpr-plugin packaging CLI，运�
 - 账号选择项现在优先使用 CPR 官方只读 AccountFacts.email 展示邮箱，下面仍保留账户 ID、分组；缺失邮箱时自动展示原有名称或 ID。该数据仅在已登录管理员的插件页面 / 管理 API 范围可见，不会进入 /v1/models 响应。
 - 配置生成器改为可点击标题展开的原生 details 组件，默认折叠。首次打开画图测试页直接看到生成设置和预览；展开后所有账号、分组和模型选择、JSON 生成及复制功能不变。
 - 不新增配置字段、不修改插件权限或账号池；升级 v0.5.0 至 v0.5.1 会沿用原配置。仍须将配置生成器导出的 JSON 复制到官方 CPR 插件参数并保存。
+
+
+## v0.6.0 · Images 2.6 与异步多图测试台
+
+2026-11-04 OpenAI 发布 Images 2.6。新增内置候选 gpt-image-2.6-sunburst、gpt-image-2.6-flare，并更新新安装时 imageModels 默认值；上游 OAuth 账号能否调用由实际权限决定。旧插件实例显式保存的 imageModels 保持原样：需要在“插件配置生成器”中勾选 2.6 并复制 JSON 到 CPR「插件参数」保存。已退役 gpt-image-1 不再属于默认候选。
+
+### 上次选择记忆
+
+管理测试页仅列出经官方 host.models.list / Key 账号权限复核、同时具有对话主控模型和绘图模型的启用 Key。已保存且仍有权限的 Key 优先恢复。
+上次选择将保存在插件私有状态：Client Key ID、Responses 主控模型、图片模型、尺寸、画质、单次张数、页面并发上限。默认主控优先 gpt-6-luna，不存在则 gpt-5.6-luna；图片模型默认 gpt-image-2.5-sunburst。若原选择不再允许，自动回退到可用项。
+
+支持 1024×1024、1536×1024、1024×1536、2048×2048、2048×1152、1152×2048、3840×2160 和 2160×3840，以及 auto。画质包含 auto、low、medium、high，较新的 2.5/2.6 型号还可选择 xhigh、max。旧款型号没有高分辨率或高画质权限时，界面自动禁用不可用选项。
+
+官方 CPR 插件页面使用仅 allow-scripts 的隔离 iframe，浏览器 localStorage 不可靠，因此使用官方 host.state.get/put 存储选择。保存和恢复使用 image-workbench 私有命名空间及 CAS 版本，**不保存 API Key 明文、Prompt、生成图片**。存储属于同一个插件实例，管理员之间共享最后选择；状态存储失败时页面提示，绘图仍可继续。
+
+### 多张与异步任务队列
+
+每次点击可提交 1～10 张，每张通过一个独立的官方 models.responses 生图工具请求执行。页面允许上一批未完成时继续提交下一批，默认同时执行 2 个，用户可以选择 1～3。每张有独立的排队、生成、完成、取消和失败状态及请求 ID，可取消单张或停止全部，完成后分别保存 PNG。
+
+前端在最多 30 个任务卡片和 12 张结果 PNG 之间回收内存，4K 大图分片 Base64 解码成 Blob URL；清理任务或关闭页面时回收资源。
+
+这里的异步是“页面打开期间多请求并发”，不是后台队列：关闭或刷新页面会中止正在请求的任务，图片和任务历史不持久化。使用标准 Images API 时，原生 n 参数支持 1～10，但本管理测试页为便于独立取消和按账号分配，每张单独调用一次 Responses。
+
+### 账号并发、负载均衡
+
+此插件 SDK 固定的官方 CPR 提交 96e8443 的 docs/api.md 将 maxConcurrentPerAccount 初始值列为 3，单账号 concurrencyLimit 可以覆盖全局默认值。Core 对 Key 和账号进行配额/并发租约管理；插件仅缩小允许生图的账号候选范围并 DelegateFiltered，最终由原生选号策略平衡负载，不会强行绑定某一个账号。
+
+会话亲和的“优先”或“严格”模式可能让同一会话坚持使用主账号。管理测试页每张独立创建请求且不提供 previous_response_id，通常可以分配到不同账号。账号池没有空位时按 CPR 的 maxWaitingPerKey、maxWaitingPerAccount 和超时设置排队，或返回明确并发失败；上游还可能施加独立的速率限制。建议只有一个并发额度为 1 的账号时，页面并发设为 1；多个生图账号时再选 2 或 3。
+
+资料：https://openai.com/index/introducing-images-2-6/ 、 https://developers.openai.com/api/reference/resources/images/methods/generate 和 https://github.com/zyycn/codex-proxy-rs/blob/96e8443ede051abdd8f0bac69462a7cfe2945633/docs/api.md
+
+### 验收覆盖
+
+Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢复、Key 过滤、6 Luna 不存在时回退 5.6、4K、两批各 2 张的独立并发结果、总取消不会启动后续任务；并用 GitHub Actions 官方 SDK 完成 Cargo 单测、三平台 Release 构建及可安装包验证。此处不宣称已通过真实 OAuth 上游的生产生成验收。

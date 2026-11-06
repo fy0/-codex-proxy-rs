@@ -76,37 +76,75 @@
       <label for="imageModel">绘图模型</label>
       <select id="imageModel"><option value="gpt-image-2">gpt-image-2</option></select>
       <div class="two-up">
-        <div><label for="size">图像尺寸</label><select id="size"><option value="1024x1024">正方形 1024²</option><option value="1536x1024">横向 3:2</option><option value="1024x1536">竖向 2:3</option><option value="auto">自动</option></select></div>
-        <div><label for="quality">画质</label><select id="quality"><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
+        <div>
+          <label for="size">图像尺寸（最高 4K）</label>
+          <select id="size">
+            <option value="1024x1024">1024 × 1024 · 正方形</option>
+            <option value="1536x1024">1536 × 1024 · 横向</option>
+            <option value="1024x1536">1024 × 1536 · 竖向</option>
+            <option value="2048x2048">2048 × 2048 · 2K 正方形</option>
+            <option value="2048x1152">2048 × 1152 · 2K 横向</option>
+            <option value="1152x2048">1152 × 2048 · 2K 竖向</option>
+            <option value="3840x2160">3840 × 2160 · 4K 横向</option>
+            <option value="2160x3840">2160 × 3840 · 4K 竖向</option>
+            <option value="auto">自动</option>
+          </select>
+        </div>
+        <div><label for="quality">画质</label>
+          <select id="quality">
+            <option value="auto">自动</option><option value="low">低</option>
+            <option value="medium">中</option><option value="high">高</option>
+            <option value="xhigh">超高 xhigh</option><option value="max">最高 max</option>
+          </select>
+        </div>
       </div>
+      <div class="two-up">
+        <div><label for="batchCount">本次张数</label><select id="batchCount">
+          <option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option>
+          <option value="4">4 张</option><option value="5">5 张</option><option value="6">6 张</option>
+          <option value="7">7 张</option><option value="8">8 张</option><option value="9">9 张</option>
+          <option value="10">10 张</option>
+        </select></div>
+        <div><label for="parallelism">本页面同时执行</label><select id="parallelism">
+          <option value="1">1 个任务（保守）</option>
+          <option value="2" selected>2 个任务（推荐）</option>
+          <option value="3">3 个任务</option>
+        </select></div>
+      </div>
+      <p class="field-note">每张图片单独调用 Responses 工具，任务独立运行、取消与预览。并发受此页面上限和 CPR 账号并发租约双重控制。</p>
       <div class="divider"></div>
       <div class="section-title"><span class="section-index">02</span><h2>创作提示词</h2></div>
       <div class="label-line"><span class="label-text">快速预设</span><span class="hint">点击载入，可继续编辑</span></div>
       <div id="presets" class="presets" aria-label="预置提示词"></div>
       <label for="prompt">图片描述</label>
       <textarea id="prompt" rows="7" maxlength="10000" placeholder="描述你希望生成的图片…"></textarea>
-      <div class="footer-line"><span id="promptCount">0 / 10000</span><span>一次生成 1 张</span></div>
+      <div class="footer-line"><span id="promptCount">0 / 10000</span><span>最多 10 张／批 · 可随时追加批次</span></div>
       <div class="action-row">
-        <button id="generate" class="primary-btn" disabled><span aria-hidden="true">✦</span> 生成图片</button>
-        <button id="cancel" class="secondary-btn" disabled>取消</button>
+        <button id="generate" class="primary-btn" disabled><span aria-hidden="true">✦</span> 加入生成队列</button>
+        <button id="cancel" class="secondary-btn" disabled>停止全部</button>
       </div>
       <div id="validationMessage" class="notice" role="status"></div>
     </section>
-    <section class="panel results" aria-label="生成结果">
-      <div class="results-top"><div class="section-title"><span class="section-index">03</span><h2>生成预览</h2></div><span class="status" id="status">未开始</span></div>
-      <div class="preview" id="preview">
-        <div class="empty" id="empty"><div class="empty-art">✦</div><h3>你的作品会在这里出现</h3><p>选一个预置场景，或者写下自己的描述。</p></div>
-        <img id="resultImage" alt="本次生成的图片" hidden>
+    <section class="panel results" aria-label="异步生成任务">
+      <div class="results-top">
+        <div class="section-title"><span class="section-index">03</span><h2>生成任务与预览</h2></div>
+        <span class="status" id="status" role="status">尚无任务</span>
       </div>
-      <div class="result-bar"><div><span class="mini-label">本次结果</span><div id="resultInfo">暂无生成记录</div></div><a id="saveImage" class="save-btn" hidden download="codex-image.png">保存 PNG</a></div>
-      <div class="technical">
-        <details><summary>响应信息 <span class="chevron">⌄</span></summary>
-          <div class="details-body"><div><span>Response ID</span><code id="responseId">—</code></div><div><span>HTTP 状态</span><code id="httpStatus">—</code></div><div><span>响应头请求 ID</span><code id="requestId">—</code></div><div><span>返回文本</span><pre id="resultText">—</pre></div></div>
-        </details>
+      <div class="task-toolbar">
+        <span id="queueInfo">0 运行中 · 0 排队 · 0 完成</span>
+        <button id="clearFinished" class="text-action" type="button" disabled>清理已完成</button>
       </div>
+      <div id="taskGrid" class="task-grid" aria-live="polite" aria-relevant="additions text">
+        <div class="task-placeholder" id="empty">
+          <div class="empty-art">✦</div>
+          <h3>生成任务在这里展示</h3>
+          <p>提交一张或多张，等待时也可以继续添加新任务。</p>
+        </div>
+      </div>
+      <p class="task-note">任务只在此页面打开时运行。关闭页面会停止未完成任务；只有选择设置保存到当前插件实例。</p>
     </section>
   </div>
-  <footer>由官方 CPR 模型桥发起真实 Responses 调用 · 生图会消耗相关账号的用量 · 结果不在浏览器中持久保存</footer>
+  <footer>使用 CPR 官方 Responses 模型桥 · 生图会消耗账号配额 · 偏好保存在插件私有状态中（同一插件实例共用）· 图片不会持久存储</footer>
 </div>
 </body>
 </html>

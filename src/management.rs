@@ -5,7 +5,10 @@ use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
     call::{
         data::AccountFactsQuery,
-        host::{ModelListRequest, ModelListResult},
+        host::{
+            ModelListRequest, ModelListResult, StateGetRequest, StateGetResult, StatePutRequest,
+            StatePutResult,
+        },
         management::{
             ManagementPage, ManagementRegistration, ManagementRequest, ManagementResource,
             ManagementResponse, ManagementRoute,
@@ -30,6 +33,18 @@ pub fn registration() -> ManagementRegistration {
             ManagementRoute {
                 method: "POST".into(),
                 path: "api/models".into(),
+                request_content_types: vec![JSON.into()],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "GET".into(),
+                path: "api/preferences".into(),
+                request_content_types: vec![],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "POST".into(),
+                path: "api/preferences".into(),
                 request_content_types: vec![JSON.into()],
                 response_content_types: vec![JSON.into()],
             },
@@ -77,7 +92,7 @@ async fn model_catalog(
             serde_json::to_value(ModelListRequest {
                 client_key_id,
                 protocol: "openai".into(),
-                client_version: "cpr-image-workbench/0.5.0".into(),
+                client_version: "cpr-image-workbench/0.6.0".into(),
             })
             .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid model list"))?,
             Vec::new(),
@@ -144,6 +159,104 @@ async fn account_choices(
     Ok((accounts, groups.into_iter().collect(), true))
 }
 
+const PREFERENCE_NAMESPACE: &str = "image-workbench";
+const PREFERENCE_KEY: &str = "last-selection";
+
+async fn preference_read(host: &HostClient) -> Result<(Option<Value>, Option<u64>), PluginFault> {
+    let reply = host
+        .call(
+            "host.state.get",
+            serde_json::to_value(StateGetRequest {
+                namespace: PREFERENCE_NAMESPACE.to_owned(),
+                key: PREFERENCE_KEY.to_owned(),
+            })
+            .map_err(|_| PluginFault::new(ErrorCode::Fault, "encode preference get failed"))?,
+            Vec::new(),
+        )
+        .await
+        .map_err(SessionError::into_plugin_fault)?;
+    let response: StateGetResult = serde_json::from_value(reply.result)
+        .map_err(|_| PluginFault::new(ErrorCode::Fault, "invalid preference state"))?;
+    Ok(match response.record {
+        Some(record) => (Some(record.value), Some(record.version)),
+        None => (None, None),
+    })
+}
+
+fn is_valid_preference(value: &Value) -> bool {
+    let Some(fields) = value.as_object() else {
+        return false;
+    };
+    if fields.len() != 7 {
+        return false;
+    }
+    let text = |name: &str, max: usize| {
+        fields
+            .get(name)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.len() <= max && !value.chars().any(char::is_control))
+    };
+    if !text("clientKeyId", 256)
+        || !text("driverModel", 128)
+        || !text("imageModel", 128)
+        || !text("size", 32)
+    {
+        return false;
+    }
+    let quality = fields.get("quality").and_then(Value::as_str);
+    if !matches!(
+        quality,
+        Some("auto" | "low" | "medium" | "high" | "xhigh" | "max")
+    ) {
+        return false;
+    }
+    let count = fields.get("count").and_then(Value::as_u64);
+    let parallelism = fields.get("parallelism").and_then(Value::as_u64);
+    if !count.is_some_and(|v| (1..=10).contains(&v))
+        || !parallelism.is_some_and(|v| (1..=3).contains(&v))
+    {
+        return false;
+    }
+    let size = fields.get("size").and_then(Value::as_str).unwrap_or("");
+    // 上游当前 4K 限制，拒绝任意字符串绕过尺寸白名单。
+    matches!(
+        size,
+        "auto"
+            | "1024x1024"
+            | "1536x1024"
+            | "1024x1536"
+            | "2048x2048"
+            | "2048x1152"
+            | "1152x2048"
+            | "3840x2160"
+            | "2160x3840"
+    )
+}
+
+async fn preference_write(
+    host: &HostClient,
+    value: Value,
+    expected_version: Option<u64>,
+) -> Result<u64, PluginFault> {
+    let reply = host
+        .call(
+            "host.state.put",
+            serde_json::to_value(StatePutRequest {
+                namespace: PREFERENCE_NAMESPACE.to_owned(),
+                key: PREFERENCE_KEY.to_owned(),
+                value,
+                expected_version,
+            })
+            .map_err(|_| PluginFault::new(ErrorCode::Fault, "encode preference save failed"))?,
+            Vec::new(),
+        )
+        .await
+        .map_err(SessionError::into_plugin_fault)?;
+    let response: StatePutResult = serde_json::from_value(reply.result)
+        .map_err(|_| PluginFault::new(ErrorCode::Fault, "invalid preference save response"))?;
+    Ok(response.version)
+}
+
 pub async fn handle(
     call: TypedCall<ManagementRequest>,
     config: &Config,
@@ -200,6 +313,34 @@ pub async fn handle(
                 }),
             )
         }
+        ("GET", "api/preferences") => {
+            if !call.payload.is_empty() {
+                return bad("GET 不接受请求体");
+            }
+            let (selection, version) = preference_read(&call.host).await?;
+            json_response(200, json!({"selection": selection, "version": version}))
+        }
+        ("POST", "api/preferences") => {
+            let request: Value = match serde_json::from_slice(&call.payload) {
+                Ok(req) => req,
+                Err(_) => return bad("偏好不是合法 JSON"),
+            };
+            let Some(selection) = request.get("selection") else {
+                return bad("偏好缺少 selection");
+            };
+            if !is_valid_preference(selection) {
+                return bad("偏好包含无效值");
+            }
+            let expected_version = match request.get("expectedVersion") {
+                None | Some(Value::Null) => None,
+                Some(value) => match value.as_u64() {
+                    Some(version) => Some(version),
+                    None => return bad("偏好状态版本无效"),
+                },
+            };
+            let version = preference_write(&call.host, selection.clone(), expected_version).await?;
+            json_response(200, json!({"version": version}))
+        }
         ("POST", "api/models") => {
             let request: Value = match serde_json::from_slice(&call.payload) {
                 Ok(req) => req,
@@ -254,9 +395,32 @@ mod tests {
     }
 
     #[test]
+    fn preference_schema_accepts_4k_and_rejects_bad_values() {
+        let good = json!({
+            "clientKeyId": "key-1",
+            "driverModel": "gpt-6-luna",
+            "imageModel": "gpt-image-2.6-sunburst",
+            "size": "3840x2160",
+            "quality": "high",
+            "count": 10,
+            "parallelism": 2
+        });
+        assert!(is_valid_preference(&good));
+        let mut bad = good.clone();
+        bad["size"] = json!("4096x4096");
+        assert!(!is_valid_preference(&bad));
+        let mut bad = good.clone();
+        bad["parallelism"] = json!(100);
+        assert!(!is_valid_preference(&bad));
+        let mut bad = good.clone();
+        bad["token"] = json!("secret");
+        assert!(!is_valid_preference(&bad));
+    }
+
+    #[test]
     fn management_route_and_page_are_registered() {
         let registration = registration();
-        assert_eq!(registration.routes.len(), 2);
+        assert_eq!(registration.routes.len(), 4);
         assert_eq!(registration.pages[0].entry, "web/index.html");
         assert_eq!(registration.pages[0].title, "画图测试");
     }

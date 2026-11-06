@@ -5,12 +5,11 @@
   const fields = {
     clientKey: byId('clientKey'), driver: byId('driverModel'), imageModel: byId('imageModel'),
     prompt: byId('prompt'), size: byId('size'), quality: byId('quality'),
+    batchCount: byId('batchCount'), parallelism: byId('parallelism'),
     generate: byId('generate'), cancel: byId('cancel'), refresh: byId('refresh'),
     status: byId('status'), notice: byId('validationMessage'),
-    preview: byId('preview'), empty: byId('empty'), image: byId('resultImage'),
-    save: byId('saveImage'), resultInfo: byId('resultInfo'),
-    responseId: byId('responseId'), httpStatus: byId('httpStatus'),
-    requestId: byId('requestId'), resultText: byId('resultText'),
+    taskGrid: byId('taskGrid'), queueInfo: byId('queueInfo'),
+    clearFinished: byId('clearFinished'), empty: byId('empty'),
     count: byId('promptCount'), presets: byId('presets')
   };
   const configFields = {
@@ -292,10 +291,27 @@
     { name: '日系田野', desc: '风景 / 绘本', prompt: '清爽的日系绘本插画，春末的乡间小路，明亮柔和的绿色草地、白色小花和远处的山坡，一座木制小屋，晴空下缓缓飘过的云，宁静温柔，细节丰富。' },
     { name: '橙色图标', desc: 'UI / 设计', prompt: '一枚为创意工具设计的可爱橙色应用图标：抽象星光与画笔组合，圆角几何造型，柔和体积光和细微阴影，精致、辨识度高，无文字，无水印，干净背景。' }
   ];
-  let controller = null;
   let selected = 0;
   let configuredDriver = '';
   let supportedKeys = [];
+  let modelLists = new Map();
+  let eligibleKeys = [];
+  let selectedKeyTouched = false;
+  let preferredKeyId = '';
+  let scanEpoch = 0;
+  let storedSelection = null;
+  let stateVersion = null;
+  let preferencesReady = false;
+  let preferenceDirty = null;
+  let preferenceSaving = false;
+  let preferenceTimer = null;
+  let activeTasks = 0;
+  let taskCounter = 0;
+  let tasks = [];
+  const MAX_TASKS = 30;
+  const MAX_RETAINED_IMAGES = 12;
+  const MAX_PARALLEL = 3;
+  let closed = false;
   const host = () => {
     if (!window.codexProxyPlugin || window.codexProxyPlugin.version < 2
       || !window.codexProxyPlugin.models || !window.codexProxyPlugin.request) {
@@ -327,10 +343,33 @@
     fields.notice.textContent = message || '';
     fields.notice.classList.toggle('error', !!isError);
   }
+  function liveTaskCount() {
+    return tasks.filter((task) => task.state === 'queued' || task.state === 'running').length;
+  }
   function count() {
     fields.count.textContent = fields.prompt.value.length + ' / 10000';
-    fields.generate.disabled = !!controller || !fields.clientKey.value || !fields.driver.value
-      || !fields.imageModel.value || !fields.prompt.value.trim();
+    const number = Number(fields.batchCount.value) || 1;
+    fields.generate.disabled = closed || !fields.clientKey.value || !fields.driver.value
+      || !fields.imageModel.value || !fields.prompt.value.trim()
+      || !Number.isInteger(number) || number < 1 || number > 10
+      || liveTaskCount() + number > MAX_TASKS;
+    fields.cancel.disabled = liveTaskCount() === 0;
+    fields.clearFinished.disabled = !tasks.some((task) => !['queued','running'].includes(task.state));
+  }
+  function updateQueueInfo() {
+    const running = tasks.filter((task) => task.state === 'running').length;
+    const waiting = tasks.filter((task) => task.state === 'queued').length;
+    const succeeded = tasks.filter((task) => task.state === 'succeeded').length;
+    const failed = tasks.filter((task) => task.state === 'failed').length;
+    const canceled = tasks.filter((task) => task.state === 'canceled').length;
+    fields.queueInfo.textContent = running + ' 运行中 · ' + waiting + ' 排队 · '
+      + succeeded + ' 完成 · ' + failed + ' 失败 · ' + canceled + ' 取消';
+    if (running || waiting) status('working', '进行中');
+    else if (succeeded) status('success', '生成完成');
+    else if (failed) status('error', '存在失败');
+    else status('', tasks.length ? '已停止' : '尚无任务');
+    fields.empty.hidden = tasks.length !== 0;
+    count();
   }
   function presetButtons() {
     fields.presets.replaceChildren();
@@ -367,78 +406,251 @@
     }
     return value;
   }
-  async function loadModels() {
-    if (!fields.clientKey.value) {
-      setOptions(fields.driver, [], '');
+  function applyRememberedSettings() {
+    const saved = storedSelection;
+    if (!saved) return;
+    for (const [element, value] of [
+      [fields.size, saved.size], [fields.quality, saved.quality],
+      [fields.batchCount, String(saved.count)], [fields.parallelism, String(saved.parallelism)]
+    ]) {
+      if (typeof value === 'string' && [...element.options].some((option) => option.value === value)) {
+        element.value = value;
+      }
+    }
+  }
+  function preferenceValue() {
+    return {
+      clientKeyId: fields.clientKey.value,
+      driverModel: fields.driver.value,
+      imageModel: fields.imageModel.value,
+      size: fields.size.value,
+      quality: fields.quality.value,
+      count: Number(fields.batchCount.value) || 1,
+      parallelism: Number(fields.parallelism.value) || 2
+    };
+  }
+  function queuePreferenceSave() {
+    if (!preferencesReady || closed || !fields.clientKey.value || !fields.imageModel.value || !fields.driver.value) return;
+    preferenceDirty = preferenceValue();
+    if (preferenceTimer !== null) clearTimeout(preferenceTimer);
+    preferenceTimer = setTimeout(() => { preferenceTimer = null; void flushPreferences(); }, 180);
+  }
+  async function flushPreferences() {
+    if (preferenceSaving || closed) return;
+    preferenceSaving = true;
+    try {
+      while (preferenceDirty && !closed) {
+        const selection = preferenceDirty;
+        preferenceDirty = null;
+        let attempts = 0;
+        while (attempts < 2 && !closed) {
+          try {
+            const result = await invoke('POST', 'api/preferences', {
+              selection, expectedVersion: stateVersion
+            });
+            stateVersion = result.version;
+            storedSelection = selection;
+            break;
+          } catch (error) {
+            attempts += 1;
+            if (attempts >= 2) {
+              notice('无法保存上次选择：' + (error.message || error), true);
+              break;
+            }
+            // 可能有其他管理员同时修改了同一插件实例的偏好，刷新 CAS 版本。
+            try {
+              const current = await invoke('GET', 'api/preferences');
+              stateVersion = current.version === null ? null : Number(current.version);
+            } catch {
+              break;
+            }
+          }
+        }
+      }
+    } finally {
+      preferenceSaving = false;
+      if (preferenceDirty && !closed) queuePreferenceSave();
+    }
+  }
+  function chooseModel(models, candidates) {
+    return candidates.find((model) => model && models.includes(model)) || models[0] || '';
+  }
+  function refreshImageOptions() {
+    const model = fields.imageModel.value;
+    const largeSizeSupported = /^gpt-image-2(?:[.-]|$)/.test(model);
+    const maxQualitySupported = /^gpt-image-2\.(?:5|6)(?:[.-]|$)/.test(model);
+    for (const option of fields.size.options) {
+      option.disabled = !largeSizeSupported && !['auto','1024x1024','1536x1024','1024x1536'].includes(option.value);
+    }
+    for (const option of fields.quality.options) {
+      option.disabled = !maxQualitySupported && ['xhigh','max'].includes(option.value);
+    }
+    if (fields.size.selectedOptions[0]?.disabled) fields.size.value = '1024x1024';
+    if (fields.quality.selectedOptions[0]?.disabled) fields.quality.value = 'auto';
+  }
+  function applyModelsForKey() {
+    const selectedId = fields.clientKey.value;
+    const response = modelLists.get(selectedId);
+    if (!response) {
+      setOptions(fields.driver, [{value:'',label:'正在读取对话模型…'}], '');
+      setOptions(fields.imageModel, [{value:'',label:'正在核实绘图模型…'}], '');
       count();
       return;
     }
-    const previous = fields.driver.value || configuredDriver;
-    setOptions(fields.driver, [{ value: '', label: '读取模型中…' }], '');
-    const result = await invoke('POST', 'api/models', { clientKeyId: fields.clientKey.value });
-    const models = Array.isArray(result.models) ? result.models : [];
-    const allowedImages = Array.isArray(result.imageModels) ? result.imageModels : [];
-    const selectedImage = fields.imageModel.value || 'gpt-image-2';
-    const imageOptions = allowedImages.map((id) => ({value: id, label: id}));
-    if (imageOptions.length) {
-      setOptions(fields.imageModel, imageOptions, selectedImage);
+    const models = Array.isArray(response.models) ? response.models.filter((name) =>
+      typeof name === 'string' && !name.startsWith('gpt-image-')) : [];
+    const images = Array.isArray(response.imageModels) ? response.imageModels.filter((name) =>
+      typeof name === 'string' && name.startsWith('gpt-image-')) : [];
+    const preferredDriver = chooseModel(models, [
+      storedSelection?.driverModel,
+      'gpt-6-luna', 'gpt-5.6-luna',
+      configuredDriver, fields.driver.value
+    ]);
+    const preferredImage = chooseModel(images, [
+      storedSelection?.imageModel, 'gpt-image-2.5-sunburst',
+      'gpt-image-2.6-sunburst', fields.imageModel.value
+    ]);
+    setOptions(fields.driver, models.map((id)=>({value:id,label:id})), preferredDriver);
+    setOptions(fields.imageModel, images.map((id)=>({value:id,label:id})), preferredImage);
+    refreshImageOptions();
+    count();
+    if (preferencesReady) queuePreferenceSave();
+  }
+  function updateEligibleKeys() {
+    if (closed) return;
+    const current = fields.clientKey.value;
+    const keyOrder = new Map(supportedKeys.map((key,i)=>[key.id,i]));
+    eligibleKeys.sort((a,b) => (keyOrder.get(a.id) ?? 0)-(keyOrder.get(b.id) ?? 0));
+    const preferred = preferredKeyId || '';
+    const keyId = !selectedKeyTouched && eligibleKeys.some((key)=>key.id===preferred)
+      ? preferred
+      : eligibleKeys.some((key)=>key.id===current) ? current : eligibleKeys[0]?.id || '';
+    if (!eligibleKeys.length) {
+      setOptions(fields.clientKey, [{value:'',label:'正在核实可生图客户端 Key…'}],'');
+      fields.clientKey.disabled = true;
     } else {
-      setOptions(fields.imageModel, [{value:'', label:'该 Key 没有可用的绘图模型'}], '');
-      notice('当前 Key 对插件指定的生图账号没有权限，请检查账号和分组设置。', true);
+      setOptions(fields.clientKey, eligibleKeys.map((key)=>({
+        value:key.id,label:key.name+' · '+key.id
+      })), keyId);
+      fields.clientKey.disabled = false;
+      applyModelsForKey();
     }
-    const chatModels = models.filter((name) => typeof name === 'string'
-      && !name.startsWith('gpt-image-') && name.length < 256);
-    const options = chatModels.map((name) => ({value: name, label: name}));
-    if (options.length === 0) {
-      setOptions(fields.driver, [{value: '', label: '该 Key 没有可用的对话模型'}], '');
-      notice('该客户端 Key 没有可用的对话主控模型。', true);
-      return;
+  }
+  async function scanKeys(keys, epoch) {
+    let index = 0;
+    let invalidCount = 0;
+    let errorCount = 0;
+    const worker = async () => {
+      while (index < keys.length && epoch === scanEpoch && !closed) {
+        const key = keys[index++];
+        try {
+          const response = await invoke('POST','api/models',{clientKeyId:key.id});
+          if (epoch !== scanEpoch || closed) break;
+          modelLists.set(key.id,response);
+          const images = Array.isArray(response.imageModels) ? response.imageModels : [];
+          const mainline = Array.isArray(response.models) ? response.models.filter((id)=>
+            typeof id === 'string' && !id.startsWith('gpt-image-')) : [];
+          if (images.length > 0 && mainline.length > 0) {
+            eligibleKeys.push(key);
+            updateEligibleKeys();
+          } else {
+            invalidCount++;
+          }
+          if (key.id === preferredKeyId && !preferencesReady) {
+            preferencesReady=true;
+            queuePreferenceSave();
+          }
+        } catch (error) {
+          errorCount++;
+        }
+      }
+    };
+    await Promise.all(Array.from({length:Math.min(3,keys.length)},worker));
+    if (epoch !== scanEpoch || closed) return;
+    preferencesReady=true;
+    if (eligibleKeys.length) queuePreferenceSave();
+    if (!eligibleKeys.length) {
+      setOptions(fields.clientKey,[{value:'',label:'没有有权生图的客户端 Key'}],'');
+      setOptions(fields.imageModel,[{value:'',label:'无可用绘图模型'}],'');
+      setOptions(fields.driver,[{value:'',label:'无可用对话模型'}],'');
+      notice('未找到同时具有对话模型和绘图模型权限的 Key。请检查插件账号/分组和 Client Key 授权。'+
+        (errorCount ? ' 另有 '+errorCount+' 个 Key 查询失败。' : ''),true);
+    } else {
+      notice('已筛除 '+invalidCount+' 个无生图模型或无对话模型的 Key。'+
+        (errorCount ? ' 另有 '+errorCount+' 个查询失败，未加入列表。' : ''));
     }
-    const preferred = chatModels.includes(previous) ? previous
-      : chatModels.includes(configuredDriver) ? configuredDriver
-      : chatModels[0];
-    setOptions(fields.driver, options, preferred);
     count();
   }
   async function bootstrap() {
+    const epoch = ++scanEpoch;
     fields.refresh.disabled = true;
+    preferencesReady = false;
+    const previousSelected = fields.clientKey.value;
     try {
-      notice('');
-      const state = await invoke('GET', 'api/bootstrap');
+      notice('读取插件配置与上次选择…');
+      const state = await invoke('GET','api/bootstrap');
+      if (closed || epoch !== scanEpoch) return;
       loadConfigBuilder(state);
       configuredDriver = state.driverModel || 'gpt-5.6-luna';
-      supportedKeys = Array.isArray(state.keys) ? state.keys.filter((key) => key.enabled) : [];
-      const selectedKey = fields.clientKey.value || '';
-      setOptions(fields.clientKey, supportedKeys.map((key) => ({
-        value: key.id, label: key.name + ' · ' + key.id
-      })), selectedKey);
-      if (supportedKeys.length === 0) {
-        setOptions(fields.clientKey, [{value: '', label: '没有可用的客户端 Key'}], '');
-        notice('请先在 CPR 管理端创建并启用客户端 Key。', true);
+      try {
+        const stored = await invoke('GET','api/preferences');
+        storedSelection = stored.selection && typeof stored.selection === 'object' ? stored.selection : null;
+        stateVersion = Number.isSafeInteger(stored.version) ? stored.version : null;
+      } catch (error) {
+        storedSelection = null;
+        stateVersion = null;
+        notice('偏好存储暂不可用：本次可绘图，但下次可能无法恢复选择。',true);
       }
-      const choices = Array.isArray(state.imageModels) ? state.imageModels : [];
-      const selectedImage = fields.imageModel.value || 'gpt-image-2';
-      setOptions(fields.imageModel, choices.map((id) => ({value: id, label: id})), selectedImage);
-      if (!state.enabled) notice('尚未选择启用生图的账号或分组，请先在插件设置中配置。', true);
-      await loadModels();
+      if (closed || epoch !== scanEpoch) return;
+      applyRememberedSettings();
+      supportedKeys = Array.isArray(state.keys) ? state.keys.filter((key)=>key.enabled) : [];
+      modelLists = new Map();
+      eligibleKeys = [];
+      updateEligibleKeys();
+      if (!supportedKeys.length) {
+        notice('没有已启用的客户端 Key，请先在 CPR 管理端配置。',true);
+        return;
+      }
+      if (!state.enabled || !Array.isArray(state.imageModels) || !state.imageModels.length) {
+        notice('尚未开放生图账号/分组或图片模型。请展开上方配置生成器。',true);
+      }
+      const initial = supportedKeys.find((key)=>key.id===previousSelected) ||
+        supportedKeys.find((key)=>key.id===storedSelection?.clientKeyId);
+      preferredKeyId = initial?.id || '';
+      selectedKeyTouched=false;
+      const ordered = initial ? [initial,...supportedKeys.filter((key)=>key.id!==initial.id)] : supportedKeys;
+      preferencesReady = !preferredKeyId;
+      // 各 Key 的模型权限由官方管理 API 分批验证。无图片模型的 Key 不出现在下拉框。
+      void scanKeys(ordered,epoch);
     } catch (error) {
-      notice('加载失败：' + (error && error.message || String(error)), true);
-      setOptions(fields.clientKey, [{value: '', label: '连接不可用'}], '');
-    } finally {
-      fields.refresh.disabled = false;
+      notice('加载失败：'+(error.message||error),true);
+      setOptions(fields.clientKey,[{value:'',label:'管理接口不可用'}],'');
       count();
+    } finally {
+      if (epoch === scanEpoch) fields.refresh.disabled = false;
     }
   }
   function requireImage(base64) {
-    if (typeof base64 !== 'string' || base64.length === 0 || base64.length > 32 * 1024 * 1024) {
-      throw new Error('生成结果不存在或图片超过 32 MiB 展示上限');
+    // 4K PNG 图片可能远超早期的 32 MiB base64 限制。分片解码为 Blob URL，
+    // 不在 DOM 中保留大型 data: URL；清除卡片/关闭页面会 revoke。
+    if (typeof base64 !== 'string' || !base64.length || base64.length > 160 * 1024 * 1024) {
+      throw new Error('没有生成图片，或结果超过 160 MiB 的安全展示上限');
     }
-    const prefix = atob(base64.slice(0, 32));
-    const magic = [137,80,78,71,13,10,26,10];
-    if (!magic.every((byte, index) => prefix.charCodeAt(index) === byte)) {
-      throw new Error('上游没有返回合法的 PNG 图片');
+    const prefix = atob(base64.slice(0,32));
+    if (![137,80,78,71,13,10,26,10].every((byte,index)=>prefix.charCodeAt(index)===byte)) {
+      throw new Error('上游没有返回合法的 PNG 图像数据');
     }
-    return 'data:image/png;base64,' + base64;
+    const chunks=[];
+    // 长度是 4 的倍数；分片 atob 可避免一次解码多十兆像素图片的内存尖峰。
+    for (let i=0;i<base64.length;i+=262144) {
+      const decoded=atob(base64.slice(i,i+262144));
+      const bytes=new Uint8Array(decoded.length);
+      for (let j=0;j<decoded.length;j++) bytes[j]=decoded.charCodeAt(j);
+      chunks.push(bytes);
+    }
+    const blob=new Blob(chunks,{type:'image/png'});
+    if (blob.size>120*1024*1024) throw new Error('单张图片超过 120 MiB 显示上限');
+    return URL.createObjectURL(blob);
   }
   function imageItem(event) {
     const item = event && event.item;
@@ -491,7 +703,7 @@
         if (chunk.done) break;
         buffer += decoder.decode(chunk.value, {stream:true});
         buffer = buffer.replace(/\r\n/g, '\n');
-        if (buffer.length > 48 * 1024 * 1024) throw new Error('模型响应过大，已停止读取');
+        if (buffer.length > 180 * 1024 * 1024) throw new Error('模型响应过大，已停止读取');
         let pos = buffer.indexOf('\n\n');
         while (pos >= 0) {
           consumeLineBlock(buffer.slice(0, pos), state);
@@ -504,92 +716,286 @@
     } finally { reader.releaseLock(); }
     return state;
   }
-  async function generate() {
-    if (controller) return;
-    const key = fields.clientKey.value;
-    const model = fields.driver.value;
-    const imageModel = fields.imageModel.value;
-    const prompt = fields.prompt.value.trim();
-    if (!key || !model || !imageModel || !prompt) return;
-    controller = new AbortController();
-    fields.generate.disabled = true;
-    fields.cancel.disabled = false;
-    fields.refresh.disabled = true;
-    status('working', '生成中…');
-    notice('请求已提交；等待上游绘图结果。');
-    fields.httpStatus.textContent = '等待响应';
-    fields.requestId.textContent = '—';
-    fields.responseId.textContent = '—';
-    const started = performance.now();
-    try {
-      const response = await host().models.responses({
-        clientKeyId: key,
-        signal: controller.signal,
-        body: {
-          model: model, stream: true, store: false,
-          input: [{ type: 'message', role: 'user', content: [{type: 'input_text', text: prompt}]}],
-          instructions: 'Use image_generation to create exactly one image corresponding closely to the user instruction. Preserve its original language and visual constraints.',
-          tools: [{
-            type: 'image_generation', model: imageModel, action: 'auto',
-            size: fields.size.value, quality: fields.quality.value, output_format: 'png'
-          }],
-          tool_choice: 'auto',
-          parallel_tool_calls: false,
-          include: ['reasoning.encrypted_content']
-        }
-      });
-      fields.httpStatus.textContent = String(response.status);
-      fields.requestId.textContent = response.headers.get('x-codex-imagegen-request-id')
-        || response.headers.get('x-gateway-request-id') || response.headers.get('x-request-id') || '—';
-      if (!response.ok) {
-        const text = await response.text();
-        let message = text.slice(0, 600);
-        try { const parsed = JSON.parse(text); message = parsed.error && parsed.error.message || message; } catch {}
-        throw new Error('HTTP ' + response.status + ': ' + message);
-      }
-      const parsed = await consumeResponse(response, controller.signal);
-      if (!parsed.image || !parsed.image.result) {
-        const msg = parsed.text || '上游返回了文字，未执行生图工具';
-        throw new Error(msg.slice(0, 500));
-      }
-      const uri = requireImage(parsed.image.result);
-      fields.image.src = uri;
-      fields.image.hidden = false;
-      fields.empty.hidden = true;
-      fields.save.href = uri;
-      fields.save.hidden = false;
-      fields.responseId.textContent = parsed.document && parsed.document.id || '—';
-      fields.resultText.textContent = parsed.text || '—';
-      const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-      fields.resultInfo.textContent = imageModel + ' · ' + fields.size.value + ' · ' + elapsed + 's';
-      status('success', '生成成功');
-      notice('图片已完成。可以保存 PNG，或修改提示词继续生成。');
-    } catch (error) {
-      const aborted = controller.signal.aborted;
-      status(aborted ? '' : 'error', aborted ? '已取消' : '生成失败');
-      notice(aborted ? '你已取消本次请求。' : (error && error.message || '生成失败'), !aborted);
-    } finally {
-      controller = null;
-      fields.cancel.disabled = true;
-      fields.refresh.disabled = false;
-      count();
+  function createTaskCard(task) {
+    const card = document.createElement('article');
+    card.className = 'task-card';
+    card.dataset.taskId = String(task.id);
+    const head = document.createElement('div');
+    head.className = 'task-head';
+    const label = document.createElement('span');
+    label.className = 'task-id';
+    label.textContent = '图片 #' + task.id;
+    const state = document.createElement('span');
+    state.className = 'task-state';
+    head.append(label,state);
+    const preview = document.createElement('div');
+    preview.className = 'task-preview';
+    const info = document.createElement('span');
+    info.className = 'task-preview-text';
+    const img = document.createElement('img');
+    img.hidden = true;
+    img.alt = task.prompt.length > 100 ? task.prompt.slice(0,100) + '…' : task.prompt;
+    preview.append(info,img);
+    const details = document.createElement('div');
+    details.className = 'task-details';
+    const prompt = document.createElement('p');
+    prompt.className = 'task-prompt';
+    prompt.title = task.prompt;
+    prompt.textContent = task.prompt;
+    const model = document.createElement('span');
+    model.className = 'task-model';
+    model.textContent = task.imageModel + ' · ' + task.size + ' · ' + task.quality;
+    const error = document.createElement('div');
+    error.className = 'task-error';
+    error.hidden = true;
+    const requestId = document.createElement('div');
+    requestId.className = 'task-model';
+    requestId.hidden = true;
+    details.append(prompt,model,error,requestId);
+    const actions = document.createElement('div');
+    actions.className = 'task-actions';
+    const cancel = document.createElement('button');
+    cancel.className = 'task-button cancel';
+    cancel.type = 'button';
+    cancel.textContent = '取消此张';
+    cancel.addEventListener('click',()=>cancelTask(task));
+    const download = document.createElement('a');
+    download.className = 'task-button';
+    download.hidden = true;
+    download.textContent = '保存 PNG';
+    download.download = 'codex-image-'+task.id+'.png';
+    actions.append(cancel,download);
+    card.append(head,preview,details,actions);
+    task.node = {card,state,info,img,error,requestId,cancel,download};
+    fields.taskGrid.appendChild(card);
+    renderTask(task);
+  }
+  function renderTask(task) {
+    if (!task.node || closed) return;
+    const {card,state,info,img,error,requestId,cancel,download} = task.node;
+    const labels = {
+      queued:'排队中',running:'生成中',succeeded:'已完成',
+      failed:'生成失败',canceled:'已取消'
+    };
+    state.textContent = labels[task.state] || task.state;
+    state.className = 'task-state ' + task.state;
+    card.className = 'task-card ' + task.state;
+    img.hidden = !(task.state==='succeeded' && task.imageUrl);
+    if (!img.hidden && img.src!==task.imageUrl) img.src=task.imageUrl;
+    info.hidden = !img.hidden;
+    if (!info.hidden) {
+      info.textContent = task.state === 'running' ? '等待图像生成…'
+        : task.state === 'queued' ? '等待可用执行槽位…'
+        : task.state === 'canceled' ? '已停止此张任务'
+        : task.state === 'failed' ? '本次没有生成图片' : '';
+    }
+    error.hidden = !(task.state === 'failed' && task.error);
+    error.textContent = task.error || '';
+    requestId.hidden = !task.requestId;
+    requestId.textContent = task.requestId ? '请求 ID · ' + task.requestId : '';
+    cancel.hidden = !(task.state === 'queued' || task.state === 'running');
+    download.hidden = !task.imageUrl || task.state !== 'succeeded';
+    if (!download.hidden) download.href = task.imageUrl;
+  }
+  function forgetTask(task) {
+    if (task.imageUrl) {
+      URL.revokeObjectURL(task.imageUrl);
+      task.imageUrl = null;
+    }
+    task.node?.card.remove();
+    const i=tasks.indexOf(task);
+    if (i>=0) tasks.splice(i,1);
+  }
+  function retainImageBudget() {
+    const withImages=tasks.filter((task)=>task.state==='succeeded' && task.imageUrl);
+    while (withImages.length > MAX_RETAINED_IMAGES) {
+      forgetTask(withImages.shift());
     }
   }
-  fields.prompt.addEventListener('input', function () { selected = -1; presetButtons(); count(); });
-  [fields.driver, fields.imageModel, fields.size, fields.quality].forEach((el) => el.addEventListener('change', count));
-  fields.clientKey.addEventListener('change', function () {
-    loadModels().catch((error) => notice('模型列表加载失败：' + error.message, true)).finally(count);
+  function cleanupOldCompleted(required=0) {
+    while (tasks.length+required > MAX_TASKS) {
+      const finished=tasks.find((task)=>['succeeded','failed','canceled'].includes(task.state));
+      if (!finished) break;
+      forgetTask(finished);
+    }
+  }
+  function cancelTask(task) {
+    if (!['queued','running'].includes(task.state)) return;
+    task.state='canceled';
+    task.controller?.abort();
+    renderTask(task);
+    updateQueueInfo();
+    pumpTasks();
+  }
+  function cancelAllTasks() {
+    // 批量取消时不能逐个调用 pumpTasks，否则可能在取消两个任务的间隙
+    // 把下一张待处理图片错误启动。
+    for (const task of tasks) {
+      if (task.state !== 'queued' && task.state !== 'running') continue;
+      task.state = 'canceled';
+      task.controller?.abort();
+      renderTask(task);
+    }
+    updateQueueInfo();
+  }
+  function clearFinishedTasks() {
+    for (const task of tasks.slice()) {
+      if (!['queued','running'].includes(task.state)) forgetTask(task);
+    }
+    updateQueueInfo();
+  }
+  async function runTask(task) {
+    const signal=task.controller.signal;
+    const started=performance.now();
+    try {
+      const response = await host().models.responses({
+        clientKeyId:task.clientKeyId,
+        signal,
+        body:{
+          model:task.driverModel,stream:true,store:false,
+          input:[{type:'message',role:'user',content:[{type:'input_text',text:task.prompt}]}],
+          instructions:'Create exactly one image using image_generation. Follow the given prompt faithfully, retaining its language and composition.',
+          tools:[{
+            type:'image_generation',model:task.imageModel,action:'generate',
+            size:task.size,quality:task.quality,output_format:'png'
+          }],
+          tool_choice:'auto',
+          parallel_tool_calls:false,
+          include:['reasoning.encrypted_content']
+        }
+      });
+      task.httpStatus=response.status;
+      task.requestId=response.headers?.get('x-codex-imagegen-request-id')
+        || response.headers?.get('x-gateway-request-id')
+        || response.headers?.get('x-request-id') || '';
+      if (!response.ok) {
+        const raw=(await response.text()).slice(0,1200);
+        let message=raw;
+        try {
+          const parsed=JSON.parse(raw);
+          message=parsed.error?.message || parsed.message || raw;
+        } catch {}
+        throw new Error('HTTP '+response.status+' '+String(message).slice(0,500));
+      }
+      const parsed=await consumeResponse(response,signal);
+      if (signal.aborted || task.state==='canceled') return;
+      if (!parsed.image?.result) {
+        throw new Error((parsed.text || '上游未执行 image_generation 工具').slice(0,500));
+      }
+      const url=requireImage(parsed.image.result);
+      if (signal.aborted || task.state==='canceled') {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      task.imageUrl=url;
+      task.responseId=parsed.document?.id || '';
+      task.state='succeeded';
+      task.elapsed=((performance.now()-started)/1000).toFixed(1)+'s';
+      renderTask(task);
+      retainImageBudget();
+    } catch (cause) {
+      if (signal.aborted || task.state==='canceled') {
+        task.state='canceled';
+      } else {
+        task.state='failed';
+        task.error=String(cause?.message || cause || '生成失败').slice(0,600);
+      }
+      renderTask(task);
+    } finally {
+      activeTasks=Math.max(0,activeTasks-1);
+      task.controller=null;
+      renderTask(task);
+      updateQueueInfo();
+      pumpTasks();
+    }
+  }
+  function pumpTasks() {
+    if (closed) return;
+    const parallelism=Math.max(1,Math.min(MAX_PARALLEL,Number(fields.parallelism.value)||2));
+    while(activeTasks<parallelism) {
+      const next=tasks.find((task)=>task.state==='queued');
+      if (!next) break;
+      next.state='running';
+      next.controller=new AbortController();
+      activeTasks++;
+      renderTask(next);
+      void runTask(next);
+    }
+    updateQueueInfo();
+  }
+  function queueBatch() {
+    const copies=Number(fields.batchCount.value);
+    if (!Number.isInteger(copies) || copies<1 || copies>10 ||
+       !fields.clientKey.value || !fields.driver.value || !fields.imageModel.value ||
+       !fields.prompt.value.trim()) return;
+    cleanupOldCompleted(copies);
+    if (liveTaskCount()+copies>MAX_TASKS) {
+      notice('任务队列已满。请先完成或取消部分任务，再添加。',true);
+      count();
+      return;
+    }
+    const snapshot={
+      clientKeyId:fields.clientKey.value,
+      driverModel:fields.driver.value,
+      imageModel:fields.imageModel.value,
+      size:fields.size.value,
+      quality:fields.quality.value,
+      prompt:fields.prompt.value.trim()
+    };
+    for(let i=0;i<copies;i++) {
+      const task={...snapshot,id:++taskCounter,state:'queued',controller:null,node:null,
+        requestId:'',responseId:'',httpStatus:null,elapsed:'',error:'',imageUrl:null};
+      tasks.push(task);
+      createTaskCard(task);
+    }
+    notice('已添加 '+copies+' 张图片。可在这些任务执行期间继续修改提示词并提交下一批。');
+    pumpTasks();
+  }
+  function closePage() {
+    closed=true;
+    scanEpoch++;
+    if(preferenceTimer!==null)clearTimeout(preferenceTimer);
+    for(const task of tasks) {
+      task.controller?.abort();
+      if(task.imageUrl) URL.revokeObjectURL(task.imageUrl);
+      task.imageUrl=null;
+    }
+  }
+
+  fields.prompt.addEventListener('input',()=>{
+    selected=-1;
+    presetButtons();
+    count();
   });
-  fields.generate.addEventListener('click', generate);
-  fields.cancel.addEventListener('click', function () { if (controller) controller.abort(); });
-  fields.refresh.addEventListener('click', bootstrap);
+  fields.clientKey.addEventListener('change',()=>{
+    selectedKeyTouched=true;
+    applyModelsForKey();
+    queuePreferenceSave();
+  });
+  fields.driver.addEventListener('change',()=>{queuePreferenceSave();count();});
+  fields.imageModel.addEventListener('change',()=>{
+    refreshImageOptions();queuePreferenceSave();count();
+  });
+  [fields.size,fields.quality,fields.batchCount].forEach((el)=>
+    el.addEventListener('change',()=>{queuePreferenceSave();count();}));
+  fields.parallelism.addEventListener('change',()=>{
+    queuePreferenceSave();
+    pumpTasks();
+  });
+  fields.generate.addEventListener('click',queueBatch);
+  fields.cancel.addEventListener('click',cancelAllTasks);
+  fields.clearFinished.addEventListener('click',clearFinishedTasks);
+  fields.refresh.addEventListener('click',bootstrap);
+  window.addEventListener('pagehide',closePage,{once:true});
   loadConfigBuilder({
-    configuration: {timeoutMs:300000,bridgeMode:'auto',driverModel:'gpt-5.6-luna',
-      imageModels:['gpt-image-2'],imageGroupIds:[],imageAccountIds:[]},
-    candidateImageModels:['gpt-image-2','gpt-image-1.5']
+    configuration:{timeoutMs:300000,bridgeMode:'auto',driverModel:'gpt-5.6-luna',
+      imageModels:['gpt-image-2.6-sunburst','gpt-image-2.6-flare','gpt-image-2.5-sunburst'],
+      imageGroupIds:[],imageAccountIds:[]},
+    candidateImageModels:['gpt-image-2.6-sunburst','gpt-image-2.6-flare',
+      'gpt-image-2.5-sunburst','gpt-image-2.5-flare','gpt-image-2']
   });
-  fields.prompt.value = presets[0].prompt;
+  fields.prompt.value=presets[0].prompt;
   presetButtons();
-  count();
-  bootstrap();
+  updateQueueInfo();
+  void bootstrap();
 })();

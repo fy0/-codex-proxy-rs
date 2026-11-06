@@ -1,13 +1,14 @@
 use serde_json::Value;
 
 pub const IMAGE_MODELS: &[&str] = &[
-    "gpt-image-1",
-    "gpt-image-1.5",
-    "gpt-image-2",
-    "gpt-image-2.5-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.6-flare",
     "gpt-image-2.5-sunburst",
-    "gpt-image-2.5-flare-2026-09-08",
+    "gpt-image-2.5-flare",
     "gpt-image-2.5-sunburst-2026-09-08",
+    "gpt-image-2.5-flare-2026-09-08",
+    "gpt-image-2",
+    "gpt-image-1.5",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,8 +177,14 @@ mod tests {
     #[test]
     fn auto_mode_prefers_codex_native_images() {
         let cfg = Config::from_configuration(&serde_json::json!({})).unwrap();
-        assert!(cfg.use_responses("gpt-image-1"));
+        assert!(!cfg.use_responses("gpt-image-1"));
         assert!(!cfg.use_responses("gpt-image-2"));
+        assert!(!cfg.use_responses("gpt-image-2.6-sunburst"));
+        assert!(!cfg.use_responses("gpt-image-2.6-flare"));
+        assert!(cfg.enabled_image_model("gpt-image-2.6-sunburst"));
+        assert!(cfg.enabled_image_model("gpt-image-2.6-flare"));
+        assert!(cfg.enabled_image_model("gpt-image-2.5-sunburst"));
+        assert!(!cfg.enabled_image_model("gpt-image-1"));
         assert!(!cfg.use_responses("random-chat-model"));
     }
 
