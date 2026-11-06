@@ -4,13 +4,13 @@ use crate::{access, config::Config, quota_guard};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use gateway_plugin_sdk::{
-    ErrorCode, PluginFault,
+    ErrorCode, PluginFault, SendState,
     call::{
         data::AccessQuery,
         host::{
-            self, ModelEventBatch, ModelExecuteRequest, ModelOperation, ModelStreamReadRequest,
-            ModelStreamReadResult, ModelStreamResult, StateGetRequest, StateGetResult,
-            StatePutRequest, StatePutResult,
+            self, LogLevel, LogRequest, ModelEventBatch, ModelExecuteRequest, ModelOperation,
+            ModelStreamCloseRequest, ModelStreamReadRequest, ModelStreamReadResult,
+            ModelStreamResult, StateGetRequest, StateGetResult, StatePutRequest, StatePutResult,
         },
         model::WirePayload,
     },
@@ -44,6 +44,8 @@ const STATE_KEY: &str = "queue";
 const MAX_PENDING: usize = 128;
 const CHUNK_BYTES: usize = 256 * 1024;
 const MAX_PNG_BYTES: usize = 120 * 1024 * 1024;
+// 固定 SDK 对应宿主的默认回调预算是 1 MiB；事件编解码的 8 MiB 上限不是读取额度。
+const MODEL_READ_BYTES: u32 = 1024 * 1024;
 
 fn invalid(msg: &str) -> PluginFault {
     PluginFault::new(ErrorCode::InvalidInput, msg)
@@ -81,6 +83,128 @@ pub struct ImageJob {
     #[serde(default)]
     pub actual_height: Option<u32>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<JobDiagnostic>,
+}
+
+/// 仅保存本地固定阶段、经过校验的请求参数和 SDK 元数据，不保存错误正文或账号信息。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobDiagnostic {
+    stage: String,
+    operation: String,
+    model_id: String,
+    execution_model: String,
+    size: String,
+    output_format: String,
+    maximum_read_bytes: u32,
+    execution_accepted: bool,
+    // null 表示无法确认；流读取错误的 NotSent 不能覆盖已开始执行的发送不确定性。
+    upstream_sent: Option<bool>,
+    request_id: Option<String>,
+    sdk_error_code: Option<ErrorCode>,
+    sdk_send_state: Option<SendState>,
+    http_status: Option<u16>,
+}
+
+impl JobDiagnostic {
+    fn new(job: &ImageJob, config: &Config) -> Self {
+        let via_responses = config.use_responses(&job.image_model);
+        Self {
+            stage: "account_facts".into(),
+            operation: if via_responses {
+                "generate"
+            } else {
+                "generate_image"
+            }
+            .into(),
+            model_id: job.image_model.clone(),
+            execution_model: if via_responses {
+                config.driver.clone()
+            } else {
+                job.image_model.clone()
+            },
+            size: job.size.clone(),
+            output_format: preferred_upstream_format(&job.image_model).into(),
+            maximum_read_bytes: MODEL_READ_BYTES,
+            execution_accepted: false,
+            upstream_sent: Some(false),
+            request_id: None,
+            sdk_error_code: None,
+            sdk_send_state: None,
+            http_status: None,
+        }
+    }
+
+    fn record_failure(&mut self, error: &PluginFault) {
+        self.sdk_error_code = Some(error.code);
+        self.sdk_send_state = Some(error.send_state);
+        if error.http_status.is_some() {
+            self.http_status = error.http_status;
+        }
+        // HTTP 状态也可能来自宿主输入校验，例如未发送上游的 413；只信任发送事实。
+        if error.send_state == SendState::Sent {
+            self.upstream_sent = Some(true);
+        }
+    }
+
+    fn error_message(&self, error: &PluginFault) -> String {
+        let sent = match self.upstream_sent {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "unknown",
+        };
+        let mut message = format!(
+            "backend image job failed: {:?}; stage={}; operation={}; model={}; size={}; output={}; request_id={}; upstream_sent={}",
+            error.code,
+            self.stage,
+            self.operation,
+            self.model_id,
+            self.size,
+            self.output_format,
+            self.request_id.as_deref().unwrap_or("unavailable"),
+            sent,
+        );
+        // 此阶段的错误仅来自本地像素验证，其他阶段绝不复用任意上游错误正文。
+        if self.stage == "image_validation" && error.code == ErrorCode::Rejected {
+            message.push_str("; ");
+            message.push_str(&error.message);
+        }
+        if let Some(status) = self.http_status {
+            message.push_str(&format!("; http_status={status}"));
+        }
+        message
+    }
+
+    async fn log(&self, host: &HostClient, job_id: &str, failed: bool) {
+        let Ok(Value::Object(mut fields)) = serde_json::to_value(self) else {
+            return;
+        };
+        fields.insert("jobId".into(), json!(job_id));
+        let request = LogRequest {
+            event: if failed {
+                "image_job_failed"
+            } else {
+                "image_job_succeeded"
+            }
+            .into(),
+            level: if failed {
+                LogLevel::Warn
+            } else {
+                LogLevel::Info
+            },
+            fields: fields.into_iter().collect(),
+        };
+        if let Ok(params) = serde_json::to_value(request) {
+            // 日志只做一次尽力投递；日志预算或通道失败不能覆盖原始任务结果。
+            let _ = host.call(host::LOG, params, Vec::new()).await;
+        }
+    }
+}
+
+struct JobExecution {
+    result: Result<(String, String, u64, String, u32, u32), PluginFault>,
+    diagnostic: JobDiagnostic,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -114,6 +238,7 @@ impl ImageJob {
             actual_width: None,
             actual_height: None,
             error: None,
+            diagnostic: None,
         }
     }
 }
@@ -508,6 +633,9 @@ impl BackendJobs {
                 continue;
             }
             job.completed_ms = Some(now_ms());
+            let JobExecution { result, diagnostic } = result;
+            job.request_id = diagnostic.request_id.clone();
+            job.diagnostic = Some(diagnostic.clone());
             match result {
                 Ok((account_id, request_id, bytes, mime, width, height)) => {
                     job.status = "succeeded".into();
@@ -521,21 +649,7 @@ impl BackendJobs {
                 }
                 Err(e) => {
                     job.status = "failed".into();
-                    // 不把账号私有错误正文或 Token 写入公共管理状态。
-                    // Controlled dimension mismatch message is safe to show. Never expose
-                    // arbitrary upstream response bodies or account credentials.
-                    job.error = Some(
-                        if e.code == ErrorCode::Rejected
-                            && e.message.starts_with("requested ")
-                            && e.message.contains(" but upstream returned ")
-                        {
-                            e.message.clone()
-                        } else if e.code == ErrorCode::Capacity {
-                            "image response exceeded the CPR model event/payload limit; try WebP or lower resolution".into()
-                        } else {
-                            format!("backend image job failed: {:?}", e.code)
-                        },
-                    );
+                    job.error = Some(diagnostic.error_message(&e));
                 }
             }
             self.save(host, &queue, version).await?;
@@ -547,7 +661,9 @@ impl BackendJobs {
         &self,
         host: &HostClient,
         job: &ImageJob,
+        diagnostic: &mut JobDiagnostic,
     ) -> Result<String, PluginFault> {
+        diagnostic.stage = "account_facts".into();
         let ids = access::account_ids(host, &self.config).await?;
         if ids.is_empty() {
             return Err(PluginFault::new(
@@ -555,6 +671,7 @@ impl BackendJobs {
                 "no eligible image accounts",
             ));
         }
+        diagnostic.stage = "check_access".into();
         let decision = host
             .check_access(AccessQuery {
                 client_key_id: job.client_key_id.clone(),
@@ -570,6 +687,7 @@ impl BackendJobs {
             .collect::<Vec<_>>();
         // Responses 桥接必须确认同一账号也允许对应的对话主控模型。
         if self.config.use_responses(&job.image_model) && !eligible.is_empty() {
+            diagnostic.stage = "driver_check_access".into();
             let checked = host
                 .check_access(AccessQuery {
                     client_key_id: job.client_key_id.clone(),
@@ -586,6 +704,7 @@ impl BackendJobs {
             eligible.retain(|id| approved.contains(id));
         }
         eligible.sort();
+        diagnostic.stage = "quota_guard".into();
         let blocked = quota_guard::protected_ids(host, &eligible, &self.config.quota_guard).await?;
         eligible.retain(|id| !blocked.contains(id));
         if eligible.is_empty() {
@@ -600,12 +719,37 @@ impl BackendJobs {
         Ok(eligible[position % eligible.len()].clone())
     }
 
-    async fn execute(
+    async fn execute(&self, host: &HostClient, job: &ImageJob) -> JobExecution {
+        let mut diagnostic = JobDiagnostic::new(job, &self.config);
+        let mut stream_handle = None;
+        let result = self
+            .execute_inner(host, job, &mut diagnostic, &mut stream_handle)
+            .await;
+        if let Err(error) = &result {
+            diagnostic.record_failure(error);
+            // 读取或解析失败后只关闭原流，绝不重新发起可能重复计费的生图。
+            if let Some(stream) = stream_handle {
+                if let Ok(params) = serde_json::to_value(ModelStreamCloseRequest { stream }) {
+                    let _ = host
+                        .call(host::MODEL_STREAM_CLOSE, params, Vec::new())
+                        .await;
+                }
+            }
+        } else {
+            diagnostic.stage = "completed".into();
+        }
+        diagnostic.log(host, &job.id, result.is_err()).await;
+        JobExecution { result, diagnostic }
+    }
+
+    async fn execute_inner(
         &self,
         host: &HostClient,
         job: &ImageJob,
+        diagnostic: &mut JobDiagnostic,
+        stream_handle: &mut Option<String>,
     ) -> Result<(String, String, u64, String, u32, u32), PluginFault> {
-        let account = self.choose_account(host, job).await?;
+        let account = self.choose_account(host, job, diagnostic).await?;
         // 共享账号信号量限制同账号请求；多账号数目自然叠加。维护任务创建的
         // 子请求仍由宿主最终执行账号并发租约与额度限制。
         let semaphore =
@@ -615,10 +759,12 @@ impl BackendJobs {
                     Arc::new(Semaphore::new(self.config.concurrency_per_account))
                 }))
             };
+        diagnostic.stage = "account_slot".into();
         let _account_permit = semaphore
             .acquire_owned()
             .await
             .map_err(|_| fault("image account concurrency limiter closed"))?;
+        diagnostic.stage = "request_encoding".into();
         let via_responses = self.config.use_responses(&job.image_model);
         let request = ModelExecuteRequest {
             client_key_id: Some(job.client_key_id.clone()),
@@ -684,6 +830,8 @@ impl BackendJobs {
         }
         let body =
             serde_json::to_vec(&request_body).map_err(|_| fault("encode image model request"))?;
+        diagnostic.stage = "model_execute".into();
+        diagnostic.upstream_sent = None;
         let reply = host
             .call(
                 host::MODEL_EXECUTE_STREAM,
@@ -691,10 +839,22 @@ impl BackendJobs {
                 body,
             )
             .await
-            .map_err(SessionError::into_plugin_fault)?;
+            .map_err(|error| {
+                let remote = matches!(&error, SessionError::Remote(_));
+                let error = error.into_plugin_fault();
+                // 只有执行入口的明确宿主答复可以证明尚未发送；本地超时保持未知。
+                if remote && error.send_state == SendState::NotSent {
+                    diagnostic.upstream_sent = Some(false);
+                }
+                error
+            })?;
+        diagnostic.execution_accepted = true;
+        diagnostic.stage = "model_stream_open".into();
         let stream: ModelStreamResult = serde_json::from_value(reply.result)
             .map_err(|_| fault("invalid model stream response"))?;
+        *stream_handle = Some(stream.stream.clone());
         let request_id = stream.request_id.clone();
+        diagnostic.request_id = Some(request_id.clone());
         let mut buffer = Vec::new();
         let mut image: Option<Vec<u8>> = None;
         let mut image_url: Option<String> = None;
@@ -707,24 +867,40 @@ impl BackendJobs {
                     "too many model output chunks",
                 ));
             }
+            diagnostic.stage = "model_stream_read".into();
             let reply = host
                 .call(
                     host::MODEL_STREAM_READ,
                     serde_json::to_value(ModelStreamReadRequest {
                         stream: stream.stream.clone(),
-                        maximum_bytes: (8 * 1024 * 1024) as u32,
+                        maximum_bytes: MODEL_READ_BYTES,
                     })
                     .map_err(|_| fault("encode stream read"))?,
                     Vec::new(),
                 )
                 .await
                 .map_err(SessionError::into_plugin_fault)?;
+            diagnostic.stage = "model_event_decode".into();
             let state: ModelStreamReadResult =
                 serde_json::from_value(reply.result).map_err(|_| fault("invalid stream read"))?;
+            if state.end {
+                *stream_handle = None;
+            }
             if !reply.payload.is_empty() {
                 let batch = ModelEventBatch::decode(&reply.payload)
                     .map_err(|_| fault("invalid model event batch"))?;
                 for event in batch.events {
+                    if let Some(observation) = event
+                        .host
+                        .as_ref()
+                        .and_then(|host| host.observation.as_ref())
+                    {
+                        if observation.status_code.is_some() {
+                            diagnostic.upstream_sent = Some(true);
+                            diagnostic.http_status = observation.status_code;
+                        }
+                    }
+                    diagnostic.stage = "image_response_decode".into();
                     if let Some(wire) = event.wire {
                         match wire.payload {
                             WirePayload::RawJson { body } => {
@@ -733,6 +909,7 @@ impl BackendJobs {
                                 if let Some(value) = extract_image_source(&data) {
                                     match value {
                                         ImageSource::Base64(b64) => {
+                                            diagnostic.stage = "image_decode".into();
                                             image = Some(decode_image(b64)?)
                                         }
                                         ImageSource::Url(href) => image_url = Some(href.to_owned()),
@@ -743,6 +920,7 @@ impl BackendJobs {
                                 if let Some(value) = extract_image_source(&data) {
                                     match value {
                                         ImageSource::Base64(b64) => {
+                                            diagnostic.stage = "image_decode".into();
                                             image = Some(decode_image(b64)?)
                                         }
                                         ImageSource::Url(href) => image_url = Some(href.to_owned()),
@@ -767,25 +945,39 @@ impl BackendJobs {
                 break;
             }
         }
+        diagnostic.stage = "image_response_decode".into();
         let image_bytes = match (image, image_url) {
             (Some(bytes), _) => bytes,
-            (None, Some(url)) => download_upstream_image(&url).await?,
+            (None, Some(url)) => {
+                diagnostic.stage = "image_download".into();
+                download_upstream_image(&url).await?
+            }
             (None, None) => {
                 let data: Value = serde_json::from_slice(&buffer)
                     .map_err(|_| fault("image model did not return JSON image data"))?;
                 match extract_image_source(&data) {
-                    Some(ImageSource::Base64(b64)) => decode_image(b64)?,
-                    Some(ImageSource::Url(url)) => download_upstream_image(url).await?,
+                    Some(ImageSource::Base64(b64)) => {
+                        diagnostic.stage = "image_decode".into();
+                        decode_image(b64)?
+                    }
+                    Some(ImageSource::Url(url)) => {
+                        diagnostic.stage = "image_download".into();
+                        download_upstream_image(url).await?
+                    }
                     None => return Err(fault("no image bytes or image URL in response")),
                 }
             }
         };
+        diagnostic.stage = "image_validation".into();
         let (mime, width, height) = inspect_image(&image_bytes, &job.size)?;
+        diagnostic.stage = "image_storage".into();
         let path = self.result_path(&job.id)?;
         let staging = path.with_extension("part");
+        diagnostic.stage = "image_write".into();
         tokio::fs::write(&staging, &image_bytes)
             .await
             .map_err(|_| fault("cannot write image result"))?;
+        diagnostic.stage = "image_commit".into();
         tokio::fs::rename(&staging, &path)
             .await
             .map_err(|_| fault("cannot commit image result"))?;
@@ -1038,6 +1230,10 @@ fn is_public_ip(ip: IpAddr) -> bool {
         }
     }
 }
+#[cfg(test)]
+#[path = "jobs/integration_tests.rs"]
+mod integration_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

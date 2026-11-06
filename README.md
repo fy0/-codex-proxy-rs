@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.7.3 (official SDK)
+# CPR Image Bridge v0.7.4 (official SDK)
 
 独立 Rust 插件，面向 zyycn/codex-proxy-rs 官方主线。SDK/打包工具固定源码提交：96e8443ede051abdd8f0bac69462a7cfe2945633。宿主要求 RPC v7、middleware v6、scheduler v3、management v2，MSRV Rust 1.99.1。旧 fork 的宿主与 SDK 不作为运行目标。
 
@@ -143,7 +143,9 @@ Node --check、rustfmt、真实 Edge headless 模拟 host bridge 验证偏好恢
 
 本版本保留 900 秒 maintenance 父调用预算、每轮最多 backgroundConcurrency 个并发任务。后台任务不是无限期守护 daemon：维护被取消、插件升级或服务器关闭会导致当前 in-flight 请求中断，重启后明确标记 interrupted 而不是重试；任务完成后保存在 imageStorageDir 的 PNG 可以在后续管理会话中继续读取。任务队列最多 30 项，保存时会回收最旧已结束记录及对应图片。
 
-**协议边界**：CPR 当前 host.model.execute_stream 的单个 GPE2 模型事件与批次具有 8 MiB 载荷限制。部分 4K 原生图片如果上游以一个超过 8 MiB 的 base64 事件返回，后端回调会失败并标记 failed，不能视为已经支持任意尺寸图片输出。需宿主新增分片原生 Images/文件对象能力，才能保证所有大型结果可以无损交付。
+**协议边界**：固定官方 SDK 对应宿主的默认 `maximum_buffered_body_bytes` 是 **1 MiB**，插件的 `host.model.stream_read.maximum_bytes` 使用该预算。SDK 的 GPE2／HME1 编解码上限 **8 MiB** 是另一层限制，不能作为宿主允许的读取额度。原生 Images 的完整 JSON/Base64 事件仍必须装入宿主缓冲预算；超过时会返回 `Capacity`，改用更大的读取参数或 buffered execute 不能解除限制。先验收 1024 WebP，再单独验证 2K／4K；大型结果需要宿主提供相应预算或官方大对象交付能力。
+
+任务的 `diagnostic` 保存失败阶段、操作、模型、尺寸、输出格式、SDK 错误类型、请求 ID、HTTP 状态和上游发送三态；同一组安全字段尽力提交到 `host.log`。`upstreamSent: null` 表示无法确认，得到执行句柄不等于证明上游已发送，流读取失败的 `NotSent` 也不等于整次生图未发送。诊断不保存提示词、账号、密钥、OAuth Token、完整请求体或原始错误正文。失败后只关闭原流，不重新发起生图；已有旧任务没有此字段时仍可读取。
 
 ### 合并 cpr-quota-guard
 
@@ -214,6 +216,8 @@ CPR 官方插件 iframe 的 CSP 为 img-src data:，不允许 blob:。v0.7.0 从
 新的 concurrencyPerAccount 默认 8（可配置 1 到 32），不再以 backgroundConcurrency=3 限制整池并发。执行任务以账号 ID 使用独立信号量，候选账号池容量按当前可用账号个数累加；最终仍以 CPR Core 的账号并发租约、Key 配额和原生调度允许容量为准，若宿主账号并发上限低于 8，请在 CPR 自身设置中调大后再并行执行。
 
 保留 Quota Guard 的 5 小时和每周额度保护。新增独立管理页「账号额度保护」，**直接移植 Mr-xiongyq/cpr-quota-guard 的 Vue 账号卡片、额度进度条、账号选择和保存交互**（Apache License 2.0）；仅对 API 路径和保存的宿主配置合并做适配，不会用保存额度规则覆盖图片模型、账号白名单等其它 Image Bridge 配置。源代码位于 quota-ui/，构建资源位于 web/quota/。本地模拟测试不能代替真实 CPR 宿主管理员授权、真实 OAuth 生图和额度交互验收。
+
+官方 CPR 的侧栏按插件实例显示一个入口。打开「画图测试」后，在页面顶部的分段切换器选择「账号额度保护」；第二页不会另外生成一个侧栏项。若顶部也没有切换器，应核对实际宿主版本及该实例管理目录返回的 pages，并确认加载的是预期制品。页面使用管理桥访问 `quota/overview`、`quota/accounts` 和 `quota/configuration`；保存只合并额度字段，并通过实例 revision 防止覆盖并发配置。
 
 仍须停用原 cpr-quota-guard 的 scheduler 绑定，保留 Image Bridge 的单个 scheduler；使用失败时拒绝策略，防止额度保护筛选失效。
 

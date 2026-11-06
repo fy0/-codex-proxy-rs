@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.3",
-  "description": "Codex Image Bridge: state migration v1 to v2 preserves workbench preferences; WebP-first 4K, temporary images, Quota Guard integration.",
+  "version": "0.7.4",
+  "description": "Codex Image Bridge: host-compatible model stream reads, safe job diagnostics, temporary image delivery and integrated Quota Guard.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
