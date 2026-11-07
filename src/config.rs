@@ -28,9 +28,9 @@ pub struct Config {
     pub image_group_ids: Vec<String>,
     /// 对外发布和实际允许调用的生图模型；仅配置在此处的模型开放。
     pub image_models: Vec<String>,
-    /// 兼容旧配置的结果目录；未填写时自动使用 CPR_DATA_DIR 或操作系统临时目录。
+    /// 旧任务归档目录；未填写时使用操作系统临时目录。
     pub legacy_image_storage_dir: Option<String>,
-    /// 同一生图账号同时运行的任务数，实际还受 CPR Core 账号租约限制。
+    /// 旧后台并发兼容值；即时页面调用由 CPR Core 管理账号租约。
     pub concurrency_per_account: usize,
     pub quota_guard: crate::quota_guard::QuotaGuardConfig,
 }
@@ -72,7 +72,7 @@ impl Config {
         let image_group_ids = id_list(config.get("imageGroupIds"), "imageGroupIds")?;
         let image_models = image_model_list(config.get("imageModels"))?;
         // imageStorageDir 和 backgroundConcurrency 仅用于旧版配置升级兼容，
-        // 不再是新安装的必填项。旧设置不影响新的每账号并发配置。
+        // 不再是新安装的必填项；后台执行已停用，旧并发值只用于配置兼容。
         let legacy_image_storage_dir = match config.get("imageStorageDir") {
             None | Some(Value::Null) => None,
             Some(Value::String(value)) if value.is_empty() => None,

@@ -1,6 +1,6 @@
 //! 插件独立管理页面；密钥只通过宿主模型桥按 ID 选择，不传入前端。
 use crate::{
-    config::{Config, IMAGE_MODELS, Mode},
+    config::{Config, IMAGE_MODELS},
     jobs::BackendJobs,
 };
 use gateway_plugin_sdk::call::data::AccountFacts;
@@ -30,6 +30,12 @@ pub fn registration() -> ManagementRegistration {
             ManagementRoute {
                 method: "GET".into(),
                 path: "api/bootstrap".into(),
+                request_content_types: vec![],
+                response_content_types: vec![JSON.into()],
+            },
+            ManagementRoute {
+                method: "GET".into(),
+                path: "api/account-options".into(),
                 request_content_types: vec![],
                 response_content_types: vec![JSON.into()],
             },
@@ -76,20 +82,37 @@ pub fn registration() -> ManagementRegistration {
                 response_content_types: vec!["application/octet-stream".into()],
             },
         ],
-        resources: ["web/index.html", "web/app.js", "web/app.css"]
-            .into_iter()
-            .map(|path| ManagementResource {
-                path: path.into(),
-                public: false,
-            })
-            .collect(),
-        pages: vec![ManagementPage {
-            id: "image-workbench".into(),
-            title: "画图测试".into(),
-            description: Some("按客户端 Key 测试 Codex 图像生成与账号范围".into()),
-            entry: "web/index.html".into(),
-            icon: None,
-        }],
+        resources: [
+            "web/index.html",
+            "web/app.js",
+            "web/app.css",
+            "web/image-client.js",
+            "web/debug.html",
+            "web/debug.js",
+            "web/debug.css",
+        ]
+        .into_iter()
+        .map(|path| ManagementResource {
+            path: path.into(),
+            public: false,
+        })
+        .collect(),
+        pages: vec![
+            ManagementPage {
+                id: "image-workbench".into(),
+                title: "画图测试".into(),
+                description: Some("按客户端 Key 即时调用 Codex 图像生成".into()),
+                entry: "web/index.html".into(),
+                icon: None,
+            },
+            ManagementPage {
+                id: "responses-debug".into(),
+                title: "原始请求调试".into(),
+                description: Some("编辑 Responses JSON，检查响应事件与耗时".into()),
+                entry: "web/debug.html".into(),
+                icon: None,
+            },
+        ],
         callbacks: vec![],
     }
 }
@@ -119,7 +142,7 @@ async fn model_catalog(
             serde_json::to_value(ModelListRequest {
                 client_key_id,
                 protocol: "openai".into(),
-                client_version: "cpr-image-workbench/0.6.0".into(),
+                client_version: format!("cpr-image-workbench/{}", env!("CARGO_PKG_VERSION")),
             })
             .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid model list"))?,
             Vec::new(),
@@ -288,6 +311,7 @@ pub async fn handle(
     call: TypedCall<ManagementRequest>,
     config: &Config,
     jobs: &BackendJobs,
+    raw_configuration: &Value,
 ) -> Result<TypedReply<ManagementResponse>, PluginFault> {
     if !call.request.query.is_empty() {
         return bad("查询参数不受支持");
@@ -307,11 +331,6 @@ pub async fn handle(
                     limit: 200,
                 })
                 .await?;
-            let (accounts, groups, account_options_truncated, account_options_error) =
-                match account_choices(&call.host).await {
-                    Ok((accounts, groups, truncated)) => (accounts, groups, truncated, false),
-                    Err(_) => (Vec::new(), Vec::new(), false, true),
-                };
             json_response(
                 200,
                 json!({
@@ -321,29 +340,26 @@ pub async fn handle(
                     "imageModels": config.image_models,
                     "candidateImageModels": IMAGE_MODELS,
                     "enabled": config.has_image_scope(),
-                    "backendJobsEnabled": jobs.enabled(),
-                     "concurrencyPerAccount": config.concurrency_per_account,
-                    "imageStorageDir": config.legacy_image_storage_dir,
+                    "backendJobsEnabled": false,
+                    "executionMode": "management-responses",
+                    "pluginVersion": env!("CARGO_PKG_VERSION"),
+                    "concurrencyPerAccount": config.concurrency_per_account,                    "imageStorageDir": config.legacy_image_storage_dir,
                     "accountCount": config.image_account_ids.len(),
                     "groupCount": config.image_group_ids.len(),
-                    "accountOptions": accounts,
-                    "groupOptions": groups,
-                    "accountOptionsTruncated": account_options_truncated,
-                    "accountOptionsError": account_options_error,
-                    "configuration": {
-                        "timeoutMs": config.timeout_ms,
-                        "bridgeMode": match config.mode {
-                            Mode::Auto => "auto",
-                            Mode::Responses => "responses",
-                        },
-                        "driverModel": config.driver,
-                        "imageModels": config.image_models,
-                        "imageGroupIds": config.image_group_ids,
-                        "imageAccountIds": config.image_account_ids,
-                         "concurrencyPerAccount": config.concurrency_per_account,
-                        "quotaGuard": config.quota_guard.accounts,
-                        "maxObservationAgeSeconds": config.quota_guard.max_observation_age_seconds,
-                    }
+                    "accountOptionsDeferred": true,
+                    "configuration": raw_configuration                }),
+            )
+        }
+        ("GET", "api/account-options") => {
+            if !call.payload.is_empty() {
+                return bad("GET 不接受请求体");
+            }
+            let (accounts, groups, truncated) = account_choices(&call.host).await?;
+            json_response(
+                200,
+                json!({
+                    "accountOptions": accounts, "groupOptions": groups,
+                    "accountOptionsTruncated": truncated
                 }),
             )
         }
@@ -381,11 +397,15 @@ pub async fn handle(
             }
             json_response(200, jobs.list(&call.host).await?)
         }
-        ("POST", "api/jobs") => {
-            let body: Value = serde_json::from_slice(&call.payload)
-                .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid job JSON"))?;
-            json_response(202, jobs.submit(&call.host, &body).await?)
-        }
+        ("POST", "api/jobs") => json_response(
+            410,
+            json!({
+                "error": {
+                    "code": "background_image_jobs_retired",
+                    "message": "后台生图队列已停用；刷新页面后通过即时 Responses 管理桥生成。旧任务记录仍保留。"
+                }
+            }),
+        ),
         ("POST", "api/jobs/cancel") => {
             let body: Value = serde_json::from_slice(&call.payload)
                 .map_err(|_| PluginFault::new(ErrorCode::InvalidInput, "invalid cancel JSON"))?;

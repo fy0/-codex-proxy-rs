@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>原始 Responses 调试</title>
+  <link rel="stylesheet" href="./debug.css">
+  <script defer src="./image-client.js"></script>
+  <script defer src="./debug.js"></script>
+</head>
+<body>
+<main class="debug-root">
+  <div class="debug-intro">
+    <span class="debug-mark" aria-hidden="true">{ }</span>
+    <div><span class="eyebrow">CPR / RESPONSES</span><p>直接提交 JSON 给 CPR 管理桥，查看响应、耗时与图片。</p></div>
+    <span id="debugVersion" class="version-label">正在连接宿主</span>
+  </div>
+  <div id="debugNotice" class="notice" role="status">选择 Client Key，编辑参数，然后运行一次。</div>
+  <section class="panel request-panel" aria-labelledby="requestTitle">
+    <header class="section-header">
+      <div><span class="section-index">01</span><h2 id="requestTitle">请求参数</h2></div>
+      <span class="hint">一次运行 · 不自动重试 · 本页内存</span>
+    </header>
+    <div class="request-toolbar">
+      <label class="key-field" for="debugKey"><span>Client Key ID</span><select id="debugKey" aria-label="Client Key ID"><option value="">读取 Key 中…</option></select></label>
+      <button id="debugRefresh" class="button" type="button">刷新 Key</button>
+      <button id="debugModels" class="button quiet" type="button">查看可用模型</button>
+      <label class="template-field" for="debugTemplate"><span>请求模板</span><select id="debugTemplate"><option value="v051">v0.5.1 生图模板</option><option value="text">最小文本请求</option></select></label>
+      <button id="debugReset" class="button" type="button">重置为模板</button>
+    </div>
+    <details id="debugCatalog" class="technical" hidden><summary>所选 Key 的模型目录</summary><pre id="debugModelList"></pre></details>
+    <div class="editor-label"><label for="debugBody">提交给 CPR 管理桥的 JSON</label><div><span id="debugBodySize" class="hint">0 B</span><button id="debugFormat" class="text-button" type="button">格式化</button></div></div>
+    <textarea id="debugBody" class="code-editor" rows="19" wrap="off" spellcheck="false" autocomplete="off" aria-describedby="debugBodyHelp" placeholder="粘贴完整 Responses JSON 对象"></textarea>
+    <p id="debugBodyHelp" class="hint">正文按编辑内容提交。模板只在点击重置时载入；认证由所选 Key 完成，不填写 Authorization 或 Token。</p>
+    <div class="run-bar">
+      <button id="debugRun" class="button primary" type="button" disabled><span aria-hidden="true">▶</span> 运行一次</button>
+      <button id="debugCancel" class="button" type="button" disabled>取消本次</button>
+      <span class="hint">离开页面会取消进行中的调用</span>
+      <span id="debugRunState" class="state-badge">尚未运行</span>
+    </div>
+  </section>
+
+  <section class="panel response-panel" aria-labelledby="responseTitle">
+    <header class="section-header">
+      <div><span class="section-index">02</span><h2 id="responseTitle">管理桥返回的响应</h2></div>
+      <button id="debugExport" class="button" type="button" disabled>导出调试内容</button>
+    </header>
+    <dl class="metrics">
+      <div><dt>HTTP 状态</dt><dd id="debugHttp">—</dd></div>
+      <div><dt>收到响应头</dt><dd id="debugHeadersTime">—</dd></div>
+      <div><dt>收到首字节</dt><dd id="debugFirstByte">—</dd></div>
+      <div><dt>总耗时</dt><dd id="debugTotalTime">—</dd></div>
+    </dl>
+    <div class="identity-line"><span>请求 ID</span><code id="debugRequestId">尚未收到</code></div>
+    <div class="identity-line"><span>响应 ID</span><code id="debugResponseId">尚未收到</code></div>
+    <ol id="debugPhases" class="phase-list" aria-label="调用阶段与耗时"></ol>
+    <div id="debugError" class="error-box" role="alert" hidden><strong id="debugErrorTitle"></strong><pre id="debugErrorDetail"></pre></div>
+    <div id="debugImages" class="image-grid" aria-label="提取的图片"></div>
+    <p id="debugImageHelp" class="hint" hidden>可在图片上右键另存，或显示并复制完整 Data URL。文件下载能力由 CPR 宿主沙箱决定。</p>
+    <details class="technical"><summary>本次提交快照与响应头</summary><pre id="debugRequestSnapshot">运行后显示本次提交的 JSON 快照、Key ID 和响应头，凭据字段会脱敏。</pre></details>
+    <div class="events-heading"><h3>事件预览 <span id="debugEventCount">0</span></h3><label for="debugEventSearch" class="event-search"><span class="sr-only">筛选事件类型或内容</span><input id="debugEventSearch" type="search" placeholder="筛选事件类型或内容"></label></div>
+    <p class="hint">长字符串与 Base64 仅在预览中截断。完整导出保留已捕获的未知字段、事件与图片数据，并标明捕获是否完整。</p>
+    <div id="debugEvents" class="event-list"><p class="empty-events">运行后显示管理桥返回的 JSON / SSE 事件。</p></div>
+    <p id="debugCaptureState" class="capture-state" role="status"></p>
+  </section>
+
+  <section id="debugExportPanel" class="panel export-panel" aria-labelledby="exportTitle" hidden>
+    <header class="section-header">
+      <div><span class="section-index">03</span><h2 id="exportTitle">导出内容</h2></div>
+      <div><button id="debugCopyExport" class="button" type="button">全选并复制</button><button id="debugCloseExport" class="text-button" type="button">收起</button></div>
+    </header>
+    <p id="debugExportDescription" class="hint"></p>
+    <label for="debugExportText" class="sr-only">完整导出文本</label>
+    <textarea id="debugExportText" class="code-editor export-editor" rows="10" readonly spellcheck="false" wrap="off"></textarea>
+    <p id="debugCopyState" class="hint" role="status">复制后可粘贴保存到本地文件；没有自动上传。</p>
+  </section>
+  <p class="page-footnote">这里记录的是提交给管理桥的 JSON 与管理桥返回的响应。CPR Core 和 Provider 仍可能进行转换，不能据此断言上游实际接收的字节。</p>
+</main>
+</body>
+</html>

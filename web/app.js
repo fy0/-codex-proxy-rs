@@ -163,6 +163,7 @@
       throw new Error('账号或分组数量超过上限 256');
     }
     return {
+      ...builderState.saved,
       timeoutMs: Number(configFields.timeout.value),
       bridgeMode: configFields.mode.value,
       driverModel,
@@ -313,9 +314,8 @@
   let activeTasks = 0;
   let taskCounter = 0;
   let tasks = [];
-  const MAX_TASKS = 30;
-  const MAX_RETAINED_IMAGES = 12;
-  const MAX_PARALLEL = 3;
+  const MAX_TASKS = 12;
+  const MAX_PARALLEL = 4;
   let closed = false;
   const host = () => {
     if (!window.codexProxyPlugin || window.codexProxyPlugin.version < 2
@@ -354,10 +354,10 @@
   function count() {
     fields.count.textContent=fields.prompt.value.length+' / 10000';
     const number=Number(fields.batchCount.value)||1;
-    fields.generate.disabled=closed||!fields.clientKey.value||!fields.imageModel.value
-      ||!fields.prompt.value.trim()||fields.prompt.value.trim().length>4096
-      ||!backendEnabled||!Number.isInteger(number)||number<1||number>10
-      ||liveTaskCount()+number>MAX_TASKS;
+    fields.generate.disabled=closed||!fields.clientKey.value||!fields.driver.value||!fields.imageModel.value
+      ||!fields.prompt.value.trim()||fields.prompt.value.length>10000
+      ||!bridgeReady||!Number.isInteger(number)||number<1||number>10
+      ||tasks.length+number>MAX_TASKS;
     fields.cancel.disabled=liveTaskCount()===0;
     fields.clearFinished.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
   }
@@ -536,6 +536,8 @@
     let errorCount = 0;
     const worker = async () => {
       while (index < keys.length && epoch === scanEpoch && !closed) {
+        // 已有生图时暂停无关 Key 的后台探测。
+        if (activeTasks > 0) { await new Promise(resolve => setTimeout(resolve, 500)); continue; }
         const key = keys[index++];
         try {
           const response = await invoke('POST','api/models',{clientKeyId:key.id});
@@ -559,7 +561,7 @@
         }
       }
     };
-    await Promise.all(Array.from({length:Math.min(3,keys.length)},worker));
+    await worker();
     if (epoch !== scanEpoch || closed) return;
     preferencesReady=true;
     if (eligibleKeys.length) queuePreferenceSave();
@@ -580,83 +582,63 @@
     fields.refresh.disabled = true;
     preferencesReady = false;
     const previousSelected = fields.clientKey.value;
+    accountOptionsLoaded = false;
     try {
-      notice('读取插件配置与上次选择…');
-      const state = await invoke('GET','api/bootstrap');
+      notice('读取配置与上次选择…');
+      const [boot, saved] = await Promise.allSettled([
+        invoke('GET', 'api/bootstrap'), invoke('GET', 'api/preferences')
+      ]);
       if (closed || epoch !== scanEpoch) return;
+      if (boot.status !== 'fulfilled') throw boot.reason;
+      const state = boot.value;
       loadConfigBuilder(state);
-      backendEnabled=!!state.backendJobsEnabled;
-      const actualConcurrency=String(state.concurrencyPerAccount||8);
-      if ([...fields.parallelism.options].some(option=>option.value===actualConcurrency)) {
-        fields.parallelism.value=actualConcurrency;
-      }
-      fields.parallelism.disabled=true;
-      const warning=byId('backendNotice');
-      if(warning) {
-        warning.textContent=backendEnabled
-          ? '后台任务已启用：关闭页面后仍继续执行，图片放在服务器临时目录；每账号默认并发 8。'
-          : '后台任务不可用：请检查 CPR 插件维护调度。';
-        warning.classList.toggle('error',!backendEnabled);
-      }
-      startPolling();
+      bridgeReady = typeof host().models.responses === 'function' && !!window.CPRImageClient;
+      const configuredTimeout = Number(state.configuration?.timeoutMs);
+      requestTimeoutMs = Number.isFinite(configuredTimeout) ? Math.max(30000, Math.min(600000, configuredTimeout)) : 300000;
+      const warning = byId('backendNotice');
+      warning.textContent = bridgeReady
+        ? '即时生成：点击后立即调用 CPR 管理桥。生成期间请保持页面打开；关闭或刷新会取消本页请求。'
+        : '即时管理桥不可用，请检查插件资源与 CPR 版本。';
+      warning.classList.toggle('error', !bridgeReady);
       configuredDriver = state.driverModel || 'gpt-5.6-luna';
-      try {
-        const stored = await invoke('GET','api/preferences');
-        storedSelection = stored.selection && typeof stored.selection === 'object' ? stored.selection : null;
-        stateVersion = Number.isSafeInteger(stored.version) ? stored.version : null;
-      } catch (error) {
-        storedSelection = null;
-        stateVersion = null;
-        notice('偏好存储暂不可用：本次可绘图，但下次可能无法恢复选择。',true);
-      }
-      if (closed || epoch !== scanEpoch) return;
+      const stored = saved.status === 'fulfilled' ? saved.value : {};
+      storedSelection = stored.selection && typeof stored.selection === 'object' ? stored.selection : null;
+      stateVersion = Number.isSafeInteger(stored.version) ? stored.version : null;
       applyRememberedSettings();
-      // 旧偏好不能覆盖已经冻结在后端插件配置中的真实并发上限。
-      fields.parallelism.value=actualConcurrency;
-      supportedKeys = Array.isArray(state.keys) ? state.keys.filter((key)=>key.enabled) : [];
+      if (![...fields.parallelism.options].some(option => option.value === fields.parallelism.value)) fields.parallelism.value = '2';
+      fields.parallelism.disabled = false;
+      supportedKeys = Array.isArray(state.keys) ? state.keys.filter(key => key.enabled) : [];
       modelLists = new Map();
       eligibleKeys = [];
       updateEligibleKeys();
       if (!supportedKeys.length) {
-        notice('没有已启用的客户端 Key，请先在 CPR 管理端配置。',true);
+        notice('没有已启用的客户端 Key，请先在 CPR 管理端配置。', true);
         return;
       }
       if (!state.enabled || !Array.isArray(state.imageModels) || !state.imageModels.length) {
-        notice('尚未开放生图账号/分组或图片模型。请展开上方配置生成器。',true);
+        notice('尚未开放生图账号/分组或图片模型，请展开配置生成器。', true);
       }
-      const initial = supportedKeys.find((key)=>key.id===previousSelected) ||
-        supportedKeys.find((key)=>key.id===storedSelection?.clientKeyId);
+      const initial = supportedKeys.find(key => key.id === previousSelected) ||
+        supportedKeys.find(key => key.id === storedSelection?.clientKeyId);
       preferredKeyId = initial?.id || '';
-      selectedKeyTouched=false;
-      const ordered = initial ? [initial,...supportedKeys.filter((key)=>key.id!==initial.id)] : supportedKeys;
+      selectedKeyTouched = false;
       preferencesReady = !preferredKeyId;
-      // 各 Key 的模型权限由官方管理 API 分批验证。无图片模型的 Key 不出现在下拉框。
-      void scanKeys(ordered,epoch);
+      void scanKeys(initial ? [initial, ...supportedKeys.filter(key => key.id !== initial.id)] : supportedKeys, epoch);
+      if (byId('configPanel').open) void loadAccountOptions();
     } catch (error) {
-      notice('加载失败：'+(error.message||error),true);
-      setOptions(fields.clientKey,[{value:'',label:'管理接口不可用'}],'');
-      count();
+      bridgeReady = false;
+      notice('加载失败：' + (error.message || error), true);
+      setOptions(fields.clientKey, [{value:'',label:'管理接口不可用'}], '');
     } finally {
       if (epoch === scanEpoch) fields.refresh.disabled = false;
+      count();
     }
-  }
-  function detectImageMime(magic) {
+  }  function detectImageMime(magic) {
     if ([137,80,78,71,13,10,26,10].every((v,i)=>magic[i]===v)) return 'image/png';
     if (magic[0]===255 && magic[1]===216 && magic[2]===255) return 'image/jpeg';
     if ([82,73,70,70].every((v,i)=>magic[i]===v)
        && [87,69,66,80].every((v,i)=>magic[i+8]===v)) return 'image/webp';
     throw new Error('图片文件格式无效，仅支持 PNG、JPEG、WebP');
-  }
-  function requireImage(base64) {
-    if (typeof base64 !== 'string' || !base64.length || base64.length > 160*1024*1024) {
-      throw new Error('没有生成图片，或结果超过 160 MiB 的显示上限');
-    }
-    const head=atob(base64.slice(0,24));
-    const mime=detectImageMime(Array.from(head,c=>c.charCodeAt(0)));
-    return 'data:'+mime+';base64,'+base64;
-  }
-  function releaseImageUrl(url) {
-    if (typeof url === 'string' && url.startsWith('blob:')) URL.revokeObjectURL(url);
   }
   function imageChunksToDataUrl(chunks, expectedBytes, declaredMime) {
     if(!Number.isSafeInteger(expectedBytes) || expectedBytes<16 || expectedBytes>120*1024*1024)
@@ -684,406 +666,377 @@
     return 'data:'+mime+';base64,'+encoded.join('');
   }
 
-  function imageItem(event) {
-    const item = event && event.item;
-    if (item && item.type === 'image_generation_call' && typeof item.result === 'string') return item;
-    return null;
-  }
-  function outputImage(document) {
-    const output = document && document.output;
-    return Array.isArray(output) ? output.find((item) =>
-      item && item.type === 'image_generation_call' && typeof item.result === 'string') : null;
-  }
-  function consumeLineBlock(block, state) {
-    const payload = block.split('\n').filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trimStart()).join('\n');
-    if (!payload || payload === '[DONE]') return;
-    let event;
-    try { event = JSON.parse(payload); } catch { return; }
-    if (event.type === 'response.output_item.done') {
-      const item = imageItem(event);
-      if (item) state.image = item;
-    } else if (event.type === 'response.completed') {
-      state.document = event.response;
-      state.image = outputImage(event.response) || state.image;
-    } else if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
-      state.text += event.delta;
-    } else if (event.type === 'response.failed') {
-      const detail = event.response && event.response.error;
-      throw new Error(detail && detail.message || '上游返回 response.failed');
-    } else if (event.type === 'error') {
-      throw new Error(event.message || event.error && event.error.message || '上游返回错误');
-    }
-  }
-  async function consumeResponse(reply, signal) {
-    const state = {image: null, document: null, text: ''};
-    const contentType = (reply.headers.get('content-type') || '').toLowerCase();
-    if (contentType.includes('application/json')) {
-      const document = await reply.json();
-      state.document = document;
-      state.image = outputImage(document);
-      return state;
-    }
-    const reader = reply.body && reply.body.getReader();
-    if (!reader) throw new Error('无法读取 Responses 流');
-    const decoder = new TextDecoder();
-    let buffer = '';
-    try {
-      while (true) {
-        signal.throwIfAborted();
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        buffer += decoder.decode(chunk.value, {stream:true});
-        buffer = buffer.replace(/\r\n/g, '\n');
-        if (buffer.length > 180 * 1024 * 1024) throw new Error('模型响应过大，已停止读取');
-        let pos = buffer.indexOf('\n\n');
-        while (pos >= 0) {
-          consumeLineBlock(buffer.slice(0, pos), state);
-          buffer = buffer.slice(pos + 2);
-          pos = buffer.indexOf('\n\n');
-        }
-      }
-      buffer += decoder.decode();
-      if (buffer.trim()) consumeLineBlock(buffer, state);
-    } finally { reader.releaseLock(); }
-    return state;
-  }
-  // 所有请求由 CPR 后端 maintenance 拥有；此处仅提交、轮询并取回已保存的 PNG。
-  let backendEnabled=false;
-  let workerActive=false;
-  let dispatchIntervalMs=30000;
-  let polling=false;
-  let pollStarted=false;
-  let pollTimer=null;
-  let stopwatchTimer=null;
-  const hiddenFinished=new Set();
-  const fetching=new Set();
+  // 正常生图只走官方即时管理桥；旧后台队列仅按需读取历史。
+  let bridgeReady = false;
+  let requestTimeoutMs = 300000;
+  let stopwatchTimer = null;
+  let accountOptionsLoaded = false;
+  let accountOptionsLoading = false;
+  let legacyTasks = [];
+  let historyLoading = false;
+  const fetching = new Set();
 
-  function createTaskCard(task) {
-    const card=document.createElement('article');
-    card.className='task-card';
-    card.dataset.taskId=task.id;
-    const head=document.createElement('div');
-    head.className='task-head';
-    const title=document.createElement('span');
-    title.className='task-id';
-    title.textContent='图片 #'+task.id.slice(0,8);
-    const state=document.createElement('span');
-    state.className='task-state';
-    head.append(title,state);
-    const preview=document.createElement('div');
-    preview.className='task-preview';
-    const info=document.createElement('span');
-    info.className='task-preview-text';
-    const img=document.createElement('img');
-    img.hidden=true;
-    img.alt=task.prompt.slice(0,100);
-    preview.append(info,img);
-    const details=document.createElement('div');
-    details.className='task-details';
-    const prompt=document.createElement('p');
-    prompt.className='task-prompt';
-    prompt.textContent=task.prompt;
-    prompt.title=task.prompt;
-    const model=document.createElement('span');
-    model.className='task-model';
-    model.textContent=task.imageModel+' · '+task.size+' · '+task.quality;
-    const error=document.createElement('div');
-    error.className='task-error';
-    error.hidden=true;
-    const requestId=document.createElement('div');
-    requestId.className='task-model';
-    requestId.hidden=true;
-    details.append(prompt,model,error,requestId);
-    const actions=document.createElement('div');
-    actions.className='task-actions';
-    const cancel=document.createElement('button');
-    cancel.type='button';
-    cancel.className='task-button cancel';
-    cancel.textContent='停止此张';
-    cancel.addEventListener('click',()=>{void cancelTask(task);});
-    const download=document.createElement('a');
-    download.className='task-button';
-    download.textContent='保存图片';
-    download.hidden=true;
-    download.download='codex-image-'+task.id.slice(0,8)+'.'+(task.resultMime==='image/jpeg'?'jpg':task.resultMime==='image/webp'?'webp':'png');
-    actions.append(cancel,download);
-    card.append(head,preview,details,actions);
-    fields.taskGrid.append(card);
-    task.node={card,state,info,img,model,error,requestId,cancel,download};
+  function seconds(ms) {
+    return Number.isFinite(ms) ? (Math.max(0, ms) / 1000).toFixed(1) + 's' : '—';
+  }
+  function timingText(task) {
+    const t = task.timings;
+    if (!t) return '';
+    return '响应头 ' + seconds(t.headersMs) + ' · 首个数据 ' + seconds(t.firstByteMs)
+      + ' · 图片返回 ' + seconds(t.firstImageMs) + ' · 总计 ' + seconds(t.totalMs);
+  }
+  function elapsedTime(task) {
+    if (!Number.isFinite(task.startedMs)) return '';
+    const end = task.completedMs || Date.now();
+    return seconds(end - task.startedMs);
+  }
+  function createTaskCard(task, container) {
+    const card = document.createElement('article');
+    card.className = 'task-card';
+    card.dataset.taskId = task.id;
+    const head = document.createElement('div');
+    head.className = 'task-head';
+    const title = document.createElement('span');
+    title.className = 'task-id';
+    title.textContent = (task.legacy ? '旧任务 #' : '图片 #') + (task.number || task.id.slice(0, 8));
+    const state = document.createElement('span');
+    state.className = 'task-state';
+    head.append(title, state);
+    const preview = document.createElement('div');
+    preview.className = 'task-preview';
+    const info = document.createElement('span');
+    info.className = 'task-preview-text';
+    const img = document.createElement('img');
+    img.hidden = true;
+    img.alt = (task.prompt || '').slice(0, 100);
+    preview.append(info, img);
+    const details = document.createElement('div');
+    details.className = 'task-details';
+    const prompt = document.createElement('p');
+    prompt.className = 'task-prompt';
+    prompt.textContent = task.prompt || '';
+    const model = document.createElement('span');
+    model.className = 'task-model';
+    model.textContent = task.imageModel + ' · ' + task.size + ' · ' + task.quality;
+    const timing = document.createElement('div');
+    timing.className = 'task-model';
+    const error = document.createElement('div');
+    error.className = 'task-error';
+    const requestId = document.createElement('div');
+    requestId.className = 'task-model';
+    details.append(prompt, model, timing, error, requestId);
+    const actions = document.createElement('div');
+    actions.className = 'task-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'task-button cancel';
+    cancel.textContent = task.legacy ? '取消旧记录' : '停止此张';
+    cancel.addEventListener('click', () => { void cancelTask(task); });
+    const download = document.createElement('a');
+    download.className = 'task-button';
+    download.textContent = '下载图片';
+    download.hidden = true;
+    const load = document.createElement('button');
+    load.type = 'button';
+    load.className = 'task-button';
+    load.textContent = '读取旧图片';
+    load.hidden = true;
+    load.addEventListener('click', () => { void downloadLegacyImage(task); });
+    actions.append(cancel, download, load);
+    card.append(head, preview, details, actions);
+    container.appendChild(card);
+    task.node = {card, state, info, img, model, timing, error, requestId, cancel, download, load};
     renderTask(task);
-  }
-
-  function elapsedTime(job) {
-    if (!Number.isFinite(job.startedMs) || job.startedMs<=0) return '';
-    const end=job.status==='running'?Date.now()
-      :(Number.isFinite(job.completedMs)?job.completedMs:Date.now());
-    return Math.max(0,(end-job.startedMs)/1000).toFixed(1)+'s';
-  }
-  function queueLabel() {
-    if (!workerActive) return '待后台唤醒';
-    return tasks.some((task)=>task.status==='running') ? '等待后台分派' : '正在分派';
-  }
-  function waitingTime(task) {
-    return Number.isFinite(task.createdMs) ? Math.max(0,(Date.now()-task.createdMs)/1000).toFixed(1)+'s' : '';
-  }
-  function refreshStopwatches() {
-    if (closed)return;
-    for (const task of tasks) {
-      if (!task.node) continue;
-      if (task.status==='running') task.node.state.textContent='生成中 '+elapsedTime(task);
-      else if (task.status==='queued') task.node.state.textContent=queueLabel()+' '+waitingTime(task);
-    }
   }
   function renderTask(task) {
     if (!task.node || closed) return;
-    const stateKey=task.status || 'queued';
-    const n=task.node;
-    const labels={
-      queued:queueLabel(),running:'生成中',succeeded:'已完成',
-      failed:'失败',canceled:'已取消',interrupted:'中断（请手动重试）'
-    };
-    n.state.className='task-state '+(
-      stateKey==='succeeded'?'succeeded':stateKey==='running'?'running':
-        stateKey==='failed'||stateKey==='interrupted'?'failed':'');
-    n.state.textContent=(labels[stateKey]||stateKey)
-      + (stateKey==='queued'?' '+waitingTime(task):task.startedMs?' '+elapsedTime(task):'');
-    n.card.className='task-card '+stateKey;
-    n.img.hidden=!(stateKey==='succeeded' && task.imageUrl);
-    if (!n.img.hidden && n.img.src!==task.imageUrl) n.img.src=task.imageUrl;
-    n.info.hidden=!n.img.hidden;
-    if (!n.info.hidden) {
-      n.info.textContent=stateKey==='queued'
-        ? (workerActive
-          ? '后台工作器已运行，将按账号权限与并发规则领取任务…'
-          : '等待 CPR 后台唤醒；宿主维护间隔约 '+Math.round(dispatchIntervalMs/1000)+' 秒，不代表账号队列已满。')
-        :stateKey==='running'?'CPR 后端生成中，关闭页面不会停止…'
-        :stateKey==='succeeded'?'图片已保存在后端，读取预览中…'
-        :stateKey==='interrupted'?'维护任务曾被中断；不会自动重复扣费'
-        :'本次任务无可用图片';
+    const n = task.node;
+    const pending = ['queued', 'running'].includes(task.status);
+    const labels = {queued:'等待本页空闲',running:'生成中',succeeded:'已完成',failed:'失败',canceled:'已取消',interrupted:'中断'};
+    const label = task.legacy && pending ? '旧后台已停用，未重发' : labels[task.status] || task.status;
+    n.state.className = 'task-state ' + (task.status === 'succeeded' ? 'succeeded' : task.status === 'failed' ? 'failed' : task.status === 'running' && !task.legacy ? 'running' : '');
+    n.state.textContent = label + (!task.legacy && task.startedMs ? ' ' + elapsedTime(task) : '');
+    n.card.className = 'task-card ' + task.status;
+    n.img.hidden = !task.imageUrl;
+    if (task.imageUrl && n.img.src !== task.imageUrl) n.img.src = task.imageUrl;
+    n.info.hidden = !!task.imageUrl;
+    n.info.textContent = task.legacy && pending ? '仅保留历史记录，不会自动重新生图'
+      : task.status === 'running' ? (task.phaseText || '请求已提交，等待模型响应')
+      : task.status === 'queued' ? '已有请求运行，空位释放后立即开始'
+      : task.status === 'succeeded' ? '点击读取旧图片' : '本次未交付完整图片';
+    n.model.textContent = task.imageModel + ' · 选择 ' + task.size + (task.actualWidth ? ' · 实际 ' + task.actualWidth + '×' + task.actualHeight : '') + ' · ' + task.quality;
+    n.timing.textContent = timingText(task);
+    n.timing.hidden = !n.timing.textContent;
+    n.error.textContent = task.error || '';
+    n.error.hidden = !task.error;
+    n.requestId.textContent = task.requestId ? '请求 ID：' + task.requestId : '';
+    n.requestId.hidden = !task.requestId;
+    n.cancel.hidden = !pending;
+    n.download.hidden = !task.imageUrl;
+    if (task.imageUrl) {
+      n.download.href = task.imageUrl;
+      n.download.download = 'codex-image-' + task.id.slice(0, 12) + '.' + (task.resultMime === 'image/webp' ? 'webp' : task.resultMime === 'image/jpeg' ? 'jpg' : 'png');
     }
-    n.error.hidden=!(task.error && ['failed','interrupted'].includes(stateKey));
-    n.error.textContent=task.error||'';
-    n.requestId.hidden=!task.requestId;
-    n.requestId.textContent=task.requestId?'请求 ID · '+task.requestId:'';
-    n.cancel.hidden=!['queued','running'].includes(stateKey);
-    n.download.hidden=!(stateKey==='succeeded'&&task.imageUrl);
-    if(!n.download.hidden) {
-      n.download.href=task.imageUrl;
-      n.download.download='codex-image-'+task.id.slice(0,8)+'.'+(
-        task.resultMime==='image/jpeg'?'jpg':task.resultMime==='image/webp'?'webp':'png');
-    }
-    const dimensions=task.actualWidth && task.actualHeight
-      ? ' · 实际 '+task.actualWidth+'×'+task.actualHeight : '';
-    n.model.textContent=task.imageModel+' · 选择 '+task.size+dimensions+' · '+task.quality;
+    n.load.hidden = !task.legacy || task.status !== 'succeeded' || !!task.imageUrl;
+    n.load.disabled = fetching.has(task.id);
   }
-  function forgetTask(task) {
-    if(task.imageUrl)releaseImageUrl(task.imageUrl);
-    task.node?.card.remove();
-    const at=tasks.indexOf(task);
-    if(at>=0)tasks.splice(at,1);
-  }
-  async function downloadImage(task) {
-    if (fetching.has(task.id) || task.imageUrl || !task.resultBytes || task.status!=='succeeded')return;
-    fetching.add(task.id);
-    try{
-      let offset=0;
-      const chunks=[];
-      while (offset<task.resultBytes && !closed && task.status==='succeeded') {
-        const response=await host().request({
-          method:'POST',path:'api/jobs/image',
-          contentType:'application/json',
-          body:JSON.stringify({id:task.id,offset})
-        });
-        if (response.status!==200)throw Error('读取图片分片失败：HTTP '+response.status);
-        const data=new Uint8Array(response.body);
-        if (data.length<1 || data.length>256*1024)throw Error('图片分片无效');
-        offset+=data.length;
-        if (offset>task.resultBytes || offset>120*1024*1024)throw Error('图片大小超过限制');
-        chunks.push(data);
-      }
-      if (offset===task.resultBytes && !closed && task.status==='succeeded') {
-        const url=imageChunksToDataUrl(chunks,task.resultBytes,task.resultMime);
-        if (task.imageUrl)releaseImageUrl(task.imageUrl);
-        task.imageUrl=url;
-        const detectedMime=/^data:(image\/(?:png|jpeg|webp));base64,/.exec(url);
-        if (detectedMime) task.resultMime=detectedMime[1];
-        renderTask(task);
-      }
-    }catch(error){
-      // 文件可能因后端清理、目录未挂载等原因暂时不可用。
-      if (!closed)notice('图片 #'+task.id.slice(0,8)+' 无法读取：'+(error.message||error),true);
-    }finally{fetching.delete(task.id);}
+  function refreshStopwatches() {
+    if (!closed) for (const task of tasks) if (task.status === 'running') renderTask(task);
   }
   function updateQueueInfo() {
-    const running=tasks.filter((t)=>t.status==='running').length;
-    const queued=tasks.filter((t)=>t.status==='queued').length;
-    const done=tasks.filter((t)=>t.status==='succeeded').length;
-    const failed=tasks.filter((t)=>t.status==='failed'||t.status==='interrupted').length;
-    const canceled=tasks.filter((t)=>t.status==='canceled').length;
-    fields.queueInfo.textContent=running+' 运行中 · '+queued+' 待启动 · '+done+' 完成 · '
-      +failed+' 失败/中断 · '+canceled+' 取消';
-    fields.empty.hidden=tasks.length>0;
-    if (running)status('working','后端生成中');
-    else if (queued)status('working',queueLabel());
-    else if(done)status('success','已完成');
-    else if(failed)status('error','部分任务失败');
-    else status('',tasks.length?'暂无进行中的任务':'尚无任务');
-    fields.clearFinished.disabled=!tasks.some((t)=>!['queued','running'].includes(t.status));
-    fields.cancel.disabled=!(running||queued);
+    const running = tasks.filter(t => t.status === 'running').length;
+    const queued = tasks.filter(t => t.status === 'queued').length;
+    const done = tasks.filter(t => t.status === 'succeeded').length;
+    const failed = tasks.filter(t => t.status === 'failed').length;
+    fields.queueInfo.textContent = running + ' 运行中 · ' + queued + ' 等待本页空闲 · ' + done + ' 完成 · ' + failed + ' 失败';
+    fields.empty.hidden = tasks.length > 0;
+    if (running) status('working', '即时生成中');
+    else if (queued) status('working', '等待本页空闲');
+    else if (done) status('success', '已完成');
+    else if (failed) status('error', '请求失败');
+    else status('', tasks.length ? '暂无进行中的任务' : '尚无任务');
     count();
   }
-  function refreshTasks(remoteJobs) {
-    const items=Array.isArray(remoteJobs)?remoteJobs:[];
-    const byId=new Map(tasks.map((task)=>[task.id,task]));
-    const remoteIds=new Set(items.map((job)=>job.id));
-    for(const task of tasks.slice()){
-      if(!remoteIds.has(task.id)){
-        forgetTask(task);
-      }
-    }
-    for(const item of items){
-      if (!item || typeof item.id!=='string' || hiddenFinished.has(item.id))continue;
-      let task=byId.get(item.id);
-      if(!task){
-        task={...item,imageUrl:null,node:null};
-        tasks.push(task);
-        createTaskCard(task);
-      }else{
-        const savedUrl=task.imageUrl;
-        const savedNode=task.node;
-        const detectedMime=task.resultMime;
-        Object.assign(task,item);
-        if (!task.resultMime && savedUrl) task.resultMime=detectedMime;
-        task.imageUrl=savedUrl;
-        task.node=savedNode;
-        renderTask(task);
-      }
-      if(task.status==='succeeded' && !task.imageUrl)void downloadImage(task);
-    }
-    updateQueueInfo();
+  function imageRequest(task) {
+    // 保留用户验证可用的 v0.5.1 请求形状，不加入后台账号绑定或压缩参数。
+    return {
+      model: task.driverModel, stream: true, store: false,
+      input: [{type:'message',role:'user',content:[{type:'input_text',text:task.prompt}]}],
+      instructions: 'Use image_generation to create exactly one image corresponding closely to the user instruction. Preserve its original language and visual constraints.',
+      tools: [{type:'image_generation',model:task.imageModel,action:'auto',size:task.size,quality:task.quality,output_format:'png'}],
+      tool_choice:'auto', parallel_tool_calls:false, include:['reasoning.encrypted_content']
+    };
   }
-  async function pollJobs() {
-    if (closed)return;
-    if (polling)return;
-    polling=true;
-    try{
-      const response=await invoke('GET','api/jobs');
-      if(!closed){
-        backendEnabled=!!response.backendEnabled;
-        workerActive=response.workerActive===true;
-        if (Number.isFinite(response.dispatchIntervalMs)) dispatchIntervalMs=response.dispatchIntervalMs;
-        refreshTasks(response.jobs);
-      }
-    }catch(error){
-      if(!closed)notice('读取后端队列失败：'+(error.message||error),true);
-    }finally{
-      polling=false;
-      if(!closed)pollTimer=setTimeout(()=>{void pollJobs();},2000);
-    }
-  }
-  function startPolling() {
-    if(pollStarted)return;
-    pollStarted=true;
-    stopwatchTimer=setInterval(refreshStopwatches,100);
-    void pollJobs();
-  }
-
-  async function queueBatch() {
-    const n=Number(fields.batchCount.value);
-    if(closed || !fields.clientKey.value || !fields.imageModel.value ||
-      !fields.prompt.value.trim() || !Number.isInteger(n) || n<1 || n>10)return;
-    if(!backendEnabled){
-      notice('后端任务不可用：请检查维护回调与插件配置。',true);
-      return;
-    }
-    fields.generate.disabled=true;
+  async function runTask(task) {
+    const controller = new AbortController();
+    task.controller = controller;
+    task.status = 'running';
+    task.startedMs = Date.now();
+    let timedOut = false;
+    const budget = task.timeoutMs;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, budget);
+    renderTask(task);
     try {
-      const response=await invoke('POST','api/jobs',{
-        clientKeyId:fields.clientKey.value,
-        driverModel:fields.driver.value || undefined,
-        imageModel:fields.imageModel.value,
-        prompt:fields.prompt.value.trim(),
-        size:fields.size.value,
-        quality:fields.quality.value,
-        count:n
+      const result = await window.CPRImageClient.run({
+        clientKeyId:task.clientKeyId, body:task.body, signal:controller.signal,
+        onPhase(info) {
+          task.phaseText = info.phase === 'headers' ? '已收到响应头，读取模型输出'
+            : info.phase === 'image' ? '已收到图片，等待完整响应'
+            : '请求已提交，等待模型完成';
+          renderTask(task);
+        }
       });
-      notice('已向 CPR 后端提交 '+response.ids.length+' 张。页面关闭后任务仍将继续。');
-      await pollJobs();
-    }catch(error){
-      notice('后端任务提交失败：'+(error.message||error),true);
-    }finally{count();}
-  }
-  async function cancelTask(task) {
-    if(!['queued','running'].includes(task.status))return;
-    try{
-      await invoke('POST','api/jobs/cancel',{id:task.id});
-      task.status='canceled';
+      task.requestId = result.requestId || result.responseId || null;
+      task.timings = result.timings;
+      if (controller.signal.aborted || result.status === 'canceled') {
+        task.status = timedOut ? 'failed' : 'canceled';
+        task.error = timedOut ? '达到本页请求超时 ' + seconds(budget) : null;
+        return;
+      }
+      if (result.status !== 'completed') {
+        const error = result.error || {};
+        task.status = 'failed';
+        task.error = [
+          error.code || error.kind || result.status,
+          error.message || '响应没有完整完成',
+          error.stage ? 'stage=' + error.stage : '',
+          error.upstreamKind ? 'kind=' + error.upstreamKind : '',
+          result.httpStatus ? 'HTTP ' + result.httpStatus : ''
+        ].filter(Boolean).join(' · ');
+        return;
+      }
+      if (result.images.length !== 1) throw new Error('完整响应包含 ' + result.images.length + ' 张图片，当前任务预期 1 张；可在原始请求调试页检查返回。');
+      const image = result.images[0];
+      if (!image.width || !image.height || image.width * image.height > 12000000) throw new Error('图片像素信息无效或超过显示上限');
+      task.imageUrl = image.dataUrl;
+      task.resultMime = image.mimeType;
+      task.actualWidth = image.width;
+      task.actualHeight = image.height;
+      if (task.size !== 'auto' && task.size !== image.width + 'x' + image.height) {
+        throw new Error('图片已返回，但请求尺寸 ' + task.size + '，实际尺寸 ' + image.width + 'x' + image.height + '；不会将其标记为所选尺寸生成成功。');
+      }
+      task.status = 'succeeded';
+      task.error = null;
+    } catch (error) {
+      task.status = controller.signal.aborted && !timedOut ? 'canceled' : 'failed';
+      task.error = task.status === 'canceled' ? null : String(error.message || error);
+    } finally {
+      clearTimeout(timeout);
+      task.completedMs = Date.now();
+      task.controller = null;
+      activeTasks--;
       renderTask(task);
       updateQueueInfo();
-      notice('任务已标记取消。已发往上游的请求可能继续消耗额度。');
-    }catch(error){notice('取消失败：'+(error.message||error),true);}
+      pump();
+    }
   }
-  async function cancelAllTasks() {
-    const ids=tasks.filter((t)=>['queued','running'].includes(t.status)).map((t)=>t.id);
-    await Promise.all(ids.map((id)=>{
-      const task=tasks.find((item)=>item.id===id);
-      return cancelTask(task);
-    }));
-  }
-  function clearFinishedTasks() {
-    for(const task of tasks.slice()) {
-      if(['queued','running'].includes(task.status))continue;
-      hiddenFinished.add(task.id);
-      forgetTask(task);
+  function pump() {
+    if (closed || !bridgeReady) return;
+    const parallel = Math.max(1, Math.min(MAX_PARALLEL, Number(fields.parallelism.value) || 1));
+    while (activeTasks < parallel) {
+      const task = tasks.find(item => item.status === 'queued');
+      if (!task) break;
+      activeTasks++;
+      task.status = 'running';
+      void runTask(task);
     }
     updateQueueInfo();
   }
+  function queueBatch() {
+    const n = Number(fields.batchCount.value);
+    if (closed || !bridgeReady || !fields.clientKey.value || !fields.driver.value || !fields.imageModel.value
+        || !fields.prompt.value.trim() || !Number.isInteger(n) || n < 1 || n > 10) return;
+    if (tasks.length + n > MAX_TASKS) {
+      notice('本页最多保留 ' + MAX_TASKS + ' 张；请先保存图片并清理已结束任务。', true);
+      return;
+    }
+    for (let index = 0; index < n; index++) {
+      const task = {
+        id:'live_' + Date.now().toString(36) + '_' + (++taskCounter),
+        number:taskCounter, clientKeyId:fields.clientKey.value, driverModel:fields.driver.value,
+        imageModel:fields.imageModel.value, prompt:fields.prompt.value,
+        size:fields.size.value, quality:fields.quality.value, status:'queued', createdMs:Date.now(),
+        imageUrl:null, node:null, error:null, timeoutMs:requestTimeoutMs
+      };
+      task.body = imageRequest(task);
+      tasks.push(task);
+      createTaskCard(task, fields.taskGrid);
+    }
+    notice('已开始即时调用。生成期间请保持本页打开；更多参数可在“原始请求调试”页编辑。');
+    pump();
+  }
+  async function cancelTask(task) {
+    if (!['queued', 'running'].includes(task.status)) return;
+    if (task.legacy) {
+      try {
+        await invoke('POST', 'api/jobs/cancel', {id:task.id});
+        task.status = 'canceled';
+        renderTask(task);
+      } catch (error) { byId('legacyNotice').textContent = '取消旧记录失败：' + (error.message || error); }
+      return;
+    }
+    if (task.controller) task.controller.abort();
+    else {
+      task.status = 'canceled';
+      task.completedMs = Date.now();
+      renderTask(task);
+      updateQueueInfo();
+    }
+  }
+  function cancelAllTasks() {
+    for (const task of tasks) if (task.status === 'queued') {
+      task.status = 'canceled';
+      task.completedMs = Date.now();
+      renderTask(task);
+    }
+    for (const task of tasks) if (task.controller) task.controller.abort();
+    updateQueueInfo();
+  }
+  function forgetTask(task, collection) {
+    if (task.node) task.node.card.remove();
+    task.imageUrl = null;
+    task.body = null;
+    const index = collection.indexOf(task);
+    if (index >= 0) collection.splice(index, 1);
+  }
+  function clearFinishedTasks() {
+    for (const task of tasks.slice()) if (!['queued', 'running'].includes(task.status)) forgetTask(task, tasks);
+    updateQueueInfo();
+  }
+  async function loadHistory() {
+    if (closed || historyLoading) return;
+    historyLoading = true;
+    byId('loadHistory').disabled = true;
+    try {
+      const result = await invoke('GET', 'api/jobs');
+      if (closed) return;
+      for (const task of legacyTasks.slice()) forgetTask(task, legacyTasks);
+      for (const item of result.jobs || []) {
+        const task = {...item, legacy:true, imageUrl:null, node:null};
+        legacyTasks.push(task);
+        createTaskCard(task, byId('legacyGrid'));
+      }
+      byId('legacyNotice').textContent = legacyTasks.length
+        ? '共 ' + legacyTasks.length + ' 条旧记录。旧队列不再执行，也不会自动重发；已完成图片按需读取。'
+        : '没有旧后台任务记录。';
+    } catch (error) { byId('legacyNotice').textContent = '读取旧记录失败：' + (error.message || error); }
+    finally { historyLoading = false; byId('loadHistory').disabled = false; }
+  }
+  async function downloadLegacyImage(task) {
+    if (fetching.has(task.id) || task.imageUrl) return;
+    fetching.add(task.id);
+    renderTask(task);
+    try {
+      const chunks = [];
+      const total = task.resultBytes;
+      if (!Number.isSafeInteger(total) || total < 16 || total > 120 * 1024 * 1024) throw new Error('旧图片总长度无效');
+      let offset = 0;
+      for (let step = 0; offset < total && step < 512; step++) {
+        const response = await host().request({method:'POST',path:'api/jobs/image',contentType:'application/json',body:JSON.stringify({id:task.id,offset})});
+        if (response.status !== 200) throw new Error('读取旧图片返回 HTTP ' + response.status);
+        const chunk = new Uint8Array(response.body);
+        if (!chunk.length || chunk.length > 256 * 1024 || offset + chunk.length > total) throw new Error('旧图片分片长度无效');
+        chunks.push(chunk);
+        offset += chunk.length;
+        if (closed) return;
+      }
+      if (offset !== total) throw new Error('旧图片分片未完整结束');
+      task.imageUrl = imageChunksToDataUrl(chunks, total, task.resultMime);
+      task.resultMime = task.imageUrl.slice(5, task.imageUrl.indexOf(';'));
+      task.error = null;
+    } catch (error) { task.error = '读取旧图片失败：' + (error.message || error); }
+    finally { fetching.delete(task.id); renderTask(task); }
+  }
+  async function loadAccountOptions() {
+    if (accountOptionsLoaded || accountOptionsLoading || closed) return;
+    accountOptionsLoading = true;
+    const epoch = scanEpoch;
+    try {
+      const data = await invoke('GET', 'api/account-options');
+      if (closed || epoch !== scanEpoch) return;
+      builderState.accounts = Array.isArray(data.accountOptions) ? data.accountOptions : [];
+      builderState.groups = Array.isArray(data.groupOptions) ? data.groupOptions : [];
+      builderState.truncated = !!data.accountOptionsTruncated;
+      builderState.accountOptionsError = false;
+      renderAccountOptions();
+      renderGroupOptions();
+      accountOptionsLoaded = true;
+    } catch (error) {
+      builderState.accountOptionsError = true;
+      configFields.notice.textContent = '账号选项读取失败，可手动输入 ID：' + (error.message || error);
+    } finally { accountOptionsLoading = false; }
+  }
   function closePage() {
-    closed=true;
+    closed = true;
     scanEpoch++;
-    if(pollTimer)clearTimeout(pollTimer);
-    if(stopwatchTimer)clearInterval(stopwatchTimer);
-    if(preferenceTimer!==null)clearTimeout(preferenceTimer);
-    // 不取消后台生图；这里只清理浏览器内存与观察器。
-    for(const task of tasks)if(task.imageUrl)releaseImageUrl(task.imageUrl);
+    if (stopwatchTimer) clearInterval(stopwatchTimer);
+    if (preferenceTimer !== null) clearTimeout(preferenceTimer);
+    for (const task of tasks) if (task.controller) task.controller.abort();
   }
 
-  fields.prompt.addEventListener('input',()=>{
-    selected=-1;
-    presetButtons();
-    count();
-  });
-  fields.clientKey.addEventListener('change',()=>{
-    selectedKeyTouched=true;
-    applyModelsForKey();
-    queuePreferenceSave();
-  });
-  fields.driver.addEventListener('change',()=>{queuePreferenceSave();count();});
-  fields.imageModel.addEventListener('change',()=>{
-    refreshImageOptions();queuePreferenceSave();count();
-  });
-  [fields.size,fields.quality,fields.batchCount].forEach((el)=>
-    el.addEventListener('change',()=>{queuePreferenceSave();count();}));
-  fields.parallelism.addEventListener('change',()=>{
-    // 后端实际每账号并发由 concurrencyPerAccount 配置与 CPR Core 租约决定。
-    queuePreferenceSave();
-    count();
-  });
-  fields.generate.addEventListener('click',queueBatch);
-  fields.cancel.addEventListener('click',cancelAllTasks);
-  fields.clearFinished.addEventListener('click',clearFinishedTasks);
-  fields.refresh.addEventListener('click',bootstrap);
-  window.addEventListener('pagehide',closePage,{once:true});
+  fields.prompt.addEventListener('input', () => { selected = -1; presetButtons(); count(); });
+  fields.clientKey.addEventListener('change', () => { selectedKeyTouched = true; applyModelsForKey(); queuePreferenceSave(); });
+  fields.driver.addEventListener('change', () => { queuePreferenceSave(); count(); });
+  fields.imageModel.addEventListener('change', () => { refreshImageOptions(); queuePreferenceSave(); count(); });
+  [fields.size, fields.quality, fields.batchCount].forEach(el => el.addEventListener('change', () => { queuePreferenceSave(); count(); }));
+  fields.parallelism.addEventListener('change', () => { queuePreferenceSave(); pump(); });
+  fields.generate.addEventListener('click', queueBatch);
+  fields.cancel.addEventListener('click', cancelAllTasks);
+  fields.clearFinished.addEventListener('click', clearFinishedTasks);
+  fields.refresh.addEventListener('click', bootstrap);
+  byId('configPanel').addEventListener('toggle', () => { if (byId('configPanel').open) void loadAccountOptions(); });
+  byId('legacyPanel').addEventListener('toggle', () => { if (byId('legacyPanel').open && !legacyTasks.length) void loadHistory(); });
+  byId('loadHistory').addEventListener('click', loadHistory);
+  window.addEventListener('pagehide', closePage, {once:true});
   loadConfigBuilder({
     configuration:{timeoutMs:300000,bridgeMode:'auto',driverModel:'gpt-5.6-luna',
-      imageModels:['gpt-image-2.6-sunburst','gpt-image-2.6-flare','gpt-image-2.5-sunburst'],
-      imageGroupIds:[],imageAccountIds:[]},
-    candidateImageModels:['gpt-image-2.6-sunburst','gpt-image-2.6-flare',
-      'gpt-image-2.5-sunburst','gpt-image-2.5-flare','gpt-image-2']
+      imageModels:['gpt-image-2.6-sunburst','gpt-image-2.6-flare','gpt-image-2.5-sunburst'],imageGroupIds:[],imageAccountIds:[]},
+    candidateImageModels:['gpt-image-2.6-sunburst','gpt-image-2.6-flare','gpt-image-2.5-sunburst','gpt-image-2.5-flare','gpt-image-2']
   });
-  fields.prompt.value=presets[0].prompt;
+  configFields.backendConcurrency.disabled = true;
+  fields.prompt.value = presets[0].prompt;
   presetButtons();
   updateQueueInfo();
+  stopwatchTimer = setInterval(refreshStopwatches, 200);
   void bootstrap();
 })();

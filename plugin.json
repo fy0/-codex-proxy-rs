@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.5",
-  "description": "Codex Image Bridge: Responses-backed image jobs, precise diagnostics, redesigned account quota management and daily USD protection.",
+  "version": "0.7.6",
+  "description": "Codex Image Bridge: immediate Responses image workbench, raw request debugger, legacy image history, and account quota protection.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -49,7 +49,7 @@
       "bridgeMode": {
         "type": "string",
         "title": "生图路由策略",
-        "description": "控制外部 Images HTTP：auto 优先使用原生 Images，responses 使用 image_generation 工具。后台画图任务固定使用 Responses 工具链。",
+        "description": "控制外部 Images HTTP：auto 优先使用原生 Images，responses 使用 image_generation 工具。画图测试页直接使用 Responses 管理桥。",
         "enum": [
           "auto",
           "responses"
@@ -59,7 +59,7 @@
       "timeoutMs": {
         "type": "integer",
         "title": "图片请求超时（毫秒）",
-        "description": "用于桥接到 /v1/responses 的 HTTP 请求上限。最终超时还受宿主及反代限制。",
+        "description": "Responses 桥接与画图测试页的单次请求超时。最终超时还受宿主及反代限制。",
         "minimum": 30000,
         "maximum": 600000,
         "default": 300000
@@ -116,14 +116,14 @@
       "imageStorageDir": {
         "type": "string",
         "title": "旧版图片路径（兼容项）",
-        "description": "可选旧版兼容设置。留空时自动使用本地系统临时目录，无需挂载持久卷；容器重启后图片可能被删除。建议新安装留空。",
+        "description": "只用于读取旧后台任务图片。留空时读取系统临时目录 cpr-image-bridge/images；新生图保存在当前页面，关闭前请保存图片。",
         "maxLength": 1024,
         "default": ""
       },
       "backgroundConcurrency": {
         "type": "integer",
         "title": "旧版整体并发（兼容项）",
-        "description": "旧版配置兼容字段，现已不参与并发调度；请使用 concurrencyPerAccount。",
+        "description": "保留旧配置值；后台生图已停用，此项不再参与调度。页面并发可设 1–4，账号并发由 CPR Core 控制。",
         "minimum": 1,
         "maximum": 64,
         "default": 2
@@ -184,8 +184,8 @@
       },
       "concurrencyPerAccount": {
         "type": "integer",
-        "title": "每账号生图并发",
-        "description": "每个被授权生图账号允许同时处理的后端图片任务数（默认8）；本版后台总并发最多16，为额度和管理回调保留容量，仍受 CPR Core 并发租约约束。",
+        "title": "旧版每账号并发（兼容项）",
+        "description": "保留旧配置值；后台生图已停用，此项不再参与调度。画图测试页最多 4 个同时请求，账号实际并发由 CPR Core 租约控制。",
         "minimum": 1,
         "maximum": 32,
         "default": 8
@@ -197,6 +197,10 @@
     "web/index.html": "text/html",
     "web/app.js": "text/javascript",
     "web/app.css": "text/css",
+    "web/image-client.js": "text/javascript",
+    "web/debug.html": "text/html",
+    "web/debug.js": "text/javascript",
+    "web/debug.css": "text/css",
     "web/quota/index.html": "text/html",
     "web/quota/assets/app.js": "application/javascript",
     "web/quota/assets/app.css": "text/css"

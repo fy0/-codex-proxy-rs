@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codex 画图测试</title>
   <link rel="stylesheet" href="./app.css">
+  <script defer src="./image-client.js"></script>
   <script defer src="./app.js"></script>
 </head>
 <body>
@@ -12,7 +13,7 @@
   <div class="intro">
     <div class="intro-mark"><span class="logo">✦</span><span class="eyebrow">CPR IMAGE BRIDGE / OFFICIAL SDK</span></div>
     <h1>画图测试台</h1>
-    <p>选择客户端 Key 和预置提示词，直接验证 Codex 生图工具。使用宿主模型桥，不向页面提供密钥明文。</p>
+    <p>选择客户端 Key 和图片参数，点击后立即调用 CPR。需要直接编辑 JSON 和查看响应事件时，请切换上方“原始请求调试”。</p>
   </div>
   <details class="panel config-panel" id="configPanel">
     <summary class="config-toggle">
@@ -52,7 +53,7 @@
           <div><label for="configMode">图片请求策略</label><select id="configMode"><option value="auto">auto · 优先原生 Images</option><option value="responses">responses · 统一工具桥接</option></select></div>
         </div>
         <div class="two-up">
-          <div><label for="configBackendConcurrency">单账号生图并发上限</label>
+          <div><label for="configBackendConcurrency">旧后台并发（兼容保存）</label>
             <select id="configBackendConcurrency">
               <option value="1">1 个/账号</option><option value="2">2 个/账号</option>
               <option value="4">4 个/账号</option><option value="8" selected>8 个/账号（默认）</option>
@@ -60,11 +61,11 @@
               <option value="24">24 个/账号</option><option value="32">32 个/账号</option>
             </select>
           </div>
-          <div><label>图片结果存储</label>
-            <p class="field-note">默认系统临时目录（容器可清理），无需配置路径。</p>
+          <div><label>旧图片目录</label>
+            <p class="field-note">保留旧后台图片的读取位置；本页新生成图片保存在当前页面，建议及时另存。</p>
           </div>
         </div>
-        <div class="field-note">账号总执行容量按可用账号数相加，同时受 CPR Core 并发租约限制。额度规则请使用独立的「账号额度保护」页面，原版账号卡片及五小时／每周窗口界面均已保留。</div>
+        <div class="field-note">即时生成由 CPR Core 选择账号并控制租约。旧后台并发参数仅为兼容保留；本页并发在下方单独设置。额度规则位于“账号额度保护”页面。</div>
         <label for="configTimeout">请求超时</label>
         <select id="configTimeout"><option value="60000">60 秒</option><option value="180000">180 秒</option><option value="300000">300 秒</option><option value="600000">600 秒</option></select>
         <div class="label-line config-preview-label"><label for="configJson">生成的配置 JSON</label><span class="hint">实时生成</span></div>
@@ -91,7 +92,7 @@
       <select id="imageModel"><option value="gpt-image-2">gpt-image-2</option></select>
       <div class="two-up">
         <div>
-          <label for="size">图像尺寸（最高 4K）</label>
+          <label for="size">图像尺寸</label>
           <select id="size">
             <option value="1024x1024">1024 × 1024 · 正方形</option>
             <option value="1536x1024">1536 × 1024 · 横向</option>
@@ -119,23 +120,21 @@
           <option value="7">7 张</option><option value="8">8 张</option><option value="9">9 张</option>
           <option value="10">10 张</option>
         </select></div>
-        <div><label for="parallelism">单账号后台并发（由插件参数控制）</label><select id="parallelism" disabled>
-          <option value="1">1 /账号</option><option value="2">2 /账号</option>
-          <option value="4">4 /账号</option><option value="8" selected>8 /账号</option>
-          <option value="12">12 /账号</option><option value="16">16 /账号</option>
-          <option value="24">24 /账号</option><option value="32">32 /账号</option>
+        <div><label for="parallelism">同时执行（本页）</label><select id="parallelism">
+          <option value="1">1 张</option><option value="2" selected>2 张</option>
+          <option value="3">3 张</option><option value="4">4 张</option>
         </select></div>
       </div>
-      <p class="field-note">每张图片作为独立的 CPR 后台任务执行。每账号并发按配置限制，本版后台总并发最多 16，为额度与管理请求保留处理容量；最终仍受 CPR 的账号、Key 额度与并发租约限制。</p>
+      <p class="field-note">每张图片立即发起独立请求；只有达到本页并发数时才等待空位。账号与 Key 的额度、并发仍由 CPR Core 控制。</p>
       <div class="divider"></div>
       <div class="section-title"><span class="section-index">02</span><h2>创作提示词</h2></div>
       <div class="label-line"><span class="label-text">快速预设</span><span class="hint">点击载入，可继续编辑</span></div>
       <div id="presets" class="presets" aria-label="预置提示词"></div>
       <label for="prompt">图片描述</label>
       <textarea id="prompt" rows="7" maxlength="10000" placeholder="描述你希望生成的图片…"></textarea>
-      <div class="footer-line"><span id="promptCount">0 / 10000</span><span>最多 10 张／批 · 可随时追加批次</span></div>
+      <div class="footer-line"><span id="promptCount">0 / 10000</span><span>最多 10 张／批 · 本页保留 12 张</span></div>
       <div class="action-row">
-        <button id="generate" class="primary-btn" disabled><span aria-hidden="true">✦</span> 加入生成队列</button>
+        <button id="generate" class="primary-btn" disabled><span aria-hidden="true">✦</span> 立即生成</button>
         <button id="cancel" class="secondary-btn" disabled>停止全部</button>
       </div>
       <div id="validationMessage" class="notice" role="status"></div>
@@ -147,20 +146,27 @@
         <span class="status" id="status" role="status">尚无任务</span>
       </div>
       <div class="task-toolbar">
-        <span id="queueInfo">0 运行中 · 0 待启动 · 0 完成</span>
-        <button id="clearFinished" class="text-action" type="button" disabled>隐藏已结束</button>
+        <span id="queueInfo">0 运行中 · 0 等待本页空闲 · 0 完成</span>
+        <button id="clearFinished" class="text-action" type="button" disabled>清理已结束</button>
       </div>
       <div id="taskGrid" class="task-grid" aria-live="polite" aria-relevant="additions text">
         <div class="task-placeholder" id="empty">
           <div class="empty-art">✦</div>
           <h3>生成任务在这里展示</h3>
-          <p>提交一张或多张，等待时也可以继续添加新任务。</p>
+          <p>空闲时点击立即开始；更多图片仅等待本页并发空位。</p>
         </div>
       </div>
-      <p class="task-note">任务由 CPR 后端维护工作器执行，页面关闭后仍会继续。空闲工作器按宿主约 30 秒的维护周期唤醒；待启动与实际执行时间分别显示。图片默认存于服务器临时目录，可配置固定目录。</p>
+      <p class="task-note">生成期间保持本页打开，关闭或刷新会取消请求。本页显示响应头、首个数据、图片返回和总耗时。可右键图片另存；宿主浏览器允许时也可点击下载。清理前请先保存图片。</p>
     </section>
   </div>
-  <footer>任务由 CPR 插件后台执行 · 每张完成后立即保存并交付 · Responses 图片工具通过 CPR Core 账号租约、额度与计费</footer>
+  <details class="panel config-panel" id="legacyPanel">
+    <summary class="config-toggle"><span class="section-index">历史</span><span class="config-toggle-copy"><strong>旧后台任务记录</strong><span class="config-toggle-sub">按需查看旧图片、失败信息与取消记录</span></span><span class="config-chevron" aria-hidden="true">⌄</span></summary>
+    <div class="config-content">
+      <div class="task-toolbar"><span id="legacyNotice">展开后读取历史；旧后台任务不会自动重新执行。</span><button id="loadHistory" type="button" class="secondary-btn">刷新旧记录</button></div>
+      <div id="legacyGrid" class="task-grid"></div>
+    </div>
+  </details>
+  <footer>即时 Responses 管理桥 · v0.5.1 兼容请求模板 · 账号由 CPR Core 调度 · 额度维护独立运行</footer>
 </div>
 </body>
 </html>

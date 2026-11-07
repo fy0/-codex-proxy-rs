@@ -13,7 +13,7 @@ mod state_migration;
 use std::sync::Arc;
 
 use gateway_plugin_sdk::{
-    CallBudgets, ErrorCode, PluginFault, Stage,
+    ErrorCode, PluginFault,
     call::middleware::MiddlewareHeader,
     client::{
         HttpBody, HttpCall, HttpFrame, HttpRequest, HttpResponse, MiddlewareCall,
@@ -35,10 +35,8 @@ const MAX_RESPONSES_INPUT_BYTES: usize = 60 * 1024 * 1024;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_config = SessionConfig::default();
-    let mut session =
+    let session =
         PluginSession::accept(tokio::io::stdin(), tokio::io::stdout(), session_config).await?;
-    // 独立维护父调用可继续执行长耗时图片模型任务，不与管理页连接寿命绑定。
-    session.set_call_budgets(CallBudgets::from([(Stage::Maintenance, 900_000)]))?;
     let config = Arc::new(
         Config::from_configuration(&session.handshake().configuration)
             .map_err(|s| std::io::Error::new(std::io::ErrorKind::InvalidInput, s))?,
@@ -114,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )
                         .await
                     } else {
-                        management::handle(call, &config, &jobs).await
+                        management::handle(call, &config, &jobs, &raw_config).await
                     }
                 }
             }
@@ -122,19 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 状态 Schema 哈希变化后必须经宿主受管迁移，不能直接复用 Schema v1。
         .on(methods::STATE_MIGRATE, state_migration::migrate)?
         .on(methods::RECONCILE, {
-            let jobs = Arc::clone(&jobs);
             let quota = Arc::clone(&quota);
             move |call| {
-                let jobs = Arc::clone(&jobs);
                 let quota = Arc::clone(&quota);
                 async move {
-                    // 图片运行期间继续刷新额度，避免长生图使账号每日费用观测自然过期。
-                    // 两者仍属于同一个受管父调用；图片结束后完成当轮刷新再停止。
-                    let (quota_result, jobs_result) = quota
-                        .reconcile_with_jobs(&call.host, jobs.reconcile(&call.host))
-                        .await;
-                    quota_result?;
-                    jobs_result?;
+                    // 维护仅刷新 Guard；图片由即时管理桥走普通 Responses 执行链。
+                    quota.reconcile(&call.host).await?;
                     Ok(gateway_plugin_sdk::client::TypedReply::new(
                         gateway_plugin_sdk::client::Empty {},
                     ))

@@ -4,11 +4,10 @@ use futures_util::{StreamExt as _, stream};
 use gateway_plugin_sdk::{ErrorCode, PluginFault, call::data::QuotaFactsQuery, client::HostClient};
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 
 const MAX_CHECKS: usize = 20;
 const MAX_PARALLEL_REFRESHES: usize = 4;
@@ -18,43 +17,6 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const QUOTA_REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
 const RECONCILE_BUDGET: Duration = Duration::from_secs(8);
 const OVERVIEW_BUDGET: Duration = Duration::from_secs(5);
-
-/// 在同一父调用内刷新额度，保留两条任务的结果；后台任务结束通知不会丢失。
-async fn reconcile_until_jobs_finish<Q, QF, J>(
-    mut refresh: Q,
-    jobs: J,
-    interval: Duration,
-) -> (Result<(), PluginFault>, Result<(), PluginFault>)
-where
-    Q: FnMut() -> QF,
-    QF: Future<Output = Result<(), PluginFault>>,
-    J: Future<Output = Result<(), PluginFault>>,
-{
-    let jobs_completed = Notify::new();
-    let quota_work = async {
-        let mut first_error = None;
-        loop {
-            // 即使图片队列为空，也先完成首次有界刷新，再消费结束通知。
-            if let Err(error) = refresh().await {
-                first_error.get_or_insert(error);
-            }
-            tokio::select! {
-                biased;
-                _ = jobs_completed.notified() => break,
-                _ = tokio::time::sleep(interval) => {}
-            }
-        }
-        first_error.map_or(Ok(()), Err)
-    };
-    let image_work = async {
-        let result = jobs.await;
-        // Notify 保留一个许可，图片先结束也不会使刷新循环永久等待。
-        jobs_completed.notify_one();
-        result
-    };
-    // 额度错误只在两条任务结束后返回，不提前取消正在计费的图片执行。
-    tokio::join!(quota_work, image_work)
-}
 
 fn now_ms() -> Result<i64, PluginFault> {
     SystemTime::now()
@@ -239,18 +201,6 @@ impl QuotaGuard {
         Ok(())
     }
 
-    /// 图片执行期间每轮完成后等待 15 秒继续刷新；全部工作仍归属当前父调用。
-    pub async fn reconcile_with_jobs<J>(
-        &self,
-        host: &HostClient,
-        jobs: J,
-    ) -> (Result<(), PluginFault>, Result<(), PluginFault>)
-    where
-        J: Future<Output = Result<(), PluginFault>>,
-    {
-        reconcile_until_jobs_finish(|| self.reconcile(host), jobs, DAILY_CHECK_INTERVAL).await
-    }
-
     pub async fn reconcile(&self, host: &HostClient) -> Result<(), PluginFault> {
         let selected = {
             let Ok(mut state) = self.state.try_lock() else {
@@ -320,88 +270,6 @@ pub async fn refresh_daily_overview(
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    #[tokio::test]
-    async fn long_jobs_receive_repeated_refreshes_before_finishing() {
-        let refreshes = AtomicUsize::new(0);
-        let second_refresh = Notify::new();
-        let (quota_result, jobs_result) = tokio::time::timeout(
-            Duration::from_secs(2),
-            reconcile_until_jobs_finish(
-                || async {
-                    if refreshes.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-                        second_refresh.notify_one();
-                    }
-                    Ok(())
-                },
-                async {
-                    second_refresh.notified().await;
-                    Ok(())
-                },
-                Duration::from_millis(1),
-            ),
-        )
-        .await
-        .expect("long jobs must not prevent the second quota refresh");
-        quota_result.unwrap();
-        jobs_result.unwrap();
-        assert!(refreshes.load(Ordering::SeqCst) >= 2);
-    }
-
-    #[tokio::test]
-    async fn empty_jobs_still_wait_for_the_initial_refresh_to_finish() {
-        let refreshes = AtomicUsize::new(0);
-        let refreshed = AtomicBool::new(false);
-        let (quota_result, jobs_result) = tokio::time::timeout(
-            Duration::from_secs(2),
-            reconcile_until_jobs_finish(
-                || async {
-                    refreshes.fetch_add(1, Ordering::SeqCst);
-                    // 让空图片任务先完成，证明初次额度刷新不会因此被取消。
-                    tokio::task::yield_now().await;
-                    refreshed.store(true, Ordering::SeqCst);
-                    Ok(())
-                },
-                std::future::ready(Ok(())),
-                Duration::from_millis(1),
-            ),
-        )
-        .await
-        .expect("an early completion notification must not be lost");
-        quota_result.unwrap();
-        jobs_result.unwrap();
-        assert!(refreshed.load(Ordering::SeqCst));
-        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn quota_failure_does_not_drop_jobs_or_hide_either_result() {
-        let refreshes = AtomicUsize::new(0);
-        let second_refresh = Notify::new();
-        let (quota_result, jobs_result) = tokio::time::timeout(
-            Duration::from_secs(2),
-            reconcile_until_jobs_finish(
-                || async {
-                    if refreshes.fetch_add(1, Ordering::SeqCst) == 0 {
-                        return Err(PluginFault::new(ErrorCode::Fault, "quota refresh failed"));
-                    }
-                    second_refresh.notify_one();
-                    Ok(())
-                },
-                async {
-                    second_refresh.notified().await;
-                    Err(PluginFault::new(ErrorCode::Rejected, "image job finished"))
-                },
-                Duration::from_millis(1),
-            ),
-        )
-        .await
-        .expect("a quota error must not abandon the image future");
-        assert_eq!(quota_result.unwrap_err().code, ErrorCode::Fault);
-        assert_eq!(jobs_result.unwrap_err().code, ErrorCode::Rejected);
-        assert!(refreshes.load(Ordering::SeqCst) >= 2);
-    }
 
     #[test]
     fn refresh_selection_is_bounded_fair_and_attempts_do_not_hold_a_network_lock() {
