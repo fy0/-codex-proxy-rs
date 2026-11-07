@@ -1,0 +1,318 @@
+source_commit=c5ec7593a925d71aadfa6f360d240dc3c78e4999
+PASS native operation reaches the independent Images HTTP route with unchanged JSON
+PASS large native JSON is delivered without Base64 truncation across 64 KiB pulls
+PASS Responses remains separate and retains its existing route
+PASS manual stream true and unknown native parameters remain intact
+PASS native HTTP 503 passes through without a Responses retry
+PASS parent rejects unsupported operation without dispatching HTTP
+PASS legacy v2 Responses messages remain compatible
+PASS cancellation before headers aborts the native HTTP request
+PASS canceling after native headers closes the parent reader
+test admin::plugins::management::native_image_bridge_keeps_request_policy_in_the_execution_chain ... ok
+test admin::plugins::management::native_image_bridge_does_not_rewrite_stream_or_unknown_parameters ... ok
+test admin::plugins::management::native_image_bridge_preserves_explicit_turn_header ... ok
+test admin::plugins::management::native_image_bridge_requires_admin_target_and_explicit_key_authorization ... ok
+test admin::plugins::management::native_image_bridge_preserves_provider_bytes_and_commits_large_json_once ... ok
+test admin::plugins::management::native_image_bridge_revokes_while_waiting_and_cancels_execution ... ok
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 639 filtered out; finished in 0.51s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 648 filtered out; finished in 0.35s
+dist/assets/nu-B8IOLvx3.svg                                         0.71 kB │ gzip:   0.41 kB
+dist/assets/uy-C55cV2pY.svg                                         0.72 kB │ gzip:   0.41 kB
+dist/assets/um-pvaFGrHs.svg                                         0.72 kB │ gzip:   0.33 kB
+dist/assets/lr-0aOuOrAG.svg                                         0.73 kB │ gzip:   0.41 kB
+dist/assets/ec-DTSAjjgI.svg                                         0.73 kB │ gzip:   0.39 kB
+dist/assets/mk-B1xdjqFw.svg                                         0.73 kB │ gzip:   0.41 kB
+dist/assets/vi-kCm_f_z1.svg                                         0.73 kB │ gzip:   0.42 kB
+dist/assets/np-dzILVn5q.svg                                         0.73 kB │ gzip:   0.43 kB
+dist/assets/mz-CMwHm-A4.svg                                         0.76 kB │ gzip:   0.41 kB
+dist/assets/sb-BvdrsSGM.svg                                         0.76 kB │ gzip:   0.39 kB
+dist/assets/sk-DJ4102pw.svg                                         0.77 kB │ gzip:   0.39 kB
+dist/assets/sz-DLqcAgGk.svg                                         0.77 kB │ gzip:   0.38 kB
+dist/assets/hn-DAg39WWS.svg                                         0.78 kB │ gzip:   0.35 kB
+dist/assets/pn-C1pz29Zl.svg                                         0.78 kB │ gzip:   0.46 kB
+dist/assets/md-cu31Hh9b.svg                                         0.78 kB │ gzip:   0.41 kB
+dist/assets/ph-B3Cu5yLb.svg                                         0.78 kB │ gzip:   0.42 kB
+dist/assets/fj--dDl0_j3.svg                                         0.80 kB │ gzip:   0.48 kB
+dist/assets/zw-CTOiY4cA.svg                                         0.80 kB │ gzip:   0.43 kB
+dist/assets/gb-C1g1dTKm.svg                                         0.81 kB │ gzip:   0.47 kB
+dist/assets/ir-DDCQYyIE.svg                                         0.82 kB │ gzip:   0.43 kB
+dist/assets/bt-CFPNyLzX.svg                                         0.83 kB │ gzip:   0.47 kB
+dist/assets/lk-CcdepmUP.svg                                         0.83 kB │ gzip:   0.48 kB
+dist/assets/ad-9a_y74-i.svg                                         0.84 kB │ gzip:   0.45 kB
+dist/assets/bi-Mb2zF8k1.svg                                         0.85 kB │ gzip:   0.39 kB
+dist/assets/au-Dh_6CSPd.svg                                         0.86 kB │ gzip:   0.44 kB
+dist/assets/ac-BU49Ha6W.svg                                         0.86 kB │ gzip:   0.47 kB
+dist/assets/kg-D9tPGXGd.svg                                         0.86 kB │ gzip:   0.45 kB
+dist/assets/cc-e6i_iwWX.svg                                         0.87 kB │ gzip:   0.41 kB
+dist/assets/un-CksqPth8.svg                                         0.88 kB │ gzip:   0.35 kB
+dist/assets/me-Ck5UV4Hb.svg                                         0.90 kB │ gzip:   0.48 kB
+dist/assets/xk-C2Px8dDi.svg                                         0.90 kB │ gzip:   0.45 kB
+dist/assets/bm-WUCaKc4K.svg                                         0.92 kB │ gzip:   0.48 kB
+dist/assets/gu-COefk4fE.svg                                         0.92 kB │ gzip:   0.47 kB
+dist/assets/nz-CMOAhsrX.svg                                         0.93 kB │ gzip:   0.47 kB
+dist/assets/kr-BiaKi5PT.svg                                         0.93 kB │ gzip:   0.44 kB
+dist/assets/nc-D9CNXfYD.svg                                         0.93 kB │ gzip:   0.45 kB
+dist/assets/ta-CHXMGX5o.svg                                         0.93 kB │ gzip:   0.48 kB
+dist/assets/rs-mLtkgBlD.svg                                         0.94 kB │ gzip:   0.48 kB
+dist/assets/vg-ZdQsEkKN.svg                                         0.95 kB │ gzip:   0.49 kB
+dist/assets/sm-B7-tkDVS.svg                                         0.95 kB │ gzip:   0.49 kB
+dist/assets/eu-C36mNBjl.svg                                         0.95 kB │ gzip:   0.46 kB
+dist/assets/gs-CCqlFiVn.svg                                         0.97 kB │ gzip:   0.49 kB
+dist/assets/tj-CtyfkBiG.svg                                         0.98 kB │ gzip:   0.48 kB
+dist/assets/ba-C005oKtO.svg                                         0.99 kB │ gzip:   0.39 kB
+dist/assets/ve-D77gB2Zu.svg                                         1.04 kB │ gzip:   0.56 kB
+dist/assets/tc-YkNFD9mg.svg                                         1.04 kB │ gzip:   0.55 kB
+dist/assets/tk-DwaWm07I.svg                                         1.05 kB │ gzip:   0.41 kB
+dist/assets/fk-C5yRl7PW.svg                                         1.06 kB │ gzip:   0.49 kB
+dist/assets/iq-CqnhqLat.svg                                         1.06 kB │ gzip:   0.60 kB
+dist/assets/ke-al3IuMle.svg                                         1.07 kB │ gzip:   0.54 kB
+dist/assets/sh-CHEJhk7G.svg                                         1.07 kB │ gzip:   0.55 kB
+dist/assets/cq-CTSxb3ag.svg                                         1.08 kB │ gzip:   0.45 kB
+dist/assets/pm-CBYR_HSA.svg                                         1.10 kB │ gzip:   0.53 kB
+dist/assets/ck-DhDvc9W9.svg                                         1.10 kB │ gzip:   0.56 kB
+dist/assets/gd-DFz93qYe.svg                                         1.16 kB │ gzip:   0.49 kB
+dist/assets/pg-DlT2109I.svg                                         1.16 kB │ gzip:   0.57 kB
+dist/assets/hr-zBl7yzX5.svg                                         1.18 kB │ gzip:   0.53 kB
+dist/assets/mo-EA3Sqbkg.svg                                         1.18 kB │ gzip:   0.58 kB
+dist/assets/cv-CNu2dODq.svg                                         1.24 kB │ gzip:   0.58 kB
+dist/assets/ky-DnFIZ1_S.svg                                         1.26 kB │ gzip:   0.57 kB
+dist/assets/ai-ZATyE2K6.svg                                         1.27 kB │ gzip:   0.64 kB
+dist/assets/dm-bs9ZRmXa.svg                                         1.32 kB │ gzip:   0.58 kB
+dist/assets/ea-B-0RF3gy.svg                                         1.33 kB │ gzip:   0.62 kB
+dist/assets/cx-l3y8Ymmi.svg                                         1.36 kB │ gzip:   0.64 kB
+dist/assets/uz-BwpqpGEQ.svg                                         1.37 kB │ gzip:   0.46 kB
+dist/assets/tv-DN0zrrd_.svg                                         1.42 kB │ gzip:   0.59 kB
+dist/index.html                                                     1.56 kB │ gzip:   0.58 kB
+dist/assets/mp-DfwXqOd6.svg                                         1.59 kB │ gzip:   0.60 kB
+dist/assets/tm-B7P-szpc.svg                                         1.60 kB │ gzip:   0.57 kB
+dist/assets/mx-DhtzbzuV.svg                                         1.68 kB │ gzip:   0.71 kB
+dist/assets/es-BnHV8EA9.svg                                         2.00 kB │ gzip:   0.72 kB
+dist/assets/gp-CacBIBF6.svg                                         2.01 kB │ gzip:   0.69 kB
+dist/assets/yt-egkL4Hlc.svg                                         2.32 kB │ gzip:   0.86 kB
+dist/assets/sa-BmEkSFq4.svg                                         2.68 kB │ gzip:   1.17 kB
+dist/assets/ki-qyp_KHEm.svg                                         2.82 kB │ gzip:   0.67 kB
+dist/assets/dg-Cts46xrT.svg                                         3.52 kB │ gzip:   0.84 kB
+dist/assets/jetbrains-mono-vietnamese-wght-normal-Bt-aOZkq.woff2    7.50 kB
+dist/assets/jetbrains-mono-greek-wght-normal-Bw9x6K1M.woff2         9.00 kB
+dist/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2            10.25 kB
+dist/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2             11.23 kB
+dist/assets/jetbrains-mono-cyrillic-wght-normal-D73BlboJ.woff2     12.10 kB
+dist/assets/jetbrains-mono-latin-ext-wght-normal-DBQx-q_a.woff2    15.19 kB
+dist/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2              18.74 kB
+dist/assets/inter-greek-wght-normal-CkhJZR-_.woff2                 18.99 kB
+dist/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2          25.96 kB
+dist/assets/jetbrains-mono-latin-wght-normal-B9CIFXIH.woff2        40.40 kB
+dist/assets/inter-latin-wght-normal-Dx4kXJAl.woff2                 48.25 kB
+dist/THIRD_PARTY_LICENSES.md                                       81.81 kB
+dist/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2             85.06 kB
+dist/assets/accounts-DAvsGNqN.css                                   0.11 kB │ gzip:   0.11 kB
+dist/assets/UsageTransportCell-D4IrfXtz.css                         0.11 kB │ gzip:   0.11 kB
+dist/assets/usage-DvEAvXP3.css                                      0.23 kB │ gzip:   0.13 kB
+dist/assets/key-usage-Bz7vZmdB.css                                  0.38 kB │ gzip:   0.13 kB
+dist/assets/location-BWb3SMlq.css                                   0.55 kB │ gzip:   0.28 kB
+dist/assets/AccountPlanBadge-CrU9qmRN.css                           0.55 kB │ gzip:   0.31 kB
+dist/assets/layout-D9rx_l37.css                                     0.85 kB │ gzip:   0.23 kB
+dist/assets/login-DzP7fXod.css                                     16.27 kB │ gzip:   2.50 kB
+dist/assets/index-BZxbau3b.css                                    133.84 kB │ gzip:  24.48 kB
+dist/assets/us-D4YzB_DS.js                                          0.07 kB │ gzip:   0.08 kB
+dist/assets/_plugin-vue_export-helper-BDNMzG2s.js                   0.08 kB │ gzip:   0.09 kB
+dist/assets/check-tX0yhjHL.js                                       0.13 kB │ gzip:   0.14 kB
+dist/assets/chevron-down-C8rmeXM9.js                                0.13 kB │ gzip:   0.14 kB
+dist/assets/plus-DErbXdch.js                                        0.16 kB │ gzip:   0.15 kB
+dist/assets/terminal-DUu9iNdp.js                                    0.17 kB │ gzip:   0.16 kB
+dist/assets/arrow-right-BDhSFWfB.js                                 0.17 kB │ gzip:   0.16 kB
+dist/assets/clock-3-DesH9FuQ.js                                     0.17 kB │ gzip:   0.17 kB
+dist/assets/clock-r8jl-67A.js                                       0.17 kB │ gzip:   0.17 kB
+dist/assets/power-CWqkqE6c.js                                       0.18 kB │ gzip:   0.17 kB
+dist/assets/gauge-0Brk_KPR.js                                       0.18 kB │ gzip:   0.17 kB
+dist/assets/globalThis-Cb5RZ8_X.js                                  0.18 kB │ gzip:   0.12 kB
+dist/assets/plugins-B0wKlHVx.js                                     0.20 kB │ gzip:   0.17 kB
+dist/assets/rotate-ccw-CpwJoOwZ.js                                  0.20 kB │ gzip:   0.19 kB
+dist/assets/undo-2-BO0xiL43.js                                      0.21 kB │ gzip:   0.18 kB
+dist/assets/circle-check-DMvgbscI.js                                0.21 kB │ gzip:   0.19 kB
+dist/assets/moon-BXml0oxF.js                                        0.22 kB │ gzip:   0.20 kB
+dist/assets/circle-x-CrEPrvHM.js                                    0.23 kB │ gzip:   0.19 kB
+dist/assets/log-out-BzBV8Nvw.js                                     0.23 kB │ gzip:   0.20 kB
+dist/assets/upload-C7kvk72p.js                                      0.23 kB │ gzip:   0.20 kB
+dist/assets/download-EdtxvRNn.js                                    0.24 kB │ gzip:   0.20 kB
+dist/assets/activity-BDuUv36Y.js                                    0.24 kB │ gzip:   0.21 kB
+dist/assets/timer-DR6OJD_D.js                                       0.24 kB │ gzip:   0.19 kB
+dist/assets/grid-2x2-CMeLz5AN.js                                    0.25 kB │ gzip:   0.21 kB
+dist/assets/external-link-BlYLsA8U.js                               0.26 kB │ gzip:   0.20 kB
+dist/assets/settings-2-GG8cgQcj.js                                  0.26 kB │ gzip:   0.20 kB
+dist/assets/ellipsis-Cq7ay0rU.js                                    0.26 kB │ gzip:   0.18 kB
+dist/assets/app-window-lCxETj1M.js                                  0.26 kB │ gzip:   0.21 kB
+dist/assets/search-D7P-f0BB.js                                      0.26 kB │ gzip:   0.21 kB
+dist/assets/color-DDgrpNy4.js                                       0.26 kB │ gzip:   0.17 kB
+dist/assets/monitor-PfsAcKt6.js                                     0.26 kB │ gzip:   0.21 kB
+dist/assets/zap-CJ0F0V7Q.js                                         0.28 kB │ gzip:   0.22 kB
+dist/assets/pencil-B20J3Gdp.js                                      0.28 kB │ gzip:   0.23 kB
+dist/assets/circle-question-mark-CtP5gzLw.js                        0.29 kB │ gzip:   0.23 kB
+dist/assets/list-DcRZDnrl.js                                        0.31 kB │ gzip:   0.19 kB
+dist/assets/users-B_9ZA8pM.js                                       0.31 kB │ gzip:   0.23 kB
+dist/assets/box-BrIQnOvk.js                                         0.31 kB │ gzip:   0.23 kB
+dist/assets/shield-check-DspmAF_3.js                                0.32 kB │ gzip:   0.25 kB
+dist/assets/refresh-cw-C6lmcGSP.js                                  0.33 kB │ gzip:   0.23 kB
+dist/assets/save-w4g4--dB.js                                        0.33 kB │ gzip:   0.23 kB
+dist/assets/layout-grid-DCepG9aJ.js                                 0.35 kB │ gzip:   0.20 kB
+dist/assets/key-round--fovEuGs.js                                   0.36 kB │ gzip:   0.26 kB
+dist/assets/utils-CyKtKOBL.js                                       0.37 kB │ gzip:   0.28 kB
+dist/assets/network-D1Z-PzOZ.js                                     0.39 kB │ gzip:   0.24 kB
+dist/assets/wifi-DTqzRhAA.js                                        0.40 kB │ gzip:   0.27 kB
+dist/assets/x-D9yqmGfH.js                                           0.40 kB │ gzip:   0.26 kB
+dist/assets/data-s1sqaAUK.js                                        0.45 kB │ gzip:   0.29 kB
+dist/assets/sun-BRh0SSTZ.js                                         0.48 kB │ gzip:   0.26 kB
+dist/assets/Skeleton-Cm_YdwGb.js                                    0.50 kB │ gzip:   0.35 kB
+dist/assets/sparkles-qzx8H3be.js                                    0.52 kB │ gzip:   0.30 kB
+dist/assets/useThemeColor-Cycthjqi.js                               0.54 kB │ gzip:   0.36 kB
+dist/assets/useCopyText-2uaWSnGS.js                                 0.60 kB │ gzip:   0.41 kB
+dist/assets/useRequestState-D7QK9ySD.js                             0.64 kB │ gzip:   0.40 kB
+dist/assets/useAsyncAction-PuBdi1Nh.js                              0.66 kB │ gzip:   0.41 kB
+dist/assets/rolldown-runtime-XKyaHtl9.js                            0.72 kB │ gzip:   0.42 kB
+dist/assets/rotate-ccw-clock-Crw2FpaS.js                            0.81 kB │ gzip:   0.37 kB
+dist/assets/PageHeader-C3vhajqc.js                                  0.83 kB │ gzip:   0.48 kB
+dist/assets/usePageSelection-DaVNXnqh.js                            0.85 kB │ gzip:   0.43 kB
+dist/assets/useApi-CUWMwLLw-DGEUFEW9.js                             0.88 kB │ gzip:   0.48 kB
+dist/assets/ProviderFilter-Dv4PPzGy.js                              1.04 kB │ gzip:   0.63 kB
+dist/assets/operation-Cca2oCsq.js                                   1.08 kB │ gzip:   0.65 kB
+dist/assets/usePagedQuery-Cu0Ty-Ap.js                               1.10 kB │ gzip:   0.57 kB
+dist/assets/useProxyCatalog-CmGzNqHn.js                             1.11 kB │ gzip:   0.63 kB
+dist/assets/AccountGroupMarks-CwoEa8ZA.js                           1.25 kB │ gzip:   0.77 kB
+dist/assets/format-C0E6nLqk.js                                      1.31 kB │ gzip:   0.64 kB
+dist/assets/MenuItem-O7Pp1H4A.js                                    1.40 kB │ gzip:   0.74 kB
+dist/assets/Empty-C4B8Of_e.js                                       1.49 kB │ gzip:   0.83 kB
+dist/assets/plugin-DF3DB0cQ.js                                      1.50 kB │ gzip:   0.84 kB
+dist/assets/ProviderIconGroup-7NaIq5H5.js                           1.72 kB │ gzip:   0.79 kB
+dist/assets/Card-CmU2XL3u.js                                        1.74 kB │ gzip:   0.81 kB
+dist/assets/Github-DVk4oFtR.js                                      1.80 kB │ gzip:   0.95 kB
+dist/assets/ConfirmDialog-BXs18Hw8.js                               1.87 kB │ gzip:   0.88 kB
+dist/assets/useStablePagedQuery-BCvvxYo1.js                         2.00 kB │ gzip:   1.07 kB
+dist/assets/en-BG9WZ_mv.js                                          2.52 kB │ gzip:   1.15 kB
+dist/assets/AppLanguageMenu-DD5H1As6.js                             2.76 kB │ gzip:   1.41 kB
+dist/assets/AccountPlanBadge-BkmlXQq4.js                            2.99 kB │ gzip:   1.30 kB
+dist/assets/useTableSort-woO19b7b.js                                3.15 kB │ gzip:   1.66 kB
+dist/assets/notification-WRQxvxrg.js                                3.24 kB │ gzip:   1.68 kB
+dist/assets/dashboard-DjhQYK7r.js                                   3.25 kB │ gzip:   1.39 kB
+dist/assets/isEqual-CKeRi9v9.js                                     3.41 kB │ gzip:   1.52 kB
+dist/assets/AppBrandMark-BnYM4gmV.js                                3.48 kB │ gzip:   1.33 kB
+dist/assets/Switch-BisxULXr.js                                      3.63 kB │ gzip:   1.58 kB
+dist/assets/InputNumber-BoAp_LmQ.js                                 4.32 kB │ gzip:   1.89 kB
+dist/assets/location-B2rOOPKS.js                                    4.47 kB │ gzip:   1.52 kB
+dist/assets/MotionIcon-Xu7S4hGm.js                                  4.51 kB │ gzip:   1.41 kB
+dist/assets/UsageClientIpCell-AwD5fGaQ.js                           5.33 kB │ gzip:   2.28 kB
+dist/assets/devtools-CxgSYwGp-nU2iAqQT.js                           5.78 kB │ gzip:   2.62 kB
+dist/assets/Input-DDBiZ1zq.js                                       5.87 kB │ gzip:   2.38 kB
+dist/assets/pinia-CQko7XO_.js                                       6.16 kB │ gzip:   2.90 kB
+dist/assets/Scrollbar-B5I6aPv0.js                                   6.59 kB │ gzip:   2.45 kB
+dist/assets/UsageRecordsTable-Djys1tRB.js                           7.06 kB │ gzip:   2.86 kB
+dist/assets/Segmented-Df33CXA9.js                                   7.07 kB │ gzip:   2.92 kB
+dist/assets/TableColumnSettings-Dug80Daw.js                         7.30 kB │ gzip:   3.20 kB
+dist/assets/providers-EXWtzNfP.js                                   7.49 kB │ gzip:   2.24 kB
+dist/assets/Popover-BB-FcMxO.js                                     7.60 kB │ gzip:   3.21 kB
+dist/assets/ApiKeyConfigModal-Dqko8_E_.js                           7.77 kB │ gzip:   3.44 kB
+dist/assets/Dialog-BLgt9_lV.js                                      8.92 kB │ gzip:   3.82 kB
+dist/assets/account-usage-window-pNAL9mdr.js                       10.61 kB │ gzip:   3.45 kB
+dist/assets/AnimatedMetricValue-BehRp82O.js                        11.35 kB │ gzip:   4.19 kB
+dist/assets/ColorPicker-tnqS23IV.js                                11.53 kB │ gzip:   4.16 kB
+dist/assets/Table-CJeHiA__.js                                      12.69 kB │ gzip:   4.81 kB
+dist/assets/login-PKqY8CPQ.js                                      14.00 kB │ gzip:   5.19 kB
+dist/assets/ThemeDashboardPreview-Bk5i2FOt.js                      14.84 kB │ gzip:   4.44 kB
+dist/assets/UsageTransportCell-CkDz-t_C.js                         17.05 kB │ gzip:   5.19 kB
+dist/assets/ProviderRequestProfilesEditor-ByGGUqmK.js              17.46 kB │ gzip:   4.65 kB
+dist/assets/groups-yQa-SAp7.js                                     21.08 kB │ gzip:   6.90 kB
+dist/assets/ThemeComponentPreview-sP6kXOf2.js                      23.15 kB │ gzip:   6.13 kB
+dist/assets/key-usage-Df5Cf5Rx.js                                  25.70 kB │ gzip:   8.41 kB
+dist/assets/Pagination-Cl1IqOCj.js                                 26.89 kB │ gzip:   9.18 kB
+dist/assets/Textarea-B-DyL0Cx.js                                   32.60 kB │ gzip:  11.50 kB
+dist/assets/useSortable-BM0FGc5P.js                                37.71 kB │ gzip:  13.23 kB
+dist/assets/keys-CrCqgOOs.js                                       38.70 kB │ gzip:  11.07 kB
+dist/assets/DashboardContent-7WVIQNsq.js                           43.97 kB │ gzip:  13.27 kB
+dist/assets/runtime-core.esm-bundler-D8mo9AZ_.js                   69.46 kB │ gzip:  27.12 kB
+dist/assets/index-B5FkLnct.js                                      69.92 kB │ gzip:  26.07 kB
+dist/assets/gsap-CQw0h5e2.js                                       70.00 kB │ gzip:  27.44 kB
+dist/assets/proxies-CTC1pxlk.js                                    74.99 kB │ gzip:  20.84 kB
+dist/assets/api-DxDDUSCn.js                                        78.43 kB │ gzip:  26.05 kB
+dist/assets/theme-C4j7dH0A.js                                      80.97 kB │ gzip:  27.30 kB
+dist/assets/usage-DLryZwAn.js                                     103.28 kB │ gzip:  30.96 kB
+dist/assets/i18n-BgkTDnvX.js                                      104.48 kB │ gzip:  37.88 kB
+dist/assets/layout-lrf-tqIp.js                                    127.54 kB │ gzip:  42.19 kB
+dist/assets/PluginManagement-C1rs7XJ5.js                          159.11 kB │ gzip:  40.59 kB
+dist/assets/settings-BbtBJIxY.js                                  185.62 kB │ gzip:  45.35 kB
+dist/assets/zh-Hans-DwbYnUL3.js                                   200.88 kB │ gzip:  51.17 kB
+dist/assets/zh-Hant-plsuzwl4.js                                   200.89 kB │ gzip:  51.33 kB
+dist/assets/en-ovAcq8yS.js                                        207.65 kB │ gzip:  46.53 kB
+dist/assets/accounts-BHgHiz73.js                                  224.98 kB │ gzip:  59.99 kB
+dist/assets/PluginPage-C_gt3xcW.js                                231.88 kB │ gzip:  66.95 kB
+dist/assets/echarts-BXGsPn0p.js                                   589.60 kB │ gzip: 200.09 kB
+
+[32m✓ built in 4.99s[39m
+(node:2837) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS native operation reaches the independent Images HTTP route with unchanged JSON
+PASS large native JSON is delivered without Base64 truncation across 64 KiB pulls
+PASS Responses remains separate and retains its existing route
+PASS manual stream true and unknown native parameters remain intact
+PASS native HTTP 503 passes through without a Responses retry
+PASS parent rejects unsupported operation without dispatching HTTP
+PASS legacy v2 Responses messages remain compatible
+PASS cancellation before headers aborts the native HTTP request
+PASS canceling after native headers closes the parent reader
+{"passed":9,"failed":0,"suite":"native Images management bridge","base":"ca5901ba568ab398948dcf32239854337c6928dc"}
+[1m[92m    Updating[0m crates.io index
+[1m[92m   Compiling[0m gateway-core v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-core)
+[1m[92m   Compiling[0m gateway-protocol v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-protocol)
+[1m[92m   Compiling[0m gateway-admin v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-admin)
+[1m[92m   Compiling[0m gateway-api v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-api)
+[1m[92m    Finished[0m `test` profile [unoptimized] target(s) in 59.79s
+[1m[92m     Running[0m tests/main.rs (native-host/backend/target/debug/deps/main-d1e882e1fb13c383)
+
+running 18 tests
+test admin::plugins::management::model_bridge_distinguishes_host_authentication_from_plugin_session_errors ... ok
+test admin::plugins::management::model_bridge_authorization_rechecks_preserve_the_pending_frame_read ... ok
+test admin::plugins::management::large_html_resource_should_remain_uncompressed ... ok
+test admin::plugins::management::management_calls_and_callbacks_preserve_headers_and_override_defaults ... ok
+test admin::plugins::management::model_bridge_revokes_and_closes_a_pending_stream ... ok
+test admin::plugins::management::model_bridge_preserves_complete_request_and_response_headers ... ok
+test admin::plugins::management::model_bridge_revokes_while_waiting_for_the_first_response ... ok
+test admin::plugins::management::native_image_bridge_keeps_request_policy_in_the_execution_chain ... ok
+test admin::plugins::management::model_responses_requires_the_exact_authorized_target_before_execution ... ok
+test admin::plugins::management::native_image_bridge_does_not_rewrite_stream_or_unknown_parameters ... ok
+test admin::plugins::management::native_image_bridge_preserves_explicit_turn_header ... ok
+test admin::plugins::management::native_image_bridge_requires_admin_target_and_explicit_key_authorization ... ok
+test admin::plugins::management::native_image_bridge_preserves_provider_bytes_and_commits_large_json_once ... ok
+test admin::plugins::management::native_image_bridge_revokes_while_waiting_and_cancels_execution ... ok
+test admin::plugins::management::protected_plugin_routes_require_admin_before_reading_bodies_but_public_resources_do_not ... ok
+test admin::plugins::management::public_callback_rejects_head_missing_duplicate_state_and_body_before_dispatch ... ok
+test admin::plugins::management::public_resources_cache_but_dynamic_calls_callbacks_and_errors_do_not ... ok
+test admin::plugins::management::static_resources_revalidate_privately_after_authorization ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 639 filtered out; finished in 0.51s
+
+[1m[92m    Finished[0m `test` profile [unoptimized] target(s) in 0.19s
+[1m[92m     Running[0m tests/main.rs (native-host/backend/target/debug/deps/main-d1e882e1fb13c383)
+
+running 9 tests
+test openai::images::image_route_should_return_the_exact_upstream_error_response ... ok
+test openai::images::image_json_routes_should_preserve_both_directions_without_decoding ... ok
+test openai::images::request::multipart_edit_should_match_native_json_fields_and_image_bytes ... ok
+test openai::images::request::multipart_edit_should_forward_unknown_fields_and_repeated_keys_in_order ... ok
+test openai::images::request::multipart_edit_should_preserve_omitted_parameters_and_exact_numbers ... ok
+test openai::images::request::request_middleware_should_run_before_multipart_decoding ... ok
+test openai::images::request::multipart_edit_should_reject_invalid_envelopes_before_provider_execution ... ok
+test openai::images::request::multipart_edit_should_not_inherit_the_default_extractor_size_limit ... ok
+test openai::images::request::multipart_edit_should_reject_fields_that_cannot_be_mapped_without_loss ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 648 filtered out; finished in 0.35s
+
+[1m[92m   Compiling[0m gateway-core v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-core)
+[1m[92m   Compiling[0m gateway-protocol v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-protocol)
+[1m[92m   Compiling[0m gateway-host v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-host)
+[1m[92m   Compiling[0m gateway-store v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-store)
+[1m[92m   Compiling[0m gateway-plugin-runtime v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-plugin/runtime)
+[1m[92m   Compiling[0m gateway-plugin-sdk v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-plugin/sdk)
+[1m[92m   Compiling[0m gateway-admin v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-admin)
+[1m[92m   Compiling[0m provider-openai v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/providers/openai)
+[1m[92m   Compiling[0m gateway-api v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/gateway-api)
+[1m[92m   Compiling[0m provider-xai v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/crates/providers/xai)
+[1m[92m   Compiling[0m codex-proxy-rs v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/native-host/backend/apps/gateway)
+[1m[92m    Finished[0m `release` profile [optimized] target(s) in 8m 03s
