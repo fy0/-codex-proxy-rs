@@ -25,8 +25,10 @@ const response = await window.codexProxyPlugin.models.images.generate({
 - 基线仓库：https://github.com/zyycn/codex-proxy-rs
 - 唯一支持基线：`ca5901ba568ab398948dcf32239854337c6928dc`
 - 官方基线发布版本：`3.42.0`
-- 配套派生测试版本：`3.42.0-imagebridge.0.7.8`
+- 配套派生测试版本：`3.42.0+imagebridge.0.7.8`
 - Image Bridge 插件继续使用官方 SDK pin `96e8443ede051abdd8f0bac69462a7cfe2945633`；本补丁不修改 SDK。
+
+派生标识使用 SemVer build metadata，保留现有插件 `engines` 对稳定版 `3.42.0` 的兼容判断；不使用会被普通稳定版本范围排除的 prerelease 后缀。
 
 旧宿主不会因为只升级插件而获得新增方法。宿主后端和前端资源须配套更新。此目录与 CI 产生的派生测试包不是官方完整发行版；生产宿主实际版本尚未确认，不能据此向较新宿主回退，也不能直接覆盖生产配置、数据库或插件目录。
 
@@ -88,7 +90,7 @@ pnpm --dir native-host/frontend typecheck
 pnpm --dir native-host/frontend build
 node core-patches/native-images/verify-bridge.mjs native-host
 
-CPR_VERSION=3.42.0-imagebridge.0.7.8 \
+CPR_VERSION=3.42.0+imagebridge.0.7.8 \
 CPR_GIT_SHA=ca5901ba568ab398948dcf32239854337c6928dc \
 CPR_BUILD_TYPE=development \
 cargo build --manifest-path native-host/backend/Cargo.toml \

@@ -190,7 +190,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       RUST_MIN_STACK: 16777216
-      CPR_VERSION: '3.42.0-imagebridge.0.7.8'
+      CPR_VERSION: '3.42.0+imagebridge.0.7.8'
       CPR_GIT_SHA: 'ca5901ba568ab398948dcf32239854337c6928dc'
       CPR_BUILD_TYPE: 'development'
     steps:
@@ -286,6 +286,7 @@ jobs:
           import json, os, pathlib
           source = {
             "kind": "core-native-images-test-bundle",
+            "derivedCoreVersion": os.environ["CPR_VERSION"],
             "officialCoreBase": "ca5901ba568ab398948dcf32239854337c6928dc",
             "pluginSourceCommit": os.environ["GITHUB_SHA"],
             "workflowRunId": os.environ["GITHUB_RUN_ID"],
