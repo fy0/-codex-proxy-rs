@@ -672,6 +672,7 @@ body {
 
 .qg-account-windows {
   display: grid;
+  align-items: start;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-top: 16px;
@@ -817,6 +818,120 @@ body {
   margin-left: 3px;
   color: var(--qg-faint);
   font-size: 10px;
+}
+
+.qg-timezone-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  padding: 16px 20px;
+}
+
+.qg-timezone-panel .qg-setting-copy {
+  flex: 1 1 300px;
+}
+
+.qg-timezone-controls {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qg-timezone-input,
+.qg-calibration-entry input {
+  min-width: 0;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--qg-border);
+  border-radius: 7px;
+  background: var(--qg-surface);
+  color: var(--qg-text);
+  font-size: 12px;
+}
+
+.qg-timezone-input {
+  width: 220px;
+}
+
+.qg-timezone-input:focus,
+.qg-calibration-entry input:focus {
+  outline: 2px solid var(--qg-accent-soft);
+  border-color: var(--qg-accent);
+}
+
+.qg-timezone-message {
+  flex-basis: 100%;
+  color: var(--qg-muted);
+  font-size: 11px;
+}
+
+.qg-daily-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 7px;
+  color: var(--qg-muted);
+  font-size: 10px;
+}
+
+.qg-calibration {
+  margin-top: 12px;
+  padding-top: 9px;
+  border-top: 1px solid var(--qg-border);
+  font-size: 11px;
+}
+
+.qg-calibration summary {
+  color: var(--qg-accent-text);
+  cursor: pointer;
+}
+
+.qg-ledger-breakdown {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0;
+}
+
+.qg-ledger-breakdown > div {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+}
+
+.qg-ledger-breakdown dt {
+  color: var(--qg-muted);
+}
+
+.qg-ledger-breakdown dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.qg-calibration-note,
+.qg-ledger-reason {
+  margin-top: 8px !important;
+  color: var(--qg-muted);
+  line-height: 1.6;
+}
+
+.qg-calibration-entry {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.qg-calibration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
 }
 
 .qg-daily-window .qg-window-heading {

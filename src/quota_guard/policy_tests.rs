@@ -8,6 +8,7 @@ fn rule() -> AccountRule {
         five_hour_limit_percent: Some(95.0),
         weekly_limit_percent: Some(95.0),
         daily_limit_usd: None,
+        daily_calibration: None,
     }
 }
 

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,6 +13,8 @@ pub struct QuotaGuardConfig {
     pub accounts: Vec<AccountRule>,
     #[serde(default = "default_max_observation_age_seconds")]
     pub max_observation_age_seconds: u64,
+    #[serde(default = "default_daily_timezone")]
+    pub daily_timezone: Tz,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,16 +25,23 @@ pub struct AccountRule {
     pub five_hour_limit_percent: Option<f64>,
     #[serde(default = "default_limit_percent")]
     pub weekly_limit_percent: Option<f64>,
-    /// 该账号所有已记录 CPR 请求的 UTC 日费用阈值；null 表示关闭。
+    /// 该账号所有已记录 CPR 请求的本地日费用阈值；null 表示关闭。
     #[serde(default)]
     pub daily_limit_usd: Option<String>,
+    #[serde(default)]
+    pub daily_calibration: Option<super::day_window::DailyCalibration>,
 }
 
 impl QuotaGuardConfig {
-    pub fn parse(accounts: Option<&Value>, max_age: Option<&Value>) -> Result<Self, String> {
+    pub fn parse(
+        accounts: Option<&Value>,
+        max_age: Option<&Value>,
+        timezone: Option<&Value>,
+    ) -> Result<Self, String> {
         let value = serde_json::json!({
             "accounts": accounts.cloned().unwrap_or(Value::Array(Vec::new())),
             "maxObservationAgeSeconds": max_age.cloned().unwrap_or(Value::from(300)),
+            "dailyTimezone": timezone.cloned().unwrap_or(Value::from("UTC")),
         });
         Self::from_value(value)
     }
@@ -77,6 +87,9 @@ impl QuotaGuardConfig {
                     return Err("额度使用率上限必须在 0 到 100 之间，或设为 null".to_owned());
                 }
             }
+            if let Some(calibration) = rule.daily_calibration.as_mut() {
+                calibration.validate()?;
+            }
             if let Some(value) = rule.daily_limit_usd.as_mut() {
                 *value = super::daily::Usd::limit(value)
                     .ok_or_else(|| "每日 USD 上限必须为非负十进制字符串，最多 18 位整数和 12 位小数，或设为 null".to_owned())?
@@ -99,6 +112,10 @@ impl AccountRule {
     }
 }
 
+const fn default_daily_timezone() -> Tz {
+    chrono_tz::UTC
+}
+
 const fn default_limit_percent() -> Option<f64> {
     Some(95.0)
 }
@@ -116,8 +133,20 @@ mod tests {
     fn old_rules_keep_daily_protection_disabled_and_percent_defaults() {
         let config = QuotaGuardConfig::from_value(json!({"accounts":[{"accountId":"a"}]})).unwrap();
         assert_eq!(config.accounts[0].daily_limit_usd, None);
+        assert_eq!(config.daily_timezone, chrono_tz::UTC);
+        assert_eq!(config.accounts[0].daily_calibration, None);
         assert_eq!(config.accounts[0].five_hour_limit_percent, Some(95.0));
         assert_eq!(config.accounts[0].weekly_limit_percent, Some(95.0));
+    }
+
+    #[test]
+    fn timezone_must_be_an_iana_zone() {
+        let parsed =
+            QuotaGuardConfig::from_value(json!({"dailyTimezone":"Asia/Shanghai"})).unwrap();
+        assert_eq!(parsed.daily_timezone, chrono_tz::Asia::Shanghai);
+        for value in [json!("UTC+08:00"), json!("unknown"), json!(8), json!(null)] {
+            assert!(QuotaGuardConfig::from_value(json!({"dailyTimezone":value})).is_err());
+        }
     }
 
     #[test]

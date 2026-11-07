@@ -1,14 +1,14 @@
 import type { AccountInfo, AccountRule, Configuration, Overview } from '../api/modules/quota'
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
-import { getAccounts, getOverview, saveConfiguration } from '../api/modules/quota'
+import { getAccounts, getOverview, saveCalibration, saveConfiguration } from '../api/modules/quota'
 import { RequestError } from '../api/request'
-import { cloneConfiguration, configurationKey, isValidUsd } from '../presenter'
+import { canonicalTimezone, cloneConfiguration, configurationKey, isValidTimezone, isValidUsd } from '../presenter'
 
 export function useQuotaGuard() {
   const overview = shallowRef<Overview>()
   const baseline = shallowRef<Configuration>()
   const baselineRevision = shallowRef<number>()
-  const draft = ref<Configuration>({ accounts: [], maxObservationAgeSeconds: 300 })
+  const draft = ref<Configuration>({ accounts: [], maxObservationAgeSeconds: 300, dailyTimezone: 'UTC' })
   const loading = ref(false)
   const saving = ref(false)
   const saved = ref(false)
@@ -21,6 +21,7 @@ export function useQuotaGuard() {
   const nextCursor = ref<string | null>(null)
   const dirty = computed(() => baseline.value !== undefined && configurationKey(draft.value) !== configurationKey(baseline.value))
   const invalidDailyLimits = computed(() => draft.value.accounts.some(rule => rule.dailyLimitUsd !== null && !isValidUsd(rule.dailyLimitUsd)))
+  const invalidTimezone = computed(() => !isValidTimezone(draft.value.dailyTimezone))
   let disposed = false
   let timer: ReturnType<typeof setInterval> | undefined
 
@@ -101,6 +102,7 @@ export function useQuotaGuard() {
       fiveHourLimitPercent: 95,
       weeklyLimitPercent: 95,
       dailyLimitUsd: null,
+      dailyCalibration: null,
     })
   }
 
@@ -124,8 +126,23 @@ export function useQuotaGuard() {
     error.value = ''
   }
 
+  function normalizeDailyTimezone() {
+    const value = draft.value.dailyTimezone
+    // Keep saved aliases unchanged when editing other settings: a timezone
+    // string change intentionally clears calibration on the server.
+    if (value === baseline.value?.dailyTimezone)
+      return isValidTimezone(value)
+    const normalized = canonicalTimezone(value)
+    if (normalized === null)
+      return false
+    draft.value.dailyTimezone = normalized
+    return true
+  }
+
   async function save() {
-    if (!dirty.value || baselineRevision.value === undefined || saving.value || conflict.value || saved.value || invalidDailyLimits.value)
+    if (!dirty.value || baselineRevision.value === undefined || saving.value || conflict.value || saved.value || invalidDailyLimits.value || invalidTimezone.value)
+      return
+    if (!normalizeDailyTimezone() || !dirty.value)
       return
     saving.value = true
     error.value = ''
@@ -142,6 +159,32 @@ export function useQuotaGuard() {
         error.value = failure instanceof Error
           ? failure.message
           : '保存配置失败'
+        conflict.value = failure instanceof RequestError && failure.status === 409
+      }
+    }
+    finally {
+      if (!disposed)
+        saving.value = false
+    }
+  }
+
+  async function calibrate(accountId: string, amountUsd: string | null) {
+    if (dirty.value || baselineRevision.value === undefined || loading.value || saving.value || conflict.value || saved.value)
+      return
+    if (amountUsd !== null && !isValidUsd(amountUsd))
+      return
+    saving.value = true
+    error.value = ''
+    try {
+      await saveCalibration(baselineRevision.value, accountId, amountUsd)
+      if (!disposed) {
+        saved.value = true
+        clearInterval(timer)
+      }
+    }
+    catch (failure) {
+      if (!disposed) {
+        error.value = failure instanceof Error ? failure.message : '保存费用校准失败'
         conflict.value = failure instanceof RequestError && failure.status === 409
       }
     }
@@ -174,6 +217,8 @@ export function useQuotaGuard() {
     conflict,
     dirty,
     invalidDailyLimits,
+    invalidTimezone,
+    normalizeDailyTimezone,
     candidates,
     candidatesLoaded,
     candidatesLoading,
@@ -186,5 +231,6 @@ export function useQuotaGuard() {
     removeAccount,
     discard,
     save,
+    calibrate,
   }
 }

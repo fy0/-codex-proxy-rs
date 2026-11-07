@@ -7,7 +7,8 @@ export function accountName(account?: AccountInfo) {
 export function cloneConfiguration(configuration: Configuration): Configuration {
   return {
     maxObservationAgeSeconds: configuration.maxObservationAgeSeconds,
-    accounts: configuration.accounts.map(rule => ({ ...rule, dailyLimitUsd: rule.dailyLimitUsd ?? null })),
+    dailyTimezone: configuration.dailyTimezone || 'UTC',
+    accounts: configuration.accounts.map(rule => ({ ...rule, dailyLimitUsd: rule.dailyLimitUsd ?? null, dailyCalibration: rule.dailyCalibration ? { ...rule.dailyCalibration } : null })),
   }
 }
 
@@ -24,6 +25,36 @@ export function isProtected(rule: AccountRule) {
 
 export function isValidUsd(value: string) {
   return /^\d{1,18}(?:\.\d{1,12})?$/.test(value)
+}
+
+export function canonicalTimezone(value: string): string | null {
+  // Intl also accepts numeric offsets; the backend stores named IANA zones.
+  if (!value.trim() || value !== value.trim() || /^[+-]/.test(value))
+    return null
+  try {
+    return new Intl.DateTimeFormat('en', { timeZone: value }).resolvedOptions().timeZone
+  }
+  catch {
+    return null
+  }
+}
+
+export function isValidTimezone(value: string) {
+  return canonicalTimezone(value) !== null
+}
+
+export function formatZonedDate(value: number | null | undefined, timezone: string) {
+  if (value == null || !Number.isFinite(new Date(value).getTime()))
+    return '未返回'
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      hourCycle: 'h23', timeZone: timezone,
+    }).format(value)
+  }
+  catch {
+    return '时区不可用'
+  }
 }
 
 export function formatUsd(value: string | null | undefined) {

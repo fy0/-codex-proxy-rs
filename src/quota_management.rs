@@ -71,6 +71,7 @@ pub(crate) fn registration() -> ManagementRegistration {
             ("GET", "quota/overview"),
             ("GET", "quota/accounts"),
             ("POST", "quota/configuration"),
+            ("POST", "quota/calibration"),
         ]
         .into_iter()
         .map(|(method, path)| ManagementRoute {
@@ -138,6 +139,9 @@ pub(crate) async fn handle(
         ("GET", "quota/accounts") => accounts(&call).await,
         ("POST", "quota/configuration") if call.request.query.is_empty() => {
             save_configuration(&call, original, artifact_sha256).await
+        }
+        ("POST", "quota/calibration") if call.request.query.is_empty() => {
+            save_calibration(&call, original, artifact_sha256).await
         }
         _ => Err(invalid("页面请求的路径或参数不受支持")),
     };
@@ -286,13 +290,14 @@ async fn overview(
     let facts = Arc::new(facts);
     let host = call.host.clone();
     let max_age = quota_config.max_observation_age_seconds;
+    let timezone = quota_config.daily_timezone;
     let accounts = stream::iter(quota_config.accounts.clone())
         .map(move |rule| {
             let facts = Arc::clone(&facts);
             let host = host.clone();
             async move {
                 let (mut assessment, quota) = read_assessment(&host, &rule, max_age).await?;
-                let daily_usage = quota_guard::daily_usage(&rule, now_ms()?, max_age);
+                let daily_usage = quota_guard::daily_usage(&rule, now_ms()?, max_age, timezone);
                 quota_guard::add_daily(&mut assessment, &daily_usage);
                 let fact = facts.get(&rule.account_id);
                 Ok::<_, PluginFault>(AccountView {
@@ -406,7 +411,7 @@ struct SaveConfiguration {
     configuration: Value,
 }
 
-fn merge_configuration(original: &Value, quota: &QuotaGuardConfig) -> Result<Value, String> {
+fn write_quota_configuration(original: &Value, quota: &QuotaGuardConfig) -> Result<Value, String> {
     let mut next = original.clone();
     let object = next.as_object_mut().ok_or("插件配置格式不合法")?;
     object.insert(
@@ -417,8 +422,60 @@ fn merge_configuration(original: &Value, quota: &QuotaGuardConfig) -> Result<Val
         "maxObservationAgeSeconds".into(),
         json!(quota.max_observation_age_seconds),
     );
+    object.insert("dailyTimezone".into(), json!(quota.daily_timezone));
     Config::from_configuration(&next)?;
     Ok(next)
+}
+
+fn merge_configuration(original: &Value, quota: &QuotaGuardConfig) -> Result<Value, String> {
+    let previous = Config::from_configuration(original)?.quota_guard;
+    let mut next = quota.clone();
+    for rule in &mut next.accounts {
+        // 普通设置保存不能伪造校准时间，也不因旧 UI 省略字段而丢失已保存基准。
+        // 更改时区明确使旧校准失效；以后切回旧时区也不会将它复活。
+        rule.daily_calibration = if previous.daily_timezone == next.daily_timezone {
+            previous
+                .accounts
+                .iter()
+                .find(|old| old.account_id == rule.account_id)
+                .and_then(|old| old.daily_calibration.clone())
+        } else {
+            None
+        };
+    }
+    write_quota_configuration(original, &next)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveCalibration {
+    expected_revision: u64,
+    account_id: String,
+    amount_usd: Value,
+}
+
+fn calibrated_configuration(
+    original: &Value,
+    account_id: &str,
+    amount: &Value,
+    now_ms: i64,
+) -> Result<Value, String> {
+    let mut quota = Config::from_configuration(original)?.quota_guard;
+    let rule = quota
+        .accounts
+        .iter_mut()
+        .find(|rule| rule.account_id == account_id)
+        .ok_or("账号尚未保存到额度保护配置，请先保存设置")?;
+    rule.daily_calibration = match amount {
+        Value::Null => None,
+        Value::String(value) => Some(quota_guard::DailyCalibration::new(
+            value,
+            now_ms,
+            quota.daily_timezone,
+        )?),
+        _ => return Err("校准金额必须为非负十进制字符串，或使用 null 清除".into()),
+    };
+    write_quota_configuration(original, &quota)
 }
 
 async fn save_configuration(
@@ -430,14 +487,51 @@ async fn save_configuration(
         serde_json::from_slice(&call.payload).map_err(|_| invalid("配置保存请求格式不合法"))?;
     let next_quota = QuotaGuardConfig::from_value(input.configuration).map_err(invalid)?;
     let next_config = merge_configuration(original, &next_quota).map_err(invalid)?;
+    persist_configuration(
+        call,
+        original,
+        artifact_sha256,
+        next_config,
+        input.expected_revision,
+    )
+    .await
+}
+
+async fn save_calibration(
+    call: &TypedCall<ManagementRequest>,
+    original: &Value,
+    artifact_sha256: &str,
+) -> Result<Value, ManagementError> {
+    let input: SaveCalibration =
+        serde_json::from_slice(&call.payload).map_err(|_| invalid("费用校准请求格式不合法"))?;
+    let next_config =
+        calibrated_configuration(original, &input.account_id, &input.amount_usd, now_ms()?)
+            .map_err(invalid)?;
+    persist_configuration(
+        call,
+        original,
+        artifact_sha256,
+        next_config,
+        input.expected_revision,
+    )
+    .await
+}
+
+async fn persist_configuration(
+    call: &TypedCall<ManagementRequest>,
+    original: &Value,
+    artifact_sha256: &str,
+    next_config: Value,
+    expected_revision: u64,
+) -> Result<Value, ManagementError> {
     let instance = own_instance(call, original, artifact_sha256).await?;
-    if input.expected_revision != instance.revision {
+    if expected_revision != instance.revision {
         return Err(conflict());
     }
-    // 始终使用宿主上下文的自身 ID，并保留绑定、启停和制品；并发变化交给宿主 CAS 拒绝
+    // 始终使用宿主上下文的自身 ID，并保留绑定、启停和制品；并发变化交给宿主 CAS 拒绝。
     let update = json!({"id":call.context.instance_id,"instance":{
         "name":instance.name,"artifactSha256":instance.artifact_sha256,"enabled":instance.enabled,
-        "configuration":next_config,"bindings":instance.bindings,"expectedRevision":input.expected_revision,
+        "configuration":next_config,"bindings":instance.bindings,"expectedRevision":expected_revision,
     }});
     admin_request(&call.host, "POST", UPDATE_PATH, Some(update)).await?;
     Ok(json!({"saved":true,"reloadRequired":true}))
@@ -539,6 +633,97 @@ mod tests {
     }
 
     #[test]
+    fn manual_calibration_uses_saved_timezone_and_preserves_other_configuration() {
+        let original = json!({
+            "driverModel":"gpt-6-luna", "imageModels":["gpt-image-2.5-sunburst"],
+            "imageAccountIds":["image"], "concurrencyPerAccount":8,
+            "dailyTimezone":"Asia/Shanghai", "maxObservationAgeSeconds":300,
+            "quotaGuard":[{"accountId":"a","dailyLimitUsd":"150"}, {"accountId":"b","dailyLimitUsd":"80"}]
+        });
+        let at = 5 * 86_400_000 + 123_456;
+        let calibrated = calibrated_configuration(&original, "a", &json!("134.1300"), at).unwrap();
+        let stamp = &calibrated["quotaGuard"][0]["dailyCalibration"];
+        assert_eq!(stamp["amountUsd"], "134.13");
+        assert_eq!(stamp["atMs"], at);
+        assert_eq!(stamp["timezone"], "Asia/Shanghai");
+        assert_eq!(stamp["windowStartMs"], 5 * 86_400_000 - 8 * 3_600_000);
+        assert_eq!(stamp["windowEndMs"], 6 * 86_400_000 - 8 * 3_600_000);
+        for field in [
+            "driverModel",
+            "imageModels",
+            "imageAccountIds",
+            "concurrencyPerAccount",
+            "dailyTimezone",
+        ] {
+            assert_eq!(calibrated[field], original[field]);
+        }
+        assert_eq!(calibrated["quotaGuard"][1]["dailyLimitUsd"], "80");
+        assert!(calibrated["quotaGuard"][1]["dailyCalibration"].is_null());
+        let cleared = calibrated_configuration(&calibrated, "a", &Value::Null, at).unwrap();
+        assert!(cleared["quotaGuard"][0]["dailyCalibration"].is_null());
+        for invalid in [json!(1), json!("-1"), json!("NaN")] {
+            assert!(calibrated_configuration(&original, "a", &invalid, at).is_err());
+        }
+        assert!(calibrated_configuration(&original, "missing", &json!("1"), at).is_err());
+    }
+
+    #[test]
+    fn normal_saves_preserve_authoritative_calibration_and_timezone_changes_clear_it() {
+        let original = json!({
+            "quotaGuard":[{"accountId":"a","dailyLimitUsd":"150"}],
+            "dailyTimezone":"UTC"
+        });
+        let saved = calibrated_configuration(&original, "a", &json!("20"), 123_456).unwrap();
+        let mut candidate = QuotaGuardConfig::from_value(json!({
+            "accounts":[{"accountId":"a","dailyLimitUsd":"170"}],
+            "dailyTimezone":"UTC"
+        }))
+        .unwrap();
+        let merged = merge_configuration(&saved, &candidate).unwrap();
+        assert_eq!(
+            merged["quotaGuard"][0]["dailyCalibration"],
+            saved["quotaGuard"][0]["dailyCalibration"]
+        );
+        // A normal settings request cannot manufacture another cutover timestamp.
+        candidate.accounts[0].daily_calibration =
+            Some(quota_guard::DailyCalibration::new("900", 234_567, chrono_tz::UTC).unwrap());
+        assert_eq!(
+            merge_configuration(&saved, &candidate).unwrap()["quotaGuard"][0]["dailyCalibration"],
+            saved["quotaGuard"][0]["dailyCalibration"]
+        );
+        candidate.daily_timezone = chrono_tz::Asia::Shanghai;
+        let changed = merge_configuration(&saved, &candidate).unwrap();
+        assert!(changed["quotaGuard"][0]["dailyCalibration"].is_null());
+        candidate.daily_timezone = chrono_tz::UTC;
+        assert!(
+            merge_configuration(&changed, &candidate).unwrap()["quotaGuard"][0]["dailyCalibration"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn calibration_request_rejects_client_timestamps() {
+        assert!(
+            serde_json::from_value::<SaveCalibration>(json!({
+                "expectedRevision":1, "accountId":"a", "amountUsd":"1", "atMs":1
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SaveCalibration>(json!({
+                "expectedRevision":1, "accountId":"a"
+            }))
+            .is_err()
+        );
+        assert!(
+            registration()
+                .routes
+                .iter()
+                .any(|route| route.method == "POST" && route.path == "quota/calibration")
+        );
+    }
+
+    #[test]
     fn unknown_daily_usage_is_visible_without_excluding_the_account() {
         let rule: AccountRule = serde_json::from_value(json!({
             "accountId":"daily-only","fiveHourLimitPercent":null,
@@ -547,7 +732,7 @@ mod tests {
         .unwrap();
         let mut assessment = quota_guard::unavailable(&rule);
         assert!(!assessment.excluded);
-        let usage = quota_guard::daily_usage(&rule, 1_000, 300);
+        let usage = quota_guard::daily_usage(&rule, 1_000, 300, chrono_tz::UTC);
         quota_guard::add_daily(&mut assessment, &usage);
         let value = serde_json::to_value(assessment).unwrap();
         assert_eq!(value["excluded"], false);

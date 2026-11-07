@@ -13,8 +13,10 @@ const props = defineProps<{
   savedRule?: AccountRule
   awaitingRefresh?: boolean
   disabled?: boolean
+  timezone?: string
+  calibrationDisabled?: boolean
 }>()
-const emit = defineEmits<{ remove: [] }>()
+const emit = defineEmits<{ remove: [], calibrate: [amountUsd: string | null] }>()
 const rule = defineModel<AccountRule>({ required: true })
 const name = computed(() => accountName(props.info))
 const changed = computed(() => JSON.stringify(rule.value) !== JSON.stringify(props.savedRule))
@@ -86,6 +88,10 @@ function updateDailyLimit(value: string | null) {
         :account-name="name"
         :usage="state?.dailyUsage"
         :saved-limit="savedRule?.dailyLimitUsd"
+        :saved-calibration="savedRule?.dailyCalibration"
+        :timezone="timezone"
+        :calibration-disabled="calibrationDisabled"
+        @calibrate="emit('calibrate', $event)"
         :disabled="disabled"
         @update:model-value="updateDailyLimit"
       />

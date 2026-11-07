@@ -7,6 +7,35 @@ use std::{collections::VecDeque, future::ready};
 
 const NOW: i64 = 5 * DAY_MS + 123_456;
 
+async fn collect_usage<F, Fut>(
+    account_id: &str,
+    at: i64,
+    until: tokio::time::Instant,
+    fetch: F,
+) -> Result<Snapshot, PluginFault>
+where
+    F: FnMut(ListUsageRecords) -> Fut,
+    Fut: Future<Output = Result<UsageRecordPage, PluginFault>>,
+{
+    super::collect_usage(
+        account_id,
+        at,
+        DayWindow::at(at, chrono_tz::UTC).unwrap(),
+        None,
+        until,
+        fetch,
+    )
+    .await
+}
+
+fn view(rule: &AccountRule, entry: Option<&CacheEntry>, at: i64, age: u64) -> DailyUsage {
+    super::view(rule, entry, at, age, chrono_tz::UTC)
+}
+
+fn daily_usage(rule: &AccountRule, at: i64, age: u64) -> DailyUsage {
+    super::daily_usage(rule, at, age, chrono_tz::UTC)
+}
+
 fn deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + REFRESH_TIMEOUT
 }
@@ -132,7 +161,7 @@ async fn complete_pagination_counts_all_keys_models_and_operations_once() {
     .await
     .unwrap();
     assert_eq!(calls, 2);
-    assert_eq!(snapshot.total.text(), "0.3");
+    assert_eq!(snapshot.ledger.total.text(), "0.3");
     let usage = view(&rule(Some("0.3")), Some(&entry(snapshot)), NOW, 300);
     assert_eq!(usage.status, DailyStatus::Reached);
     assert_eq!(usage.used_usd.as_deref(), Some("0.3"));
@@ -164,9 +193,9 @@ async fn unknown_final_fees_and_running_requests_are_distinct() {
     })
     .await
     .unwrap();
-    assert_eq!(snapshot.total.text(), "1.5");
-    assert_eq!(snapshot.unknown_cost_count, 2);
-    assert_eq!(snapshot.in_flight_count, 1);
+    assert_eq!(snapshot.ledger.total.text(), "1.5");
+    assert_eq!(snapshot.ledger.unknown_cost_count, 2);
+    assert_eq!(snapshot.ledger.in_flight_count, 1);
     let cached = entry(snapshot);
     let usage = view(&rule(Some("10")), Some(&cached), NOW, 300);
     assert_eq!(usage.status, DailyStatus::Unknown);
@@ -193,7 +222,7 @@ async fn invalid_currency_amount_is_unknown_not_zero_or_rounded() {
         })
         .await
         .unwrap();
-        assert_eq!(snapshot.unknown_cost_count, 1);
+        assert_eq!(snapshot.ledger.unknown_cost_count, 1);
         let usage = view(&rule(Some("100")), Some(&entry(snapshot)), NOW, 300);
         assert!(!usage.excluded());
         assert_eq!(usage.used_usd, None);
@@ -272,7 +301,7 @@ async fn stale_failed_future_and_new_day_observations_do_not_create_a_denial() {
         assert!(!usage.excluded());
     }
     let new_day = view(&rule(Some("10")), Some(&cached), 6 * DAY_MS, 300);
-    assert_eq!(new_day.reset_at_ms, 7 * DAY_MS);
+    assert_eq!(new_day.reset_at_ms, Some(7 * DAY_MS));
     assert_eq!(new_day.used_usd, None);
     cached.failed = true;
     let failed = view(&rule(Some("10")), Some(&cached), NOW, 300);
@@ -332,7 +361,7 @@ async fn a_shared_deadline_keeps_completed_pages_but_not_an_unread_first_page() 
     .await
     .unwrap();
     assert_eq!(calls, 2);
-    assert_eq!(snapshot.total.text(), "2.5");
+    assert_eq!(snapshot.ledger.total.text(), "2.5");
     assert!(!snapshot.complete);
     let cached = entry(snapshot);
     let below = view(&rule(Some("3")), Some(&cached), NOW, 300);
@@ -348,7 +377,10 @@ async fn a_shared_deadline_keeps_completed_pages_but_not_an_unread_first_page() 
         |_| std::future::pending::<Result<UsageRecordPage, PluginFault>>(),
     )
     .await;
-    assert!(unread.is_err());
+    assert_eq!(
+        unread.unwrap().read_reason,
+        Some(IncompleteReason::ReadTimeout)
+    );
     let cold = view(&rule(Some("3")), None, NOW, 300);
     assert_eq!(cold.used_usd, None);
     assert!(!cold.excluded());
@@ -370,7 +402,7 @@ async fn interrupted_pages_keep_the_verified_cost_without_claiming_a_complete_to
     })
     .await
     .unwrap();
-    assert_eq!(snapshot.total.text(), "1");
+    assert_eq!(snapshot.ledger.total.text(), "1");
     assert!(!snapshot.complete);
     let cached = entry(snapshot);
     let below = view(&rule(Some("2")), Some(&cached), NOW, 300);
@@ -379,10 +411,12 @@ async fn interrupted_pages_keep_the_verified_cost_without_claiming_a_complete_to
     assert!(!below.complete);
     assert!(!below.excluded());
     assert!(view(&rule(Some("1")), Some(&cached), NOW, 300).excluded());
-    assert!(
+    assert_eq!(
         collect_usage("account-a", NOW, deadline(), |_| ready(Err(unavailable())))
             .await
-            .is_err()
+            .unwrap()
+            .read_reason,
+        Some(IncompleteReason::ReadFailed)
     );
 }
 
@@ -399,7 +433,7 @@ async fn duplicates_and_wrong_account_or_day_never_add_cost_twice_or_to_another_
     })
     .await
     .unwrap();
-    assert_eq!(duplicate.total.text(), "1");
+    assert_eq!(duplicate.ledger.total.text(), "1");
     assert!(!duplicate.complete);
     assert!(!view(&rule(Some("1.5")), Some(&entry(duplicate)), NOW, 300).excluded());
 
@@ -413,7 +447,7 @@ async fn duplicates_and_wrong_account_or_day_never_add_cost_twice_or_to_another_
         })
         .await
         .unwrap();
-        assert_eq!(snapshot.total.text(), "0");
+        assert_eq!(snapshot.ledger.total.text(), "0");
         assert!(!snapshot.complete);
         let usage = view(&rule(Some("1")), Some(&entry(snapshot)), NOW, 300);
         assert!(!usage.excluded());
@@ -571,7 +605,7 @@ async fn partial_refresh_keeps_a_known_limit_but_full_corrections_and_new_days_r
 
     let mut partial = known.clone();
     partial.observed_at_ms = NOW + 1;
-    partial.total = Usd::cost("1").unwrap();
+    partial.ledger.total = Usd::cost("1").unwrap();
     partial.complete = false;
     store(partial.clone());
     let retained = daily_usage(&configured, NOW + 1, 300);
@@ -589,9 +623,9 @@ async fn partial_refresh_keeps_a_known_limit_but_full_corrections_and_new_days_r
 
     store(known.clone());
     let mut tomorrow = known;
-    tomorrow.day_start_ms = 6 * DAY_MS;
+    tomorrow.window = DayWindow::at(6 * DAY_MS, chrono_tz::UTC).unwrap();
     tomorrow.observed_at_ms = 6 * DAY_MS;
-    tomorrow.total = Usd::cost("1").unwrap();
+    tomorrow.ledger.total = Usd::cost("1").unwrap();
     tomorrow.complete = false;
     store(tomorrow);
     let next_day = daily_usage(&configured, 6 * DAY_MS, 300);
@@ -611,4 +645,230 @@ fn public_usage_contract_is_camel_case_with_explicit_currency_timezone_and_nulls
     assert_eq!(value["timezone"], "UTC");
     assert_eq!(value["currency"], "USD");
     assert_eq!(value["resetAtMs"], 6 * DAY_MS);
+}
+
+fn calibrated_rule(amount: &str, at: i64) -> AccountRule {
+    let mut configured = rule(Some("150"));
+    configured.daily_calibration = Some(DailyCalibration::new(amount, at, chrono_tz::UTC).unwrap());
+    configured
+}
+
+async fn calibrated_snapshot(configured: &AccountRule, records: Vec<UsageRecord>) -> Snapshot {
+    let calibration = configured.daily_calibration.as_ref().unwrap();
+    super::collect_usage(
+        &configured.account_id,
+        NOW,
+        DayWindow::at(NOW, chrono_tz::UTC).unwrap(),
+        Some(calibration.at_ms),
+        deadline(),
+        |_| ready(Ok(page(records.clone(), None))),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn calibration_replaces_the_past_and_adds_only_new_requests_without_changing_the_ledger() {
+    let at = NOW - 100;
+    for (baseline, expected) in [("0", "2.5"), ("50.89", "53.39"), ("134.13", "136.63")] {
+        let configured = calibrated_rule(baseline, at);
+        let mut old = record("old", usd("50.89"), UsageOutcome::Succeeded);
+        old.data.started_at_ms = at - 1;
+        let mut covered_unknown =
+            record("covered", UsageCost::Unavailable, UsageOutcome::Succeeded);
+        covered_unknown.data.started_at_ms = at - 2;
+        let mut new = record("new", usd("2.5"), UsageOutcome::Succeeded);
+        new.data.started_at_ms = at + 1;
+        let cached = entry(
+            calibrated_snapshot(
+                &configured,
+                vec![old.clone(), covered_unknown.clone(), new.clone()],
+            )
+            .await,
+        );
+        let usage = view(&configured, Some(&cached), NOW, 300);
+        assert_eq!(usage.used_usd.as_deref(), Some(expected));
+        assert_eq!(usage.ledger_used_usd.as_deref(), Some("53.39"));
+        assert_eq!(usage.post_calibration_used_usd.as_deref(), Some("2.5"));
+        assert_eq!(usage.ledger_unknown_cost_count, 1);
+        assert_eq!(usage.unknown_cost_count, 0);
+        assert_eq!(usage.known_cost_count, 1);
+        assert!(usage.complete);
+        assert!(usage.incomplete_reasons.is_empty());
+
+        // 历史未计价记录在校准后补账，仅改变原始账本，不重复加入基准。
+        covered_unknown.data.cost = usd("80");
+        let settled =
+            entry(calibrated_snapshot(&configured, vec![old, covered_unknown, new]).await);
+        let updated = view(&configured, Some(&settled), NOW, 300);
+        assert_eq!(updated.used_usd.as_deref(), Some(expected));
+        assert_eq!(updated.ledger_used_usd.as_deref(), Some("133.39"));
+        assert!(updated.complete);
+    }
+}
+
+#[tokio::test]
+async fn calibration_unknown_and_in_flight_counts_apply_to_the_effective_interval() {
+    let at = NOW - 100;
+    let configured = calibrated_rule("20", at);
+    let mut records = Vec::new();
+    for (id, started, outcome) in [
+        ("past-unpriced", at - 1, UsageOutcome::Succeeded),
+        ("past-running", at - 1, UsageOutcome::Running),
+        ("new-unpriced", at, UsageOutcome::Succeeded),
+        ("new-running", at + 1, UsageOutcome::Running),
+    ] {
+        let mut row = record(id, UsageCost::Unavailable, outcome);
+        row.data.started_at_ms = started;
+        records.push(row);
+    }
+    let cached = entry(calibrated_snapshot(&configured, records).await);
+    let usage = view(&configured, Some(&cached), NOW, 300);
+    assert_eq!(usage.used_usd.as_deref(), Some("20"));
+    assert_eq!(usage.unknown_cost_count, 1);
+    assert_eq!(usage.in_flight_count, 1);
+    assert_eq!(usage.ledger_unknown_cost_count, 2);
+    assert_eq!(usage.ledger_in_flight_count, 2);
+    assert_eq!(
+        usage.incomplete_reasons,
+        vec![IncompleteReason::UnpricedRecords]
+    );
+    assert!(!usage.complete);
+    assert!(!usage.excluded());
+}
+
+#[tokio::test]
+async fn changed_calibration_does_not_reuse_an_old_increment_and_clearing_restores_the_ledger() {
+    let configured = calibrated_rule("100", NOW - 100);
+    let mut row = record("old-increment", usd("20"), UsageOutcome::Succeeded);
+    row.data.started_at_ms = NOW - 50;
+    let cached = entry(calibrated_snapshot(&configured, vec![row]).await);
+    assert_eq!(
+        view(&configured, Some(&cached), NOW, 300)
+            .used_usd
+            .as_deref(),
+        Some("120")
+    );
+
+    let replacement = calibrated_rule("12", NOW - 20);
+    let changed = view(&replacement, Some(&cached), NOW, 300);
+    assert_eq!(changed.used_usd.as_deref(), Some("12"));
+    assert_eq!(changed.ledger_used_usd.as_deref(), Some("20"));
+    assert_eq!(changed.post_calibration_used_usd, None);
+    assert_eq!(changed.observed_at_ms, None);
+    assert_eq!(
+        changed.incomplete_reasons,
+        vec![IncompleteReason::CalibrationChanged]
+    );
+    assert!(!changed.complete);
+    assert!(!changed.excluded());
+
+    let cleared = view(&rule(Some("150")), Some(&cached), NOW, 300);
+    assert_eq!(cleared.used_usd.as_deref(), Some("20"));
+    assert!(cleared.complete);
+    let tomorrow = view(&configured, Some(&cached), 6 * DAY_MS, 300);
+    assert_eq!(tomorrow.used_usd, None);
+    assert_eq!(tomorrow.calibration, None);
+    assert!(!tomorrow.excluded());
+    let other_zone = super::view(
+        &configured,
+        Some(&cached),
+        NOW,
+        300,
+        chrono_tz::Asia::Shanghai,
+    );
+    assert_eq!(other_zone.used_usd, None);
+    assert_eq!(other_zone.calibration, None);
+    assert_eq!(
+        other_zone.incomplete_reasons,
+        vec![IncompleteReason::WindowChanged]
+    );
+    assert!(!other_zone.excluded());
+}
+
+#[test]
+fn a_cold_calibration_is_a_known_lower_bound_but_never_claims_the_increment_was_read() {
+    for (amount, reached) in [("0", false), ("149.99", false), ("150", true)] {
+        let configured = calibrated_rule(amount, NOW - 1);
+        let usage = view(&configured, None, NOW, 300);
+        assert_eq!(usage.used_usd.as_deref(), Some(amount));
+        assert_eq!(usage.post_calibration_used_usd, None);
+        assert_eq!(usage.ledger_used_usd, None);
+        assert_eq!(
+            usage.incomplete_reasons,
+            vec![IncompleteReason::NotObserved]
+        );
+        assert!(!usage.complete);
+        assert_eq!(usage.excluded(), reached);
+    }
+}
+
+#[tokio::test]
+async fn timezone_is_sent_to_the_ledger_as_exact_utc_boundaries() {
+    let timezone = chrono_tz::Asia::Shanghai;
+    let window = DayWindow::at(NOW, timezone).unwrap();
+    let snapshot = super::collect_usage("account-a", NOW, window, None, deadline(), |query| {
+        assert_eq!(query.filter.start_ms, 5 * DAY_MS - 8 * 3_600_000);
+        assert_eq!(query.filter.end_ms, 6 * DAY_MS - 8 * 3_600_000);
+        ready(Ok(page(vec![], None)))
+    })
+    .await
+    .unwrap();
+    let usage = super::view(
+        &rule(Some("10")),
+        Some(&entry(snapshot)),
+        NOW,
+        300,
+        timezone,
+    );
+    assert_eq!(usage.window_start_ms, Some(window.start_ms));
+    assert_eq!(usage.window_end_ms, Some(window.end_ms));
+    assert_eq!(usage.used_usd.as_deref(), Some("0"));
+    assert!(usage.complete);
+}
+
+#[tokio::test]
+async fn partial_refresh_retains_increments_only_for_the_same_calibration_cutover() {
+    let mut configured = calibrated_rule("100", NOW - 100);
+    let mut paid = record("paid", usd("60"), UsageOutcome::Succeeded);
+    paid.data.started_at_ms = NOW - 50;
+    let known = calibrated_snapshot(&configured, vec![paid]).await;
+    configured.account_id = "test-calibrated-partial-refresh".into();
+    CACHE
+        .lock()
+        .unwrap()
+        .insert(configured.account_id.clone(), CacheEntry::default());
+    let store = |snapshot| {
+        RefreshLease {
+            account_id: configured.account_id.clone(),
+            completed: false,
+        }
+        .finish(Some(snapshot))
+    };
+    store(known.clone());
+    assert!(daily_usage(&configured, NOW, 300).excluded());
+
+    let mut partial = known;
+    partial.observed_at_ms = NOW + 1;
+    partial.ledger.total = Usd::cost("1").unwrap();
+    partial.after_calibration.total = Usd::cost("1").unwrap();
+    partial.complete = false;
+    partial.read_reason = Some(IncompleteReason::ReadTimeout);
+    store(partial.clone());
+    let retained = daily_usage(&configured, NOW + 1, 300);
+    assert_eq!(retained.used_usd.as_deref(), Some("160"));
+    assert!(retained.excluded());
+    assert!(!retained.complete);
+
+    partial.calibration_at_ms = Some(NOW - 20);
+    store(partial);
+    let mut replacement = calibrated_rule("20", NOW - 20);
+    replacement.account_id = configured.account_id.clone();
+    let changed = daily_usage(&replacement, NOW + 1, 300);
+    assert_eq!(changed.ledger_used_usd.as_deref(), Some("60"));
+    assert_eq!(changed.used_usd.as_deref(), Some("21"));
+    assert_eq!(changed.post_calibration_used_usd.as_deref(), Some("1"));
+    assert!(!changed.complete);
+    assert!(!changed.excluded());
+    CACHE.lock().unwrap().remove(&configured.account_id);
 }

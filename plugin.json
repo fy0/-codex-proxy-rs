@@ -3,8 +3,8 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.7",
-  "description": "Codex Image Bridge: immediate Responses image workbench, raw request debugger, legacy image history, and account quota protection.",
+  "version": "0.7.8",
+  "description": "Codex Image Bridge: immediate image workbench, Responses and native Images debugger, local-day quota accounting and manual calibration.",
   "license": "Apache-2.0",
   "engines": {
     "codex-proxy-rs": ">=3.33.0, <4.0.0"
@@ -49,7 +49,7 @@
       "bridgeMode": {
         "type": "string",
         "title": "生图路由策略",
-        "description": "控制外部 Images HTTP：auto 优先使用原生 Images，responses 使用 image_generation 工具。画图测试页直接使用 Responses 管理桥。",
+        "description": "控制外部 Images HTTP：auto 优先使用原生 Images，responses 使用 image_generation 工具。画图页使用 Responses；调试页可选择原生 Images，但需配套 Core 管理桥。原生调试不受此兼容转换开关影响。",
         "enum": [
           "auto",
           "responses"
@@ -128,6 +128,14 @@
         "maximum": 64,
         "default": 2
       },
+      "dailyTimezone": {
+        "type": "string",
+        "title": "每日费用记账时区",
+        "description": "IANA 时区，例如 UTC、Asia/Shanghai、America/Toronto。按当地自然日归属请求开始时间并处理夏令时；改变时区会清除旧时区的手工校准，原始费用记录保持不变。",
+        "minLength": 1,
+        "maxLength": 128,
+        "default": "UTC"
+      },
       "quotaGuard": {
         "type": "array",
         "title": "额度保护账号规则",
@@ -167,9 +175,24 @@
             "dailyLimitUsd": {
               "type": ["string", "null"],
               "title": "每日已记录费用上限（USD）",
-              "description": "默认关闭。覆盖该账号全部 CPR 请求，按 UTC 00:00 重置。精确十进制字符串，0 立即阻止。依据宿主持久用量记录；仅当天已知费用达到阈值才拦截，未知或过期观测不单独阻止调度；并发与记账延迟可能使最终费用超过此阈值，不是原子硬预算。",
+              "description": "默认关闭。覆盖该账号全部 CPR 请求，按 dailyTimezone 当地自然日重置。精确十进制字符串，0 立即阻止。只在当天已知费用（含有效手工校准）达到阈值时拦截，未知或过期观测不单独阻止；并发与记账延迟可能使最终费用超过阈值。",
               "pattern": "^[0-9]{1,18}(\\.[0-9]{1,12})?$",
               "default": null
+            },
+            "dailyCalibration": {
+              "type": ["object", "null"],
+              "title": "本日手工费用校准",
+              "description": "通过额度管理页设置；服务器记录生效时刻和日窗口。校准金额加上此后新发起请求的费用，本日结束后失效。",
+              "default": null,
+              "additionalProperties": false,
+              "required": ["amountUsd", "atMs", "windowStartMs", "windowEndMs", "timezone"],
+              "properties": {
+                "amountUsd": { "type": "string", "pattern": "^[0-9]{1,18}(\\.[0-9]{1,12})?$" },
+                "atMs": { "type": "integer", "minimum": 0 },
+                "windowStartMs": { "type": "integer", "minimum": 0 },
+                "windowEndMs": { "type": "integer", "minimum": 0 },
+                "timezone": { "type": "string", "minLength": 1, "maxLength": 128 }
+              }
             }
           }
         }

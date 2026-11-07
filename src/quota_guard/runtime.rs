@@ -43,6 +43,7 @@ pub async fn protected_ids(
         .collect::<Vec<_>>();
     let host = host.clone();
     let max_age = config.max_observation_age_seconds;
+    let timezone = config.daily_timezone;
     let results = stream::iter(list)
         .map(move |rule| {
             let host = host.clone();
@@ -52,7 +53,7 @@ pub async fn protected_ids(
                 }
                 // 所有账号调度共用每日保护，不限于图片任务。
                 // 仅已记录费用达到阈值才阻止账号；请求路径不扫描日账本。
-                if daily_usage(&rule, now_ms()?, max_age).excluded() {
+                if daily_usage(&rule, now_ms()?, max_age, timezone).excluded() {
                     return Ok(Some(rule.account_id));
                 }
                 if !rule.windows_enabled() {
@@ -213,7 +214,7 @@ impl QuotaGuard {
                 let now = now_ms()?;
                 let (windows, daily) = tokio::join!(
                     self.refresh_windows(host, &rule),
-                    refresh_daily_usage(host, &rule, now),
+                    refresh_daily_usage(host, &rule, now, self.config.daily_timezone),
                 );
                 windows?;
                 daily
@@ -244,7 +245,12 @@ pub async fn refresh_daily_overview(
         .filter(|rule| rule.daily_limit_usd.is_some())
         .cloned()
         .filter_map(|rule| {
-            let usage = daily_usage(&rule, now, config.max_observation_age_seconds);
+            let usage = daily_usage(
+                &rule,
+                now,
+                config.max_observation_age_seconds,
+                config.daily_timezone,
+            );
             let observed = usage.observed_at_ms.unwrap_or(i64::MIN);
             if observed == i64::MIN || now.saturating_sub(observed) >= 15_000 {
                 Some((observed, rule))
@@ -255,7 +261,9 @@ pub async fn refresh_daily_overview(
         .collect::<Vec<_>>();
     rules.sort_by_key(|(observed, _)| *observed);
     let work = stream::iter(rules.into_iter().take(MAX_CHECKS))
-        .map(|(_, rule)| async move { refresh_daily_usage(host, &rule, now).await })
+        .map(|(_, rule)| async move {
+            refresh_daily_usage(host, &rule, now, config.daily_timezone).await
+        })
         .buffer_unordered(MAX_PARALLEL_REFRESHES)
         .collect::<Vec<_>>();
     if let Ok(results) = tokio::time::timeout(OVERVIEW_BUDGET, work).await {

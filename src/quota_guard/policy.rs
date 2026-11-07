@@ -207,7 +207,7 @@ pub fn add_daily(assessment: &mut Assessment, usage: &super::daily::DailyUsage) 
         DailyStatus::Disabled | DailyStatus::Ready => return,
         DailyStatus::Reached => (
             ReasonCode::DailyLimitReached,
-            "今日已记录 USD 费用达到保护上限",
+            "今日用于限额的 USD 金额已达到保护上限",
         ),
         DailyStatus::Unknown => (
             ReasonCode::DailyUsageUnknown,
@@ -220,8 +220,11 @@ pub fn add_daily(assessment: &mut Assessment, usage: &super::daily::DailyUsage) 
     };
     assessment.excluded |= usage.excluded();
     assessment.reasons.push(Reason {
-        window_seconds: Some(86_400),
-        reset_at_ms: Some(usage.reset_at_ms),
+        window_seconds: usage
+            .window_start_ms
+            .zip(usage.window_end_ms)
+            .and_then(|(start, end)| u64::try_from(end.checked_sub(start)? / 1_000).ok()),
+        reset_at_ms: usage.reset_at_ms,
         ..Reason::new(code, message)
     });
 }

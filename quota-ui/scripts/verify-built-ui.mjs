@@ -20,6 +20,7 @@ await mkdir(outDirectory, { recursive: true })
 
 const now = Date.UTC(2026, 10, 6, 14, 20)
 const configuration = {
+  dailyTimezone: 'UTC',
   maxObservationAgeSeconds: 300,
   accounts: [
     {
@@ -51,6 +52,13 @@ const accounts = [
     dailyUsage: {
       limitUsd: '20',
       usedUsd: '6.25',
+      ledgerUsedUsd: '6.25',
+      windowStartMs: Date.UTC(2026, 10, 6),
+      windowEndMs: Date.UTC(2026, 10, 7),
+      complete: true,
+      knownCostCount: 7,
+      ledgerKnownCostCount: 7,
+      incompleteReasons: [],
       remainingUsd: '13.75',
       status: 'ready',
       unknownCostCount: 0,
@@ -213,6 +221,44 @@ async function openPage(theme, width, options = {}) {
       observedAtMs: now,
     })
   }
+  if (options.windowTimezone || options.calibrated) {
+    const localStart = Date.UTC(2026, 10, 1, 4)
+    const localEnd = Date.UTC(2026, 10, 2, 5)
+    responseFixture.configuration.dailyTimezone = 'America/Toronto'
+    responseFixture.configuration.accounts[0].dailyLimitUsd = '150'
+    Object.assign(responseFixture.accounts[0].dailyUsage, {
+      timezone: 'America/Toronto', windowStartMs: localStart, windowEndMs: localEnd,
+      resetAtMs: localEnd, limitUsd: '150', usedUsd: '50.89', remainingUsd: null,
+      ledgerUsedUsd: '50.89', knownCostCount: 7, ledgerKnownCostCount: 7,
+      unknownCostCount: 6, ledgerUnknownCostCount: 6, ledgerInFlightCount: 0,
+      inFlightCount: 0, status: 'unknown', complete: false,
+      incompleteReasons: ['unpriced_records'],
+    })
+    if (options.calibrated) {
+      const calibration = {
+        amountUsd: '134.13', atMs: Date.UTC(2026, 10, 1, 12),
+        windowStartMs: localStart, windowEndMs: localEnd, timezone: 'America/Toronto',
+      }
+      responseFixture.configuration.accounts[0].dailyCalibration = calibration
+      Object.assign(responseFixture.accounts[0].dailyUsage, {
+        usedUsd: '136.38', remainingUsd: '13.62', ledgerUsedUsd: '53.14',
+        postCalibrationUsedUsd: '2.25', calibration: { ...calibration, active: true },
+        knownCostCount: 1, ledgerKnownCostCount: 8, unknownCostCount: 0,
+        status: 'ready', complete: true, incompleteReasons: [],
+      })
+    }
+  }
+  if (options.savedAlias) {
+    const calibration = {
+      amountUsd: '6.25', atMs: now - 1000, timezone: 'Etc/UTC',
+      windowStartMs: Date.UTC(2026, 10, 6), windowEndMs: Date.UTC(2026, 10, 7),
+    }
+    responseFixture.configuration.dailyTimezone = 'Etc/UTC'
+    responseFixture.configuration.accounts[0].dailyCalibration = calibration
+    Object.assign(responseFixture.accounts[0].dailyUsage, {
+      timezone: 'Etc/UTC', calibration: { ...calibration, active: true }, postCalibrationUsedUsd: '0',
+    })
+  }
   const bootstrap = `window.__quotaFixture=${JSON.stringify(responseFixture)};`
     + `window.__quotaCalls=[];window.__quotaOptions=${JSON.stringify(options)};`
     + `for(const [name,value] of Object.entries(window.__quotaOptions.tokens||{})){document.documentElement.style.setProperty(name,value)};`
@@ -224,6 +270,7 @@ async function openPage(theme, width, options = {}) {
     + `else if(input.path==="quota/accounts"){result={items:[...window.__quotaFixture.accounts,{accountId:"qa-added",name:"新建测试账号",email:"added@example.invalid",enabled:true}],nextCursor:null}}`
     + `else if(input.path==="quota/configuration"){if(window.__quotaOptions.conflict){status=409;result={message:"配置已发生变化，请刷新后重试"}}`
     + `else{window.__quotaSaved=JSON.parse(input.body);result={saved:true,reloadRequired:true}}}`
+    + `else if(input.path==="quota/calibration"){if(window.__quotaOptions.calibrationConflict){status=409;result={message:"配置已发生变化，请刷新后重试"}}else{window.__quotaCalibrated=JSON.parse(input.body);result={saved:true,reloadRequired:true}}}`
     + `else{status=404;result={message:"未知测试路由"}}`
     + `return {status:status,contentType:"application/json",body:new TextEncoder().encode(JSON.stringify(result)).buffer}}};`
   const csp = 'default-src \'none\'; script-src \'unsafe-inline\' data:; style-src \'unsafe-inline\' data:; img-src data:; font-src data:; connect-src \'none\'; base-uri \'none\'; form-action \'none\''
@@ -363,6 +410,7 @@ try {
     assert.equal(saved.configuration.accounts.find(account => account.accountId === 'qa-added').dailyLimitUsd, null)
     assert.equal(saved.configuration.accounts.length, 4)
     assert.equal(saved.configuration.maxObservationAgeSeconds, 300)
+    assert.equal(saved.configuration.dailyTimezone, 'UTC')
     await resizeFrame(page, frame)
     await page.screenshot({
       path: path.join(outDirectory, 'saved.png'),
@@ -459,6 +507,111 @@ try {
     assert.equal(await conflictPage.frame.getByRole('button', { name: '保存配置', exact: true }).isDisabled(), true)
     results.push({ scenario: 'revision-conflict', passed: true })
     await conflictPage.page.close()
+
+    const timezonePage = await openPage('light', 1360)
+    const timezoneInput = timezonePage.frame.getByRole('combobox', { name: '每日记账时区', exact: true })
+    assert.equal(await timezoneInput.inputValue(), 'UTC')
+    for (const invalidZone of ['Not/A_Zone', '+08:00', '-0500', '+00:00']) {
+      await timezoneInput.fill(invalidZone)
+      await timezoneInput.blur()
+      assert.equal(await timezoneInput.getAttribute('aria-invalid'), 'true', 'Numeric offsets are not named IANA zones: ' + invalidZone)
+      assert.equal(await timezonePage.frame.getByRole('button', { name: '保存配置', exact: true }).isDisabled(), true)
+    }
+    assert.equal(await timezonePage.frame.locator('main').evaluate(() => window.__quotaCalls.filter(call => call.path === 'quota/configuration').length), 0)
+    await timezoneInput.fill('america/toronto')
+    await timezoneInput.blur()
+    assert.equal(await timezoneInput.inputValue(), 'America/Toronto', 'A changed named zone is canonicalized on change')
+    await timezonePage.frame.getByText('保存后重新划分本日窗口，并清除原时区的手工校准；历史账本保持不变。', { exact: true }).waitFor()
+    const timezoneDaily = timezonePage.frame.getByRole('region', { name: 'Studio · 主力账号 每日费用', exact: true })
+    await timezoneDaily.locator('summary').click()
+    assert.equal(await timezoneDaily.getByRole('textbox', { name: 'Studio · 主力账号 校准本日已用 USD', exact: true }).isDisabled(), true, 'Unsaved timezone edits cannot be calibrated against the old window')
+    await timezonePage.frame.getByRole('button', { name: '保存配置', exact: true }).click()
+    await timezonePage.frame.getByText(/配置已保存/).first().waitFor()
+    const timezoneSaved = await timezonePage.frame.locator('main').evaluate(() => window.__quotaSaved)
+    assert.equal(timezoneSaved.configuration.dailyTimezone, 'America/Toronto')
+    assert.equal(timezoneSaved.configuration.accounts[0].weeklyLimitPercent, 95)
+    results.push({ scenario: 'iana-timezone-validation-save-and-dirty-calibration-lock', passed: true })
+    await timezonePage.page.close()
+
+    const saveNormalizedPage = await openPage('light', 1360)
+    await saveNormalizedPage.frame.getByRole('combobox', { name: '每日记账时区', exact: true }).fill('asia/shanghai')
+    // Trigger save without moving focus, so no input change event performs normalization first.
+    await saveNormalizedPage.frame.getByRole('button', { name: '保存配置', exact: true }).evaluate(button => button.click())
+    await saveNormalizedPage.frame.getByText(/配置已保存/).first().waitFor()
+    assert.equal(await saveNormalizedPage.frame.locator('main').evaluate(() => window.__quotaSaved.configuration.dailyTimezone), 'Asia/Shanghai')
+    results.push({ scenario: 'named-timezone-canonicalized-again-at-save', passed: true })
+    await saveNormalizedPage.page.close()
+
+    const aliasPage = await openPage('light', 1360, { savedAlias: true })
+    const aliasInput = aliasPage.frame.getByRole('combobox', { name: '每日记账时区', exact: true })
+    assert.equal(await aliasInput.inputValue(), 'Etc/UTC')
+    await aliasInput.dispatchEvent('change')
+    assert.equal(await aliasInput.inputValue(), 'Etc/UTC', 'An unchanged saved alias must not be canonicalized')
+    const aliasLimit = aliasPage.frame.getByRole('textbox', { name: 'Studio · 主力账号 每日费用上限 USD', exact: true })
+    await aliasLimit.fill('30')
+    await aliasPage.frame.getByRole('button', { name: '保存配置', exact: true }).click()
+    await aliasPage.frame.getByText(/配置已保存/).first().waitFor()
+    const aliasState = await aliasPage.frame.locator('main').evaluate(() => ({ saved: window.__quotaSaved, calibration: window.__quotaFixture.configuration.accounts[0].dailyCalibration }))
+    assert.equal(aliasState.saved.configuration.dailyTimezone, 'Etc/UTC', 'Editing a threshold must not silently switch saved timezone aliases and clear calibration')
+    assert.deepEqual(aliasState.saved.configuration.accounts[0].dailyCalibration, aliasState.calibration)
+    results.push({ scenario: 'unchanged-timezone-alias-and-calibration-preserved-on-threshold-save', passed: true })
+    await aliasPage.page.close()
+
+    const calibrationPage = await openPage('light', 1360, { windowTimezone: true })
+    const calibrationWindow = calibrationPage.frame.getByRole('region', { name: 'Studio · 主力账号 每日费用', exact: true })
+    await calibrationWindow.getByText('有未计价请求', { exact: true }).waitFor()
+    assert.equal(await calibrationWindow.locator('.qg-daily-usage strong').textContent(), '$50.89')
+    assert.match(await calibrationWindow.locator('.qg-daily-range').textContent(), /11\/01 00:00.*11\/02 00:00.*America\/Toronto/)
+    await calibrationWindow.locator('summary').click()
+    await calibrationWindow.getByText('存在尚未计价的成功请求', { exact: true }).waitFor()
+    const amountInput = calibrationWindow.getByRole('textbox', { name: 'Studio · 主力账号 校准本日已用 USD', exact: true })
+    const amountApply = calibrationWindow.getByRole('button', { name: '设为当前已用', exact: true })
+    assert.equal(await amountInput.inputValue(), '', 'Calibration must require the user to enter a verified amount')
+    assert.equal(await amountApply.isDisabled(), true)
+    for (const invalid of ['-1', '1e3', ' 134.13', '134.', '1.1234567890123']) {
+      await amountInput.fill(invalid)
+      assert.equal(await amountInput.getAttribute('aria-invalid'), 'true')
+      assert.equal(await amountApply.isDisabled(), true)
+    }
+    await amountInput.fill('134.130000000001')
+    await resizeFrame(calibrationPage.page, calibrationPage.frame)
+    await calibrationPage.page.screenshot({ path: path.join(outDirectory, 'daily-timezone-calibration.png'), fullPage: true })
+    await amountApply.click()
+    await calibrationPage.frame.getByText(/配置已保存/).first().waitFor()
+    const calibratedSubmission = await calibrationPage.frame.locator('main').evaluate(() => window.__quotaCalibrated)
+    assert.deepEqual(calibratedSubmission, { expectedRevision: 7, accountId: 'qa-studio', amountUsd: '134.130000000001' }, 'Calibration sends exact decimal amount and CAS revision; the server owns all timestamps')
+    results.push({ scenario: 'local-day-window-unpriced-reason-and-exact-calibration', passed: true })
+    await calibrationPage.page.close()
+
+    const calibratedPage = await openPage('dark', 1360, { calibrated: true })
+    const calibratedWindow = calibratedPage.frame.getByRole('region', { name: 'Studio · 主力账号 每日费用', exact: true })
+    await calibratedWindow.getByText('已校准', { exact: true }).waitFor()
+    assert.equal(await calibratedWindow.locator('.qg-daily-usage strong').textContent(), '$136.38')
+    await calibratedWindow.locator('summary').click()
+    await calibratedWindow.getByText('$134.13', { exact: true }).waitFor()
+    await calibratedWindow.getByText('$2.25', { exact: true }).waitFor()
+    await calibratedWindow.getByText('$53.14', { exact: true }).waitFor()
+    await calibratedWindow.getByText('原账本未计价记录', { exact: true }).waitFor()
+    assert.equal(await calibratedWindow.locator('.qg-ledger-reason').count(), 0, 'Pre-calibration unpriced ledger records cannot make the effective interval incomplete')
+    await resizeFrame(calibratedPage.page, calibratedPage.frame)
+    await calibratedPage.page.screenshot({ path: path.join(outDirectory, 'daily-calibrated-dark.png'), fullPage: true })
+    await calibratedWindow.getByRole('button', { name: '恢复自动记账', exact: true }).click()
+    await calibratedPage.frame.getByText(/配置已保存/).first().waitFor()
+    assert.deepEqual(await calibratedPage.frame.locator('main').evaluate(() => window.__quotaCalibrated), { expectedRevision: 7, accountId: 'qa-studio', amountUsd: null })
+    results.push({ scenario: 'calibrated-baseline-plus-new-fees-and-clear', passed: true })
+    await calibratedPage.page.close()
+
+    const calibrationConflictPage = await openPage('light', 420, { windowTimezone: true, calibrationConflict: true })
+    const conflictDaily = calibrationConflictPage.frame.getByRole('region', { name: 'Studio · 主力账号 每日费用', exact: true })
+    await conflictDaily.locator('summary').click()
+    await conflictDaily.getByRole('textbox', { name: 'Studio · 主力账号 校准本日已用 USD', exact: true }).fill('1')
+    await conflictDaily.getByRole('button', { name: '设为当前已用', exact: true }).click()
+    await calibrationConflictPage.frame.getByText(/配置已被其他操作修改/).waitFor()
+    assert.equal(await conflictDaily.getByRole('button', { name: '设为当前已用', exact: true }).isDisabled(), true)
+    const mobileWidth = await calibrationConflictPage.frame.locator('main').evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth }))
+    assert.ok(mobileWidth.width <= mobileWidth.viewport + 2, 'Expanded calibration controls must fit on mobile')
+    results.push({ scenario: 'calibration-revision-conflict-mobile', passed: true })
+    await calibrationConflictPage.page.close()
 
     const emptyPage = await openPage('light', 420, { empty: true })
     await emptyPage.frame.getByText(/还没有配置保护账号/).waitFor()

@@ -16,6 +16,8 @@ const {
   conflict,
   dirty,
   invalidDailyLimits,
+  invalidTimezone,
+  normalizeDailyTimezone,
   candidates,
   candidatesLoaded,
   candidatesLoading,
@@ -28,8 +30,12 @@ const {
   removeAccount,
   discard,
   save,
+  calibrate,
 } = useQuotaGuard()
 
+const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+const timezoneOptions = [...new Set(['UTC', browserTimezone, 'Asia/Shanghai', 'Asia/Tokyo', 'America/Toronto', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin'])]
+const timezoneChanged = computed(() => draft.value.dailyTimezone !== (overview.value?.configuration.dailyTimezone || 'UTC'))
 const search = ref('')
 const candidateSearch = ref('')
 const adding = ref(false)
@@ -177,7 +183,7 @@ watch(candidatePageCount, (value) => {
           <button type="button" class="qg-button qg-button-quiet" :disabled="!dirty || locked" @click="discard">
             撤销修改
           </button>
-          <button type="button" class="qg-button qg-button-primary" :disabled="!dirty || locked || conflict || invalidDailyLimits" @click="save">
+          <button type="button" class="qg-button qg-button-primary" :disabled="!dirty || locked || conflict || invalidDailyLimits || invalidTimezone" @click="save">
             <LoaderCircle v-if="saving" class="qg-spin" aria-hidden="true" />
             <Save v-else aria-hidden="true" />
             保存配置
@@ -188,6 +194,20 @@ watch(candidatePageCount, (value) => {
       <p v-if="invalidDailyLimits" class="qg-validation-note" role="alert">
         请填写有效的每日 USD 限额后保存，或关闭对应账号的日费用保护。
       </p>
+
+      <section class="qg-panel qg-timezone-panel" aria-label="每日记账窗口">
+        <div class="qg-setting-copy">
+          <label class="qg-setting-label" for="qg-daily-timezone">每日记账时区</label>
+          <p class="qg-setting-description">以所选时区的当地自然日累计，自动处理夏令时。账号页的周用量或总计不能直接与本日金额比较。</p>
+        </div>
+        <div class="qg-timezone-controls">
+          <input id="qg-daily-timezone" v-model="draft.dailyTimezone" class="qg-timezone-input" list="qg-timezone-options" aria-label="每日记账时区" :aria-invalid="invalidTimezone" :disabled="locked" spellcheck="false" autocomplete="off" @change="normalizeDailyTimezone">
+          <datalist id="qg-timezone-options"><option v-for="zone in timezoneOptions" :key="zone" :value="zone" /></datalist>
+          <button type="button" class="qg-button qg-button-small" :disabled="locked" @click="draft.dailyTimezone = browserTimezone">使用浏览器时区</button>
+        </div>
+        <p v-if="invalidTimezone" class="qg-timezone-message qg-daily-error" role="status">填写有效 IANA 时区，例如 Asia/Shanghai 或 America/Toronto。</p>
+        <p v-else-if="timezoneChanged" class="qg-timezone-message" role="status">保存后重新划分本日窗口，并清除原时区的手工校准；历史账本保持不变。</p>
+      </section>
 
       <div class="qg-toolbar">
         <label class="qg-search" for="qg-rule-search">
@@ -293,6 +313,9 @@ watch(candidatePageCount, (value) => {
           :saved-rule="savedRules.get(rule.accountId)"
           :awaiting-refresh="saved"
           :disabled="locked"
+          :timezone="overview.configuration.dailyTimezone || 'UTC'"
+          :calibration-disabled="locked || dirty || conflict || loading"
+          @calibrate="amount => calibrate(rule.accountId, amount)"
           @update:model-value="updateRule"
           @remove="removeAccount(rule.accountId)"
         />
@@ -308,7 +331,8 @@ watch(candidatePageCount, (value) => {
 
       <details class="qg-daily-help">
         <summary>日费用如何统计与保护？</summary>
-        <p>每日费用按账号统计全部 CPR 请求，覆盖所有模型与 Client Key；使用 CPR 记录的实际或估算 USD 费用，不代表官方套餐额度。按请求开始时间归属 UTC 自然日，跨午夜的请求计入开始那天；每天 UTC 00:00 换日，默认关闭。</p>
+        <p>手工校准将当前本日已用金额设为输入值，此后新发起的请求继续累计。校准前已发起的请求（含未结算请求）视为已包含在该基准中；下次当地换日后失效。可以恢复自动记账，CPR 原始费用记录始终保留。</p>
+        <p>每日费用按账号统计全部 CPR 请求，覆盖所有模型与 Client Key；使用 CPR 记录的实际或估算 USD 费用，不代表官方套餐额度。按请求开始时间归属所选时区的自然日，跨午夜的请求计入开始那天；每天当地 00:00 换日，默认时区 UTC。</p>
         <p>只有当天已记录费用达到日限额才暂停新分配。新账号没有使用记录时从 0 开始；未计价记录、读取失败或观测过期只提示，不单独拦截。已知费用始终保留；在途请求与结算延迟可能使最终费用超过阈值，因此日限额不是严格的原子预算。</p>
       </details>
 

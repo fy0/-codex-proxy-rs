@@ -113,6 +113,7 @@ impl Config {
         let quota_guard = crate::quota_guard::QuotaGuardConfig::parse(
             config.get("quotaGuard"),
             config.get("maxObservationAgeSeconds"),
+            config.get("dailyTimezone"),
         )?;
         if config.keys().any(|key| {
             !matches!(
@@ -128,6 +129,7 @@ impl Config {
                     | "concurrencyPerAccount"
                     | "quotaGuard"
                     | "maxObservationAgeSeconds"
+                    | "dailyTimezone"
             )
         }) {
             return Err("plugin configuration contains unknown fields".into());

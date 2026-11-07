@@ -1,15 +1,26 @@
 import { request } from '../request'
 
+export interface DailyCalibration {
+  amountUsd: string
+  atMs: number
+  active?: boolean
+  windowStartMs: number
+  windowEndMs: number
+  timezone: string
+}
+
 export interface AccountRule {
   accountId: string
   fiveHourLimitPercent: number | null
   weeklyLimitPercent: number | null
   dailyLimitUsd: string | null
+  dailyCalibration?: DailyCalibration | null
 }
 
 export interface Configuration {
   accounts: AccountRule[]
   maxObservationAgeSeconds: number
+  dailyTimezone: string
 }
 
 export interface AccountInfo {
@@ -43,8 +54,18 @@ export interface DailyUsage {
   unknownCostCount: number
   inFlightCount: number
   observedAtMs: number | null
-  resetAtMs: number
-  timezone: 'UTC'
+  resetAtMs: number | null
+  timezone: string
+  windowStartMs?: number | null
+  windowEndMs?: number | null
+  ledgerUsedUsd?: string | null
+  postCalibrationUsedUsd?: string | null
+  calibration?: DailyCalibration | null
+  incompleteReasons?: string[]
+  knownCostCount?: number
+  ledgerUnknownCostCount?: number
+  ledgerKnownCostCount?: number
+  ledgerInFlightCount?: number
   currency: 'USD'
 }
 
@@ -87,5 +108,14 @@ export function saveConfiguration(expectedRevision: number, configuration: Confi
     path: 'quota/configuration',
     contentType: 'application/json',
     body: JSON.stringify({ expectedRevision, configuration }),
+  })
+}
+
+export function saveCalibration(expectedRevision: number, accountId: string, amountUsd: string | null) {
+  return request<{ saved: true, reloadRequired: true }>({
+    method: 'POST',
+    path: 'quota/calibration',
+    contentType: 'application/json',
+    body: JSON.stringify({ expectedRevision, accountId, amountUsd }),
   })
 }
