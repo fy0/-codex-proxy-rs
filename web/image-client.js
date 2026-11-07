@@ -1,4 +1,4 @@
-/* 共享 Responses 客户端：只使用公开管理桥，调用一次，保持请求 JSON 不变。 */
+/* 共享图片客户端：Responses / 原生 Images 使用各自公开管理桥，调用一次，保持请求 JSON 不变。 */
 (function (global) {
   'use strict';
   const limits = Object.freeze({
@@ -8,6 +8,16 @@
     imageCharacters: 160 * 1024 * 1024,
     timeoutMs: 10 * 60 * 1000
   });
+  const operations = Object.freeze({
+    responses: Object.freeze({ label: 'Responses 工具调用', bridgeMethod: 'models.responses', endpoint: '/v1/responses' }),
+    'images.generate': Object.freeze({ label: 'Images 独立生成', bridgeMethod: 'models.images.generate', endpoint: '/v1/images/generations' })
+  });
+  function supports(operation, bridge = global.codexProxyPlugin) {
+    if (!bridge || bridge.version < 2) return false;
+    if (operation === 'responses') return typeof bridge.models?.responses === 'function';
+    if (operation === 'images.generate') return typeof bridge.models?.images?.generate === 'function';
+    return false;
+  }
   const credentialNames = new Set([
     'authorization', 'proxyauthorization', 'cookie', 'setcookie',
     'apikey', 'authtoken', 'accesstoken', 'refreshtoken', 'clientsecret', 'password', 'privatekey',
@@ -74,7 +84,7 @@
       ? redactText(value) : null;
   }
   function checkBody(value) {
-    if (!isRecord(value)) throw fault('validation', 'invalid_body', 'Responses 请求正文必须是 JSON 对象');
+    if (!isRecord(value)) throw fault('validation', 'invalid_body', '请求正文必须是 JSON 对象');
     const seen = new WeakSet();
     function inspect(item, path, depth) {
       if (item === null || typeof item !== 'object') return;
@@ -148,10 +158,14 @@
 
   async function run(options) {
     const input = options || {};
+    const operation = input.operation === undefined ? 'responses' : input.operation;
+    const target = Object.hasOwn(operations, operation) ? operations[operation] : null;
+    const nativeImages = operation === 'images.generate';
     const startedAtMs = Date.now();
     const started = clock();
     const result = {
-      status: 'incomplete', images: [], text: '', requestId: null, responseId: null, httpStatus: null,
+      status: 'incomplete', images: [], partialImages: [], text: '', requestId: null, responseId: null, httpStatus: null,
+      operation, transport: null, endpoint: null, bridgeInvoked: false,
       responseModel: null, imageToolObservations: [],
       request: null, headers: [], error: null, warnings: [], eventCount: 0, startedAtMs,
       timings: { headersMs: null, firstByteMs: null, firstEventMs: null, firstImageMs: null, totalMs: 0 },
@@ -161,6 +175,7 @@
     let reader = null, timer = null, eof = false, timedOut = false, phase = 'validating', terminal = null;
     let bytes = 0, eventIndex = 0, linePieces = [], lineLength = 0, blockLines = [], blockLength = 0, skipLF = false;
     const imageItems = new Map();
+    let lastPartialImage = null;
     const jsonPieces = [];
     const elapsed = () => Math.max(0, clock() - started);
     function notify(name, value) {
@@ -187,10 +202,10 @@
         upstreamStage: safeIdentifier(value.stage) || (isRecord(details) ? safeIdentifier(details.stage) : null)
       };
     }
-    function observeImageTool(tool, eventType, source) {
-      if (!isRecord(tool) || !['image_generation', 'image_generation_call'].includes(tool.type)) return;
+    function observeImageTool(tool, eventType, source, native = false) {
+      if (!isRecord(tool) || !native && !['image_generation', 'image_generation_call'].includes(tool.type)) return;
       const parameters = {};
-      for (const key of ['model', 'size', 'quality', 'output_format', 'action']) {
+      for (const key of ['model', 'size', 'quality', 'output_format', 'action', 'background']) {
         const value = safeIdentifier(tool[key]);
         if (value && value.length <= 128) parameters[key] = value;
       }
@@ -249,20 +264,69 @@
         terminal = 'incomplete';
       }
     }
+    function nativeDocument(document, type) {
+      const responseId = safeIdentifier(document.generation_id) || safeIdentifier(document.id);
+      if (responseId) result.responseId = responseId;
+      const model = safeIdentifier(document.model);
+      if (model) result.responseModel = model;
+      observeImageTool(document, type, type === 'json' ? 'images.response' : 'images.event', true);
+      if (document.error || type === 'error') {
+        result.error = errorRecord(document.error || document, 'upstream', 'Images 返回错误');
+        terminal = 'failed';
+        return;
+      }
+      if (type === 'image_generation.partial_image') {
+        if (typeof document.b64_json === 'string' && document.b64_json) {
+          lastPartialImage = { itemId: 'partial-' + (Number.isInteger(document.partial_image_index) ? document.partial_image_index : eventIndex), base64: document.b64_json };
+          if (result.timings.firstImageMs === null) result.timings.firstImageMs = elapsed();
+        }
+        return;
+      }
+      if (type === 'image_generation.completed') {
+        if (typeof document.b64_json === 'string' && document.b64_json) {
+          imageItems.set('native-event:' + eventIndex, { itemId: responseId, base64: document.b64_json });
+          if (result.timings.firstImageMs === null) result.timings.firstImageMs = elapsed();
+          if (terminal !== 'failed') terminal = 'completed';
+        } else if (terminal !== 'failed') {
+          result.error = errorRecord({ code: 'missing_image_data' }, 'protocol', 'Images 完成事件没有 b64_json 图片内容');
+          terminal = 'incomplete';
+        }
+        return;
+      }
+      if (type !== 'json' || !Array.isArray(document.data)) return;
+      document.data.forEach((item, index) => {
+        if (!isRecord(item)) return;
+        observeImageTool(item, type, 'images.data[' + index + ']', true);
+        if (typeof item.b64_json === 'string' && item.b64_json) {
+          imageItems.set('native-data:' + index, { itemId: safeIdentifier(item.id), base64: item.b64_json });
+          if (result.timings.firstImageMs === null) result.timings.firstImageMs = elapsed();
+        } else if (typeof item.url === 'string') {
+          result.warnings.push('第 ' + (index + 1) + ' 张图片仅返回 URL；管理页未请求该地址，原始响应保留在导出中');
+        }
+      });
+      if (imageItems.size) terminal = 'completed';
+      else {
+        result.error = errorRecord({ code: 'missing_image_data' }, 'protocol', 'Images JSON 未返回可解码的 data[].b64_json');
+        terminal = 'incomplete';
+      }
+    }
     function eventResult(event, type, raw) {
       eventIndex++;
       result.eventCount = eventIndex;
       if (result.timings.firstEventMs === null) result.timings.firstEventMs = elapsed();
       if (isRecord(event)) {
         if (typeof event.request_id === 'string' && !result.requestId) result.requestId = safeIdentifier(event.request_id);
-        if (type === 'response.output_item.done') collectItem(event.item);
-        if (isRecord(event.item)) observeImageTool(event.item, type, 'event.item');
-        if (type === 'response.output_text.delta' && typeof event.delta === 'string') result.text += event.delta;
-        if (isRecord(event.response)) documentResult(event.response, type);
-        else if (type === 'json') documentResult(event, type);
-        if (type === 'error' || type === 'response.failed' && !event.response) {
-          result.error = errorRecord(event.error || event, 'upstream', '管理桥返回错误事件');
-          terminal = 'failed';
+        if (nativeImages) nativeDocument(event, type);
+        else {
+          if (type === 'response.output_item.done') collectItem(event.item);
+          if (isRecord(event.item)) observeImageTool(event.item, type, 'event.item');
+          if (type === 'response.output_text.delta' && typeof event.delta === 'string') result.text += event.delta;
+          if (isRecord(event.response)) documentResult(event.response, type);
+          else if (type === 'json') documentResult(event, type);
+          if (type === 'error' || type === 'response.failed' && !event.response) {
+            result.error = errorRecord(event.error || event, 'upstream', '管理桥返回错误事件');
+            terminal = 'failed';
+          }
         }
       }
       notify('onEvent', { index: eventIndex, type, event, raw, elapsedMs: elapsed() });
@@ -357,19 +421,29 @@
       if (typeof clientKeyId !== 'string' || !clientKeyId || clientKeyId !== clientKeyId.trim()
         || clientKeyId.length > 128 || /[\x00-\x1f\x7f]/.test(clientKeyId))
         throw fault('validation', 'invalid_client_key_id', '请选择有效的 Client Key ID');
+      if (!target) throw fault('validation', 'invalid_operation', '未知请求通路：' + String(operation));
       const encoded = checkBody(input.body);
-      result.request = { clientKeyId, bodyText: encoded.text, bytes: encoded.bytes };
+      result.request = { operation, clientKeyId, bodyText: encoded.text, bytes: encoded.bytes,
+        requestedBridgeMethod: target.bridgeMethod, requestedEndpoint: target.endpoint };
       const bridge = input.bridge || global.codexProxyPlugin;
-      if (!bridge || bridge.version < 2 || !bridge.models || typeof bridge.models.responses !== 'function')
-        throw fault('bridge', 'bridge_unavailable', '宿主没有提供管理页 Responses 模型桥');
+      if (!supports(operation, bridge))
+        throw fault('bridge', nativeImages ? 'images_bridge_unavailable' : 'bridge_unavailable',
+          nativeImages ? '当前 CPR Core 没有提供 models.images.generate 原生 Images 管理桥；需要安装带该能力的 Core。请求尚未发出，也未转为 Responses。'
+            : '宿主没有提供管理页 Responses 模型桥');
       timer = setTimeout(() => {
         timedOut = true;
         controller.abort(new DOMException('模型调用超过 10 分钟', 'TimeoutError'));
         if (reader) reader.cancel().catch(() => {});
       }, limits.timeoutMs);
       changePhase('requesting');
-      // 不追加 stream、model、tools 或任何兼容参数；管理桥自行序列化同一个正文。
-      const response = await abortable(bridge.models.responses({ clientKeyId, body: input.body, signal: controller.signal }), controller.signal);
+      // 描述实际调用的公开桥方法；endpoint 是 API 合同路径，不能代表 Provider 的最终 URL 或字节。
+      result.transport = target.bridgeMethod;
+      result.endpoint = target.endpoint;
+      result.bridgeInvoked = true;
+      notify('onTransport', { operation, transport: result.transport, endpoint: result.endpoint, bridgeInvoked: true });
+      // 不追加 stream、model、tools 或兼容参数；两种操作分别调用真实桥方法，不相互降级。
+      const request = { clientKeyId, body: input.body, signal: controller.signal };
+      const response = await abortable(nativeImages ? bridge.models.images.generate(request) : bridge.models.responses(request), controller.signal);
       result.httpStatus = response.status;
       result.timings.headersMs = elapsed();
       result.headers = Array.from(response.headers.entries(), ([name, value]) => [name, sensitiveName(name) ? '[已脱敏]' : redactText(value)]);
@@ -430,8 +504,17 @@
           terminal = 'failed';
         }
       }
+      if (!imageItems.size && lastPartialImage) {
+        try { result.partialImages.push(await decodeImage(lastPartialImage, controller.signal)); }
+        catch (error) {
+          if (controller.signal.aborted) throw error;
+          result.warnings.push('部分图片无法解码；其原始事件仍保留在捕获内容中');
+        }
+      }
       if (!terminal) {
-        result.error = result.error || errorRecord({ code: 'missing_completion' }, 'protocol', '响应结束但没有完整的 completed 状态');
+        result.error = result.error || errorRecord({ code: 'missing_completion' }, 'protocol', nativeImages
+          ? 'Images 响应结束，但未收到最终图片（只有 partial_image 不代表完成）'
+          : '响应结束但没有完整的 completed 状态');
         terminal = 'incomplete';
       }
       result.status = terminal;
@@ -463,6 +546,6 @@
   }
 
   Object.defineProperty(global, 'CPRImageClient', {
-    value: Object.freeze({ run, redact, redactText, preview, limits }), configurable: false, writable: false
+    value: Object.freeze({ run, redact, redactText, preview, limits, operations, supports }), configurable: false, writable: false
   });
 })(window);

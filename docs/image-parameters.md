@@ -15,6 +15,7 @@ OpenAI 的公开 API 指南为 GPT Image 2 / 2.5 列出自定义 `WIDTHxHEIGHT`�
 | 路径 | 当前行为 | 证据 |
 | --- | --- | --- |
 | 管理页 `models.responses` | 提交 Responses JSON；正文里的图片参数位于 `tools[]` | `web/app.js`、`web/debug.js`、`web/image-client.js` |
+| 配套 Core 的 `models.images.generate` | 独立 Images 正文，直接进入已授权的原生 provider-endpoint；不会退回 Responses | `core-patches/native-images/`、`web/debug.js`、`web/image-client.js` |
 | 本插件 HTTP 中间件处理 `/v1/responses` | 不进入 Images 转换分支，直接交给下一层 | `src/main.rs` 的 `handle_http` / `image_kind` |
 | 本插件模型中间件和账号策略 | 读取图片模型用于权限与账号选择，去掉内部意图头；不改写正文中的 `model`、`size`、`quality` | `src/main.rs` 的 `handle_request`；`src/policy.rs` 的 `image_intent` / `schedule` |
 | Images → Responses 显式桥接 | 将 Images 的 `model`、`size`、`quality`、`output_format` 等复制到图片工具定义 | `src/bridge.rs` 的 `parse_json` |
@@ -33,6 +34,8 @@ OpenAI 的公开 API 指南为 GPT Image 2 / 2.5 列出自定义 `WIDTHxHEIGHT`�
 
 固定版本的后台 `host.model` 是按公开模型执行的路径。已有宿主合同测试确认：原生 `GenerateImage` 通过这条模型路径会在发送前触发 `InvalidRequest / NotSent`，而原生 HTTP Images 使用的 provider-endpoint 路径可保留参数并发送。要在管理桥中增加独立 Images 调试入口，需要宿主提供相应合同；不能靠改变 Responses 正文绕过这一区别。
 
+v0.7.8 已提供针对官方 Core `ca5901ba568ab398948dcf32239854337c6928dc` 的[前后端配套补丁](../core-patches/native-images/README.md)。调试页可切换真实的 `models.responses` / `models.images.generate`；后者复用原生 HTTP provider-endpoint 的授权与交付链。旧 Core 没有此方法时明确不可调用，不伪造路径或自动降级。当前固定原生适配器只支持非流式 JSON，默认模板 `stream: false`，不要把 Responses 的 `tools` 整体搬到原生正文。
+
 ## 4. 请求值、服务端回报与实际图片要分别核对
 
 调试面板的提交快照和导出包含：
@@ -50,7 +53,7 @@ OpenAI 的公开 API 指南为 GPT Image 2 / 2.5 列出自定义 `WIDTHxHEIGHT`�
 1. 在调试页选择一个 Client Key，先载入纯文本模板，确认使用该 Key 目录中存在的对话模型。若返回 `no_available_provider`，先核对模型授权、账号状态与额度规则；只凭这个 503 无法认定错误来自图片尺寸。
 2. 载入图片模板，固定提示词、对话模型、图片模型、质量和输出格式，先运行一次 `1024x1024`。保留请求快照、HTTP 状态、请求 ID、服务端参数回报和实际图片。
 3. 在相同条件下逐次将 `size` 改为 `2048x2048`、`2160x3840`。每次显式运行一次，核对原始事件与解码尺寸。不要把浏览器 fixture、返回 HTTP 200 或工具状态 `completed` 当作尺寸验收。
-4. 如果需要比较独立 Images，使用宿主已有的 `/v1/images/generations` 入口和正常 Client Key 身份，在相同模型、提示词、尺寸下比较。当前管理桥 Responses 按钮不能替代这项测试；切换入口本身也不保证原生 4K。
+4. 部署配套 Core 后，在调试页切换「Images · 独立生图接口」，以顶层 `model`、`prompt`、`size`、`quality`、`output_format` 比较相同条件。检查实际桥是 `models.images.generate` 且 `bridgeInvoked: true`。旧 Core 无此能力时先补齐宿主，不能靠增加 JSON 字段模拟入口。切换入口本身不保证原生 4K。
 5. 导出时检查 `completeCapture`，并记录插件版本、宿主版本、请求尺寸、返回格式和像素。完整导出保留被预览截断的长字段和图片内容；凭据不应出现在分享的诊断资料中。
 
 在真实图片与尺寸检查通过之前，本版本只确认修复了可证明的客户端问题并补充参数观测，不能写成“2K / 4K 已修复”。

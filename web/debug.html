@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>原始 Responses 调试</title>
+  <title>原始图片请求调试</title>
   <link rel="stylesheet" href="./debug.css">
   <script defer src="./image-client.js"></script>
   <script defer src="./debug.js"></script>
@@ -12,7 +12,7 @@
 <main class="debug-root">
   <div class="debug-intro">
     <span class="debug-mark" aria-hidden="true">{ }</span>
-    <div><span class="eyebrow">CPR / RESPONSES</span><p>直接提交 JSON 给 CPR 管理桥，查看响应、耗时与图片。</p></div>
+    <div><span class="eyebrow">CPR / IMAGE REQUESTS</span><p>切换 Responses 与独立 Images 接口，检查请求、服务端参数与实际图片。</p></div>
     <span id="debugVersion" class="version-label">正在连接宿主</span>
   </div>
   <div id="debugNotice" class="notice" role="status">选择 Client Key，编辑参数，然后运行一次。</div>
@@ -21,6 +21,11 @@
       <div><span class="section-index">01</span><h2 id="requestTitle">请求参数</h2></div>
       <span class="hint">一次运行 · 不自动重试 · 本页内存</span>
     </header>
+    <div class="operation-bar">
+      <label for="debugOperation"><span>请求通路</span><select id="debugOperation"><option value="responses">Responses · 图片工具调用</option><option value="images.generate">Images · 独立生图接口</option></select></label>
+      <div class="operation-summary"><code id="debugEndpoint">POST /v1/responses</code><span id="debugCapability" role="status"></span></div>
+    </div>
+    <p id="debugOperationHelp" class="hint operation-help"></p>
     <div class="request-toolbar">
       <label class="key-field" for="debugKey"><span>Client Key ID</span><select id="debugKey" aria-label="Client Key ID"><option value="">读取 Key 中…</option></select></label>
       <button id="debugRefresh" class="button" type="button">刷新 Key</button>
@@ -31,7 +36,7 @@
     <details id="debugCatalog" class="technical" hidden><summary>所选 Key 的模型目录</summary><pre id="debugModelList"></pre></details>
     <div class="editor-label"><label for="debugBody">提交给 CPR 管理桥的 JSON</label><div><span id="debugBodySize" class="hint">0 B</span><button id="debugFormat" class="text-button" type="button">格式化</button></div></div>
     <textarea id="debugBody" class="code-editor" rows="19" wrap="off" spellcheck="false" autocomplete="off" aria-describedby="debugBodyHelp" placeholder="粘贴完整 Responses JSON 对象"></textarea>
-    <p id="debugBodyHelp" class="hint">正文按编辑内容提交。模板只在点击重置时载入；认证由所选 Key 完成，不填写 Authorization 或 Token。</p>
+    <p id="debugBodyHelp" class="hint">两种通路各自保留正文。首次按 Key 目录载入模板；手写内容在切换通路、刷新目录时保留。认证由所选 Key 完成，不填写 Authorization 或 Token。</p>
     <div class="run-bar">
       <button id="debugRun" class="button primary" type="button" disabled><span aria-hidden="true">▶</span> 运行一次</button>
       <button id="debugCancel" class="button" type="button" disabled>取消本次</button>

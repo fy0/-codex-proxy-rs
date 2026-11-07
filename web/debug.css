@@ -47,6 +47,12 @@ h3 { margin: 0; font-size: 13px; font-weight: 680; }
 .hint, .notice, .page-footnote { color: var(--muted); font-size: 12px; line-height: 1.65; }
 .notice { min-height: 20px; }
 .notice.error { color: var(--error); }
+.operation-bar { display: flex; align-items: center; gap: 18px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--code); margin-bottom: 9px; }
+.operation-bar > label { display: grid; gap: 5px; flex: 0 1 270px; min-width: 180px; color: var(--muted); font-size: 11px; }
+.operation-summary { display: grid; gap: 6px; min-width: 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.operation-summary code { color: var(--ink); font-size: 12px; }
+.operation-summary .unavailable { color: var(--error); }
+.request-panel > .operation-help { margin: 0 0 18px; line-height: 1.7; }
 .request-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
 .request-toolbar label { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; font-weight: 650; }
 .key-field { flex: 1 1 280px; }
@@ -110,6 +116,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'Cascadia Cod
 @media (max-width: 760px) {
   .debug-root { padding: 16px; }
   .panel { padding: 16px; }
+  .operation-bar { align-items: stretch; flex-direction: column; gap: 10px; padding: 12px; }
+  .operation-bar > label { flex-basis: auto; }
   .request-toolbar { gap: 8px; }
   .key-field { flex-basis: calc(100% - 90px); }
   .template-field { flex: 1 1 200px; margin-left: 0; }

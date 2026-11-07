@@ -1,0 +1,891 @@
+--- a/backend/crates/gateway-api/src/admin/plugins/management.rs
++++ b/backend/crates/gateway-api/src/admin/plugins/management.rs
+@@ -35,6 +35,7 @@
+     auth::SessionState,
+     openai::{
+         error::{gateway_error_response, protocol_error_response},
++        images::execute_prepared_image_generation,
+         responses::{
+             ResponseAuthorization, ResponsesHttpRequest, decode_request_with_body,
+             execute_prepared_responses,
+@@ -71,15 +72,20 @@
+ }
+ 
+ pub(in crate::admin) fn model_router() -> Router<crate::ApiState> {
+-    Router::new().route(
+-        "/api/admin/plugins/extensions/{instance_id}/{artifact_sha256}/{revision}/models/responses",
+-        post(model_responses).layer(DefaultBodyLimit::max(MAXIMUM_MODEL_BODY_BYTES)),
+-    )
++    Router::new()
++        .route(
++            "/api/admin/plugins/extensions/{instance_id}/{artifact_sha256}/{revision}/models/responses",
++            post(model_responses).layer(DefaultBodyLimit::max(MAXIMUM_MODEL_BODY_BYTES)),
++        )
++        .route(
++            "/api/admin/plugins/extensions/{instance_id}/{artifact_sha256}/{revision}/models/images/generations",
++            post(model_image_generations).layer(DefaultBodyLimit::max(MAXIMUM_MODEL_BODY_BYTES)),
++        )
+ }
+ 
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+-struct ModelResponsesQuery {
++struct ModelRequestQuery {
+     client_key_id: String,
+ }
+ 
+@@ -104,7 +110,7 @@
+     _: AdminAuth,
+     State(state): State<crate::ApiState>,
+     Path(path): Path<TargetPath>,
+-    AdminQuery(query): AdminQuery<ModelResponsesQuery>,
++    AdminQuery(query): AdminQuery<ModelRequestQuery>,
+     parts: axum::http::request::Parts,
+     body: Result<Bytes, BytesRejection>,
+ ) -> Result<Response, AdminError> {
+@@ -163,6 +169,53 @@
+     Ok(plugin_response(response))
+ }
+ 
++async fn model_image_generations(
++    _: AdminAuth,
++    State(state): State<crate::ApiState>,
++    Path(path): Path<TargetPath>,
++    AdminQuery(query): AdminQuery<ModelRequestQuery>,
++    parts: axum::http::request::Parts,
++    body: Result<Bytes, BytesRejection>,
++) -> Result<Response, AdminError> {
++    let body = body.map_err(|error| {
++        AdminError::invalid_request(error.status(), "插件模型请求正文过大或无法读取")
++    })?;
++    let target = path.target();
++    state
++        .admin_services()
++        .plugin_management()
++        .validate_target(&target)
++        .await
++        .map_err(map_admin_service_error)?;
++    let client_key_id = ClientApiKeyId::new(query.client_key_id)
++        .map_err(|_| AdminError::bad_request("Client Key 标识不合法"))?;
++    let service = state.openai().clone();
++    let prepared = match service
++        .execution()
++        .prepare_plugin_execution(&client_key_id)
++        .await
++    {
++        Ok(prepared) => prepared,
++        Err(error) => return Ok(plugin_response(gateway_error_response(&error))),
++    };
++    let authorization: Arc<dyn ResponseAuthorization> =
++        Arc::new(PluginModelsAuthorization { state, target });
++    // 原生 Images 复用 Provider 端点、请求中间件与 Core 结算，不经过 Responses 转换。
++    let response = execute_prepared_image_generation(
++        service,
++        prepared,
++        parts.headers,
++        body,
++        parts
++            .extensions
++            .get::<ConnectInfo<SocketAddr>>()
++            .map(|info| info.0),
++        Some(authorization),
++    )
++    .await;
++    Ok(plugin_response(response))
++}
++
+ struct PluginModelsAuthorization {
+     state: crate::ApiState,
+     target: PluginManagementTarget,
+--- a/backend/crates/gateway-api/src/openai/endpoint.rs
++++ b/backend/crates/gateway-api/src/openai/endpoint.rs
+@@ -16,7 +16,7 @@
+ };
+ use gateway_core::{
+     engine::{
+-        execution::{AuthenticatedClient, StartedExecution},
++        execution::{AuthenticatedClient, PreparedRootExecution, StartedExecution},
+         middleware::{MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareResponse},
+     },
+     error::GatewayError,
+@@ -33,6 +33,7 @@
+ 
+ use super::{
+     error::{engine_error_response, gateway_error_response, protocol_error_response},
++    responses::{ResponseAuthorization, authorized_middleware_response, await_with_authorization},
+     service::OpenAiService,
+ };
+ 
+@@ -54,6 +55,28 @@
+         Ok(prepared) => prepared,
+         Err(error) => return gateway_error_response(&error),
+     };
++    execute_prepared_provider_endpoint(
++        service, prepared, input, client_ip, user_agent, decode, None,
++    )
++    .await
++}
++
++/// 已由管理桥验证的 Key 复用原生端点；授权在等待和交付期间继续复验。
++pub(super) async fn execute_prepared_provider_endpoint<F, Fut>(
++    service: OpenAiService,
++    prepared: PreparedRootExecution,
++    input: RequestInput,
++    client_ip: Option<IpAddr>,
++    user_agent: Option<String>,
++    decode: F,
++    authorization: Option<Arc<dyn ResponseAuthorization>>,
++) -> Response
++where
++    F: FnOnce(Bytes, HeaderMap) -> Fut + Send + 'static,
++    Fut: Future<Output = Result<Operation, GatewayError>> + Send,
++{
++    let execution = service.execution();
++    let cancellation = prepared.cancellation();
+     let request_id = prepared.request_id().clone();
+     let endpoint = input.endpoint.clone();
+     let execution_entered = Arc::new(AtomicBool::new(false));
+@@ -86,10 +109,24 @@
+                 collect_raw_json_response(started).await
+             })
+         }),
+-    )
+-    .await;
++    );
++    let result = if let Some(authorization) = authorization.as_ref() {
++        match await_with_authorization(result, authorization, &cancellation).await {
++            Ok(result) => result,
++            Err(error) => Err(MiddlewareError::Gateway(error)),
++        }
++    } else {
++        result.await
++    };
+     let response = match result {
+-        Ok(response) => into_http_response(response, ExpectedBody::SingleJson).await,
++        Ok(response) => {
++            let response = if let Some(authorization) = authorization {
++                authorized_middleware_response(response, authorization, cancellation)
++            } else {
++                response
++            };
++            into_http_response(response, ExpectedBody::SingleJson).await
++        }
+         Err(error) => error_response(error),
+     };
+     if !execution_entered.load(Ordering::Relaxed) {
+--- a/backend/crates/gateway-api/src/openai/images/http.rs
++++ b/backend/crates/gateway-api/src/openai/images/http.rs
+@@ -1,6 +1,6 @@
+ //! Codex Images 非流式 HTTP adapter
+ 
+-use std::net::SocketAddr;
++use std::{net::SocketAddr, sync::Arc};
+ 
+ use axum::{
+     body::Bytes,
+@@ -8,7 +8,7 @@
+     http::HeaderMap,
+     response::Response,
+ };
+-use gateway_core::engine::execution::ClientTransport;
++use gateway_core::engine::execution::{ClientTransport, PreparedRootExecution};
+ use gateway_core::error::{GatewayError, GatewayErrorKind};
+ use gateway_core::operation::{
+     ImageRequest, ImageRequestKind, Operation, OperationKind, RawJsonPayload,
+@@ -20,9 +20,10 @@
+ use crate::openai::middleware::RequestInput;
+ use crate::openai::{
+     auth::{authenticate_client, client_access_error_response},
+-    endpoint::provider_endpoint_response,
+-    responses::{OpenAiRequestHeaders, request_client_context},
++    endpoint::{execute_prepared_provider_endpoint, provider_endpoint_response},
++    responses::{OpenAiRequestHeaders, ResponseAuthorization, request_client_context},
+     router::{IMAGE_EDITS_PATH, IMAGE_GENERATIONS_PATH},
++    service::OpenAiService,
+ };
+ 
+ const OPENAI_PROTOCOL: &str = "openai";
+@@ -84,26 +85,56 @@
+     provider_endpoint_response(
+         service.clone(),
+         client,
+-        RequestInput {
+-            endpoint: endpoint.to_owned(),
+-            protocol: OPENAI_PROTOCOL.to_owned(),
+-            operation: Some(OperationKind::GenerateImage),
+-            transport: ClientTransport::HttpJson,
+-            model_hint: None,
+-            headers: encode_headers(&headers),
+-            body,
+-        },
++        image_request_input(&headers, body, endpoint),
+         client_ip,
+         user_agent,
+-        move |body, headers| image_operation(body, headers, kind),
++        move |body, headers| image_operation(body, headers, kind, None),
+     )
+     .await
++}
++
++/// 管理页面按显式 Key 调用同一原生 Images adapter，正文不重建、不补默认参数。
++pub(crate) async fn execute_prepared_image_generation(
++    service: OpenAiService,
++    prepared: PreparedRootExecution,
++    headers: HeaderMap,
++    body: Bytes,
++    peer_address: Option<SocketAddr>,
++    authorization: Option<Arc<dyn ResponseAuthorization>>,
++) -> Response {
++    let turn_id = prepared.request_id().as_str().to_owned();
++    let (client_ip, user_agent) = request_client_context(&headers, peer_address);
++    execute_prepared_provider_endpoint(
++        service,
++        prepared,
++        image_request_input(&headers, body, IMAGE_GENERATIONS_PATH),
++        client_ip,
++        user_agent,
++        move |body, headers| {
++            image_operation(body, headers, ImageRequestKind::Generation, Some(turn_id))
++        },
++        authorization,
++    )
++    .await
++}
++
++fn image_request_input(headers: &HeaderMap, body: Bytes, endpoint: &str) -> RequestInput {
++    RequestInput {
++        endpoint: endpoint.to_owned(),
++        protocol: OPENAI_PROTOCOL.to_owned(),
++        operation: Some(OperationKind::GenerateImage),
++        transport: ClientTransport::HttpJson,
++        model_hint: None,
++        headers: encode_headers(headers),
++        body,
++    }
+ }
+ 
+ async fn image_operation(
+     body: Bytes,
+     mut headers: HeaderMap,
+     kind: ImageRequestKind,
++    fallback_turn_id: Option<String>,
+ ) -> Result<Operation, GatewayError> {
+     let body = if kind == ImageRequestKind::Edit {
+         super::request::normalize_edit_body(body, &mut headers).await?
+@@ -114,11 +145,10 @@
+     if let Some(turn_id) = headers
+         .get("x-codex-image-turn-id")
+         .and_then(|value| value.to_str().ok())
++        .map(str::to_owned)
++        .or(fallback_turn_id)
+     {
+-        context.insert(
+-            IMAGE_TURN_ID_CONTEXT_KEY.to_owned(),
+-            Value::String(turn_id.to_owned()),
+-        );
++        context.insert(IMAGE_TURN_ID_CONTEXT_KEY.to_owned(), Value::String(turn_id));
+     }
+     let payload = RawJsonPayload::new(OPENAI_PROTOCOL, body)
+         .map_err(|_| {
+--- a/backend/crates/gateway-api/src/openai/images/mod.rs
++++ b/backend/crates/gateway-api/src/openai/images/mod.rs
+@@ -3,4 +3,4 @@
+ mod http;
+ mod request;
+ 
+-pub(crate) use http::{image_edits, image_generations};
++pub(crate) use http::{execute_prepared_image_generation, image_edits, image_generations};
+--- a/backend/crates/gateway-api/src/openai/responses/http.rs
++++ b/backend/crates/gateway-api/src/openai/responses/http.rs
+@@ -293,7 +293,7 @@
+     }
+ }
+ 
+-async fn await_with_authorization<T>(
++pub(in crate::openai) async fn await_with_authorization<T>(
+     future: impl Future<Output = T>,
+     authorization: &Arc<dyn ResponseAuthorization>,
+     cancellation: &CancellationToken,
+@@ -312,7 +312,7 @@
+     }
+ }
+ 
+-fn authorized_middleware_response(
++pub(in crate::openai) fn authorized_middleware_response(
+     response: MiddlewareResponse,
+     authorization: Arc<dyn ResponseAuthorization>,
+     cancellation: CancellationToken,
+--- a/backend/crates/gateway-api/src/openai/responses/mod.rs
++++ b/backend/crates/gateway-api/src/openai/responses/mod.rs
+@@ -11,7 +11,10 @@
+ pub use crate::client_error::{ProtocolError, ProtocolErrorBody};
+ pub(crate) use crate::request_context::request_client_context;
+ pub use error::{RequestDecodeError, ResponseEncodeError};
+-pub(in crate::openai) use http::{HttpResponseAdapter, execute_prepared_response};
++pub(in crate::openai) use http::{
++    HttpResponseAdapter, authorized_middleware_response, await_with_authorization,
++    execute_prepared_response,
++};
+ pub(crate) use http::{
+     ResponseAuthorization, ResponsesHttpRequest, execute_prepared_responses, responses,
+ };
+--- a/backend/crates/gateway-api/tests/admin/plugins/management.rs
++++ b/backend/crates/gateway-api/tests/admin/plugins/management.rs
+@@ -916,3 +916,396 @@
+         assert_eq!(response.status(), expected, "{method} {query}");
+     }
+ }
++
++// 原生 Images 管理桥只改变入口身份，不引入第二套执行或结算。
++struct NativeImageExecution {
++    captured: Mutex<Vec<bytes::Bytes>>,
++    turn_ids: Mutex<Vec<String>>,
++    request_ids: Mutex<Vec<String>>,
++    response: bytes::Bytes,
++    prepared: AtomicUsize,
++    middleware_calls: Arc<AtomicUsize>,
++    commits: Arc<AtomicUsize>,
++    deny_middleware: bool,
++}
++
++impl NativeImageExecution {
++    fn new(deny_middleware: bool) -> Arc<Self> {
++        Arc::new(Self {
++            captured: Mutex::new(Vec::new()),
++            turn_ids: Mutex::new(Vec::new()),
++            request_ids: Mutex::new(Vec::new()),
++            response: bytes::Bytes::from(format!(
++                "{{ \"created\":1787212800, \"data\":[{{\"b64_json\":\"{}\"}}], \"future\":9007199254740993 }}",
++                "A".repeat(2 * 1024 * 1024)
++            )),
++            prepared: AtomicUsize::new(0),
++            middleware_calls: Arc::default(),
++            commits: Arc::default(),
++            deny_middleware,
++        })
++    }
++}
++
++impl ExecutionService for NativeImageExecution {
++    fn authenticate(&self, _: &str) -> Result<AuthenticatedClient, ClientAuthenticationError> {
++        panic!("原生 Images 管理桥不能把管理身份当作 Client Key")
++    }
++
++    fn public_models(&self, _: &AuthenticatedClient) -> Vec<PublicModelId> {
++        Vec::new()
++    }
++
++    fn contains_public_model(&self, _: &AuthenticatedClient, _: &PublicModelId) -> bool {
++        false
++    }
++
++    fn prepare_plugin_execution(
++        &self,
++        key: &ClientApiKeyId,
++    ) -> BoxFuture<'_, Result<PreparedRootExecution, GatewayError>> {
++        let allowed = key.as_str() == "client-key";
++        Box::pin(async move {
++            if !allowed {
++                return Err(GatewayError::new(
++                    gateway_core::error::GatewayErrorKind::PolicyDenied,
++                    "fixture client key denied",
++                ));
++            }
++            self.prepared.fetch_add(1, Ordering::SeqCst);
++            let prepared = self
++                .prepare_execution(crate::openai::authenticated_client("fixture-native-key"))
++                .await?;
++            self.request_ids
++                .lock()
++                .unwrap()
++                .push(prepared.request_id().as_str().to_owned());
++            Ok(prepared)
++        })
++    }
++
++    fn middleware_plan(&self, _: &PreparedRootExecution) -> Option<FrozenMiddlewarePlan> {
++        Some(FrozenMiddlewarePlan::new(
++            Arc::new(NativeImageMiddleware {
++                calls: self.middleware_calls.clone(),
++                deny: self.deny_middleware,
++            }),
++            ExtensionSetReference::new(
++                ExtensionSetId::new("native-image-bridge-test".into()).unwrap(),
++                Arc::new(ModelLease),
++            ),
++        ))
++    }
++
++    fn start(&self, _: StartExecution) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
++        panic!("原生 Images 不能进入 Responses 执行")
++    }
++
++    fn start_provider_endpoint(
++        &self,
++        request: StartProviderExecution,
++    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
++        Box::pin(async move {
++            assert_eq!(request.provider.as_str(), "openai");
++            assert_eq!(request.metadata.endpoint, "/v1/images/generations");
++            assert_eq!(
++                request.metadata.transport,
++                gateway_core::engine::execution::ClientTransport::HttpJson
++            );
++            let gateway_core::operation::Operation::GenerateImage(image) = request.operation else {
++                panic!("原生 Images 必须保留 GenerateImage operation")
++            };
++            assert_eq!(
++                image.kind(),
++                gateway_core::operation::ImageRequestKind::Generation
++            );
++            self.captured
++                .lock()
++                .unwrap()
++                .push(image.payload().body().clone());
++            self.turn_ids.lock().unwrap().push(
++                image
++                    .payload()
++                    .context()
++                    .get("image_turn_id")
++                    .and_then(serde_json::Value::as_str)
++                    .expect("原生生图必须有稳定 turn ID")
++                    .to_owned(),
++            );
++            Ok(StartedExecution {
++                request_id: gateway_core::engine::ModelRequestId::new("req_native_image_bridge")
++                    .unwrap(),
++                created_at: std::time::SystemTime::now(),
++                stream: false,
++                session: Box::new(NativeImageSession {
++                    response: Some(self.response.clone()),
++                    commits: self.commits.clone(),
++                    finalized: AtomicBool::new(false),
++                }),
++            })
++        })
++    }
++}
++
++#[derive(Debug)]
++struct NativeImageMiddleware {
++    calls: Arc<AtomicUsize>,
++    deny: bool,
++}
++
++impl MiddlewarePlan for NativeImageMiddleware {
++    fn handle(
++        &self,
++        _: MiddlewareContext,
++        request: MiddlewareRequest,
++        next: MiddlewareNext,
++    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
++        self.calls.fetch_add(1, Ordering::SeqCst);
++        if self.deny {
++            return Box::pin(async {
++                Err(MiddlewareError::Gateway(GatewayError::new(
++                    gateway_core::error::GatewayErrorKind::PolicyDenied,
++                    "fixture native request policy denied",
++                )))
++            });
++        }
++        next.run(request)
++    }
++}
++
++struct NativeImageSession {
++    response: Option<bytes::Bytes>,
++    commits: Arc<AtomicUsize>,
++    finalized: AtomicBool,
++}
++
++impl gateway_core::engine::execution::ExecutionSession for NativeImageSession {
++    fn next_event(
++        &mut self,
++    ) -> BoxFuture<
++        '_,
++        Result<Option<gateway_core::engine::CoordinatedEvent>, gateway_core::engine::EngineError>,
++    > {
++        panic!("原生 JSON 交付不走 Responses SSE")
++    }
++
++    fn collect_uncommitted(
++        &mut self,
++    ) -> BoxFuture<
++        '_,
++        Result<Vec<gateway_core::event::ProviderEvent>, gateway_core::engine::EngineError>,
++    > {
++        let response = self.response.take().expect("单次读取原生响应");
++        Box::pin(async move {
++            Ok(vec![gateway_core::event::ProviderEvent::wire(
++                gateway_core::event::ProtocolWireEvent::raw_json("openai", response).unwrap(),
++            )])
++        })
++    }
++
++    fn response_headers(&self) -> &[gateway_core::event::ProviderResponseHeader] {
++        &[]
++    }
++
++    fn commit_downstream(
++        &mut self,
++        status: Option<u16>,
++    ) -> BoxFuture<'_, Result<(), gateway_core::engine::EngineError>> {
++        Box::pin(async move {
++            assert_eq!(status, Some(200));
++            assert!(!self.finalized.swap(true, Ordering::SeqCst));
++            self.commits.fetch_add(1, Ordering::SeqCst);
++            Ok(())
++        })
++    }
++
++    fn record_client_status(
++        &mut self,
++        _: u16,
++    ) -> BoxFuture<'_, Result<(), gateway_core::engine::EngineError>> {
++        Box::pin(async { Ok(()) })
++    }
++
++    fn is_finalized(&self) -> bool {
++        self.finalized.load(Ordering::SeqCst)
++    }
++
++    fn cancel(&self) {
++        self.finalized.store(true, Ordering::SeqCst);
++    }
++
++    fn detach_finalize(self: Box<Self>) -> BoxFuture<'static, ()> {
++        Box::pin(async move { self.finalized.store(true, Ordering::SeqCst) })
++    }
++}
++
++fn native_image_model_request(body: &str) -> Request<Body> {
++    let mut request = model_request(false);
++    *request.uri_mut() = request
++        .uri()
++        .to_string()
++        .replace("/models/responses?", "/models/images/generations?")
++        .parse()
++        .unwrap();
++    *request.body_mut() = Body::from(body.to_owned());
++    request
++}
++
++#[tokio::test]
++async fn native_image_bridge_preserves_provider_bytes_and_commits_large_json_once() {
++    let fixture = published_fixture().await;
++    let execution = NativeImageExecution::new(false);
++    let body = r#"{ "model":"gpt-image-2.5-sunburst", "size":"1152x2048", "quality":"high", "output_format":"webp", "stream":false, "future":9007199254740993, "prompt":"first", "prompt":"second" }"#;
++    let response =
++        crate::openai::api_router_with_admin_and_execution(fixture.services, execution.clone())
++            .oneshot(native_image_model_request(body))
++            .await
++            .unwrap();
++    assert_eq!(response.status(), StatusCode::OK);
++    assert_eq!(response.headers()["x-cpr-plugin-response"], "1");
++    assert_eq!(response.headers()["cache-control"], "no-store");
++    assert_eq!(execution.prepared.load(Ordering::SeqCst), 1);
++    assert_eq!(
++        *execution.turn_ids.lock().unwrap(),
++        *execution.request_ids.lock().unwrap()
++    );
++    assert_eq!(execution.middleware_calls.load(Ordering::SeqCst), 1);
++    assert_eq!(
++        execution.captured.lock().unwrap().as_slice(),
++        &[bytes::Bytes::copy_from_slice(body.as_bytes())]
++    );
++    let bytes = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
++        .await
++        .unwrap();
++    assert_eq!(bytes, execution.response);
++    assert_eq!(execution.commits.load(Ordering::SeqCst), 1);
++}
++
++#[tokio::test]
++async fn native_image_bridge_does_not_rewrite_stream_or_unknown_parameters() {
++    let fixture = published_fixture().await;
++    let execution = NativeImageExecution::new(false);
++    let body = r#"{"model":"gpt-image-2.6-flare","stream":true,"n":3,"partial_images":2,"future":{"nested":true}}"#;
++    let response =
++        crate::openai::api_router_with_admin_and_execution(fixture.services, execution.clone())
++            .oneshot(native_image_model_request(body))
++            .await
++            .unwrap();
++    assert_eq!(response.status(), StatusCode::OK);
++    let _ = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
++        .await
++        .unwrap();
++    assert_eq!(
++        execution.captured.lock().unwrap().as_slice(),
++        &[bytes::Bytes::copy_from_slice(body.as_bytes())]
++    );
++}
++
++#[tokio::test]
++async fn native_image_bridge_preserves_explicit_turn_header() {
++    let fixture = published_fixture().await;
++    let execution = NativeImageExecution::new(false);
++    let mut request = native_image_model_request(r#"{"prompt":"test"}"#);
++    request.headers_mut().insert(
++        "x-codex-image-turn-id",
++        axum::http::HeaderValue::from_static("caller-turn"),
++    );
++    let response =
++        crate::openai::api_router_with_admin_and_execution(fixture.services, execution.clone())
++            .oneshot(request)
++            .await
++            .unwrap();
++    assert_eq!(response.status(), StatusCode::OK);
++    let _ = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
++        .await
++        .unwrap();
++    assert_eq!(
++        *execution.turn_ids.lock().unwrap(),
++        vec!["caller-turn".to_owned()]
++    );
++}
++
++#[tokio::test]
++async fn native_image_bridge_keeps_request_policy_in_the_execution_chain() {
++    let fixture = published_fixture().await;
++    let execution = NativeImageExecution::new(true);
++    let response =
++        crate::openai::api_router_with_admin_and_execution(fixture.services, execution.clone())
++            .oneshot(native_image_model_request(r#"{"prompt":"test"}"#))
++            .await
++            .unwrap();
++    assert_eq!(response.status(), StatusCode::FORBIDDEN);
++    assert_eq!(execution.middleware_calls.load(Ordering::SeqCst), 1);
++    assert!(execution.captured.lock().unwrap().is_empty());
++    assert_eq!(execution.commits.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test]
++async fn native_image_bridge_requires_admin_target_and_explicit_key_authorization() {
++    let fixture = published_fixture().await;
++    let execution = NativeImageExecution::new(false);
++    let router =
++        crate::openai::api_router_with_admin_and_execution(fixture.services, execution.clone());
++    let mut request = native_image_model_request(r#"{"prompt":"test"}"#);
++    request.headers_mut().remove("cookie");
++    request.headers_mut().remove("authorization");
++    request.headers_mut().remove("x-api-key");
++    assert_eq!(
++        router.clone().oneshot(request).await.unwrap().status(),
++        StatusCode::UNAUTHORIZED
++    );
++    let mut request = native_image_model_request(r#"{"prompt":"test"}"#);
++    *request.uri_mut() = request
++        .uri()
++        .to_string()
++        .replace("clientKeyId=client-key", "clientKeyId=denied-key")
++        .parse()
++        .unwrap();
++    assert_eq!(
++        router.clone().oneshot(request).await.unwrap().status(),
++        StatusCode::FORBIDDEN
++    );
++    let mut request = native_image_model_request(r#"{"prompt":"test"}"#);
++    *request.uri_mut() = request
++        .uri()
++        .to_string()
++        .replace("/7/models/", "/8/models/")
++        .parse()
++        .unwrap();
++    assert_eq!(
++        router.oneshot(request).await.unwrap().status(),
++        StatusCode::CONFLICT
++    );
++    assert_eq!(execution.prepared.load(Ordering::SeqCst), 0);
++    assert!(execution.captured.lock().unwrap().is_empty());
++}
++
++#[tokio::test(start_paused = true)]
++async fn native_image_bridge_revokes_while_waiting_and_cancels_execution() {
++    let fixture = published_fixture().await;
++    let execution = ModelExecution::new(ModelReply::PendingResponse);
++    let router =
++        crate::openai::api_router_with_admin_and_execution(fixture.services, execution.clone());
++    let request = tokio::spawn(router.oneshot(native_image_model_request(r#"{"prompt":"test"}"#)));
++    tokio::time::timeout(
++        std::time::Duration::from_secs(5),
++        execution.entered.notified(),
++    )
++    .await
++    .expect("请求已进入原生 Images 中间件链");
++    *fixture.plugin_ports.instances.lock().unwrap() = Some(vec![]);
++    tokio::time::advance(std::time::Duration::from_secs(1)).await;
++    assert_eq!(
++        request.await.unwrap().unwrap().status(),
++        StatusCode::FORBIDDEN
++    );
++    assert!(
++        execution
++            .cancellation
++            .lock()
++            .unwrap()
++            .as_ref()
++            .unwrap()
++            .is_cancelled()
++    );
++}
+--- a/frontend/src/api/modules/plugins/extensions.ts
++++ b/frontend/src/api/modules/plugins/extensions.ts
+@@ -113,9 +113,28 @@
+   body: string,
+   signal: AbortSignal,
+ ) {
++  return callPluginModel(target, clientKeyId, body, signal, 'responses')
++}
++
++export function callPluginModelImagesGenerate(
++  target: PluginManagementTarget,
++  clientKeyId: string,
++  body: string,
++  signal: AbortSignal,
++) {
++  return callPluginModel(target, clientKeyId, body, signal, 'images/generations')
++}
++
++function callPluginModel(
++  target: PluginManagementTarget,
++  clientKeyId: string,
++  body: string,
++  signal: AbortSignal,
++  endpoint: 'responses' | 'images/generations',
++) {
+   const query = new URLSearchParams({ clientKeyId })
+   return requestStream({
+-    url: `${pluginManagementTargetPath(target)}/models/responses?${query}`,
++    url: `${pluginManagementTargetPath(target)}/models/${endpoint}?${query}`,
+     method: 'POST',
+     data: body,
+     timeout: 0,
+--- a/frontend/src/views/plugins/management/bridge-contract.ts
++++ b/frontend/src/views/plugins/management/bridge-contract.ts
+@@ -49,6 +49,8 @@
+   callbackUrl: string
+ }
+ 
++export type PluginModelOperation = 'responses' | 'images.generate'
++
+ export interface PluginModelRequest {
+   clientKeyId: string
+   body: Record<string, unknown>
+@@ -64,7 +66,10 @@
+   request: (input: PluginManagementRequest) => Promise<PluginManagementReply>
+   callbackTicket: (input: { path: string, ttlSeconds: number }) => Promise<PluginCallbackTicket>
+   resourceUrl: (path: string) => string
+-  readonly models: Readonly<{ responses: (input: PluginModelRequest) => Promise<Response> }>
++  readonly models: Readonly<{
++    responses: (input: PluginModelRequest) => Promise<Response>
++    images: Readonly<{ generate: (input: PluginModelRequest) => Promise<Response> }>
++  }>
+ }
+ 
+ export interface PluginFrameTheme {
+--- a/frontend/src/views/plugins/management/bridge-models.ts
++++ b/frontend/src/views/plugins/management/bridge-models.ts
+@@ -1,4 +1,4 @@
+-import type { PluginModelMessage, PluginModelRequest, PluginPageMessageType } from './bridge-contract'
++import type { PluginModelMessage, PluginModelOperation, PluginModelRequest, PluginPageMessageType } from './bridge-contract'
+ import { hasControlCharacter, MAXIMUM_MODEL_BODY_BYTES, MAXIMUM_MODEL_CHUNK_BYTES, MAXIMUM_MODEL_IN_FLIGHT, MODEL_REQUEST_DEADLINE_MS } from './bridge-contract'
+ 
+ interface ModelOperation {
+@@ -187,11 +187,11 @@
+     }
+   }
+ 
+-  function modelResponses(input: PluginModelRequest): Promise<Response> {
++  function modelRequest(input: PluginModelRequest, modelOperation: PluginModelOperation): Promise<Response> {
+     if (options.isDisposed())
+       return Promise.reject(new Error('Plugin page is closed'))
+     if (!input || typeof input !== 'object' || !input.body || typeof input.body !== 'object' || Array.isArray(input.body))
+-      return Promise.reject(new TypeError('Responses request body must be a JSON object'))
++      return Promise.reject(new TypeError('Model request body must be a JSON object'))
+     if (typeof input.clientKeyId !== 'string' || !input.clientKeyId || input.clientKeyId !== input.clientKeyId.trim() || input.clientKeyId.length > 128 || hasControlCharacter(input.clientKeyId))
+       return Promise.reject(new TypeError('clientKeyId is invalid'))
+     if (input.signal !== undefined && !(input.signal instanceof AbortSignal))
+@@ -205,10 +205,10 @@
+       body = JSON.stringify(input.body)
+     }
+     catch {
+-      return Promise.reject(new TypeError('Responses request body must be JSON serializable'))
++      return Promise.reject(new TypeError('Model request body must be JSON serializable'))
+     }
+     if (typeof body !== 'string' || new TextEncoder().encode(body).byteLength > MAXIMUM_MODEL_BODY_BYTES)
+-      return Promise.reject(new TypeError('Responses request body exceeds 8 MiB'))
++      return Promise.reject(new TypeError('Model request body exceeds 8 MiB'))
+     const id = options.nextRequestId()
+     return new Promise((resolve, reject) => {
+       const operation: ModelOperation = {
+@@ -230,12 +230,13 @@
+       operation.timer = window.setTimeout(() => failModelOperation(operation, new Error('Model request exceeded 10 minutes'), true), MODEL_REQUEST_DEADLINE_MS)
+       modelOperations.set(id, operation)
+       input.signal?.addEventListener('abort', operation.abort, { once: true })
+-      options.post('models-request', id, { clientKeyId: input.clientKeyId, body })
++      options.post('models-request', id, { operation: modelOperation, clientKeyId: input.clientKeyId, body })
+     })
+   }
+ 
+   return {
+-    responses: modelResponses,
++    responses: (input: PluginModelRequest) => modelRequest(input, 'responses'),
++    imagesGenerate: (input: PluginModelRequest) => modelRequest(input, 'images.generate'),
+     handle: handleModelMessage,
+     dispose() {
+       const error = new Error('Plugin page is closed')
+--- a/frontend/src/views/plugins/management/bridge-runtime.ts
++++ b/frontend/src/views/plugins/management/bridge-runtime.ts
+@@ -254,7 +254,10 @@
+     get theme() { return currentTheme },
+     request,
+     callbackTicket,
+-    models: Object.freeze({ responses: modelBridge.responses }),
++    models: Object.freeze({
++      responses: modelBridge.responses,
++      images: Object.freeze({ generate: modelBridge.imagesGenerate }),
++    }),
+     resourceUrl(path: string) {
+       const key = String(path)
+       if (!Object.hasOwn(initial.resourceUrls, key))
+--- a/frontend/src/views/plugins/management/model-streams.ts
++++ b/frontend/src/views/plugins/management/model-streams.ts
+@@ -1,6 +1,6 @@
+ import type { PluginBridgeMessage, PluginModelMessageType } from './bridge-contract'
+ import type { PluginManagementView } from '@/api'
+-import { callPluginModelResponses } from '@/api'
++import { callPluginModelImagesGenerate, callPluginModelResponses } from '@/api'
+ import { t } from '@/i18n'
+ import { errorMessage } from '@/utils/operation'
+ import { hasControlCharacter, isRecord, MAXIMUM_MODEL_BODY_BYTES, MAXIMUM_MODEL_CHUNK_BYTES, MAXIMUM_MODEL_IN_FLIGHT, MODEL_REQUEST_DEADLINE_MS, MODEL_RESPONSE_IDLE_MS } from './bridge-contract'
+@@ -29,6 +29,9 @@
+   function validateModelRequestPayload(payload: unknown) {
+     if (!isRecord(payload))
+       throw new Error(t('plugins.frame.invalidModelRequest'))
++    const operation = payload.operation ?? 'responses'
++    if (operation !== 'responses' && operation !== 'images.generate')
++      throw new Error(t('plugins.frame.invalidModelRequest'))
+     const clientKeyId = payload.clientKeyId
+     const body = payload.body
+     if (
+@@ -51,7 +54,7 @@
+     }
+     if (!isRecord(parsed))
+       throw new Error(t('plugins.frame.modelObjectRequired'))
+-    return { clientKeyId, body }
++    return { operation, clientKeyId, body }
+   }
+ 
+   function supportedModelResponse(response: Response) {
+@@ -151,7 +154,10 @@
+     }, MODEL_REQUEST_DEADLINE_MS)
+ 
+     try {
+-      const response = await callPluginModelResponses(
++      const execute = payload.operation === 'images.generate'
++        ? callPluginModelImagesGenerate
++        : callPluginModelResponses
++      const response = await execute(
+         options.target,
+         payload.clientKeyId,
+         payload.body,

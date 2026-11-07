@@ -23,12 +23,14 @@ function installBridge(config) {
   window.__debugFixture = config.fixtures
   window.__debugScenario = config.scenario || 'large'
   window.__bridgeCalls = []
+  window.__nativeCalls = []
   window.__managementCalls = []
   window.__catalogs = {
     'key-fixture': { models: ['gpt-6-luna'], imageModels: ['gpt-image-2.5-sunburst'] },
     'key-other': { models: ['gpt-6-sol'], imageModels: ['gpt-image-2.6-flare'] },
     'key-empty': { models: [], imageModels: [] },
     'key-text': { models: ['gpt-6-astra'], imageModels: [] },
+    'key-image-only': { models: [], imageModels: ['gpt-image-2.5-flare'] },
   }
   window.__failedCatalogs = []
   window.__heldCatalogs = []
@@ -156,6 +158,40 @@ function installBridge(config) {
       },
     },
   }
+  if (config.nativeBridge !== false) window.codexProxyPlugin.models.images = {
+    generate: async (request) => {
+      window.__nativeCalls.push({ clientKeyId: request.clientKeyId, bodyText: JSON.stringify(request.body) })
+      request.signal.addEventListener('abort', () => { window.__bridgeAborts++ }, { once: true })
+      const mode = window.__debugScenario
+      if (mode === 'native-wait-headers')
+        return new Promise((resolve, reject) => request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true }))
+      const partial = { type: 'image_generation.partial_image', b64_json: fixture.small, partial_image_index: 0, size: '32x24', quality: 'low', output_format: 'png' }
+      const final = { type: 'image_generation.completed', b64_json: fixture.large, size: '768x512', quality: 'high', output_format: 'png', vendor_metadata: { preserved: 'native-unknown-鲸🐋', nested: [0, false] } }
+      const event = value => 'event: ' + value.type + '\r\ndata: ' + JSON.stringify(value) + '\r\n\r\n'
+      let wire = '', type = 'application/json', status = 200
+      if (mode === 'native-sse' || mode === 'native-partial-only' || mode === 'native-wait-stream') {
+        type = 'text/event-stream'
+        wire = event(partial)
+        if (mode === 'native-sse') wire += event(final) + 'data: [DONE]\r\n\r\n'
+      } else if (mode === 'native-error-400' || mode === 'native-error-503') {
+        status = mode === 'native-error-400' ? 400 : 503
+        wire = JSON.stringify({ error: { code: status === 400 ? 'unsupported_parameter' : 'no_available_provider', message: 'Native Images request rejected', details: { upstream: 'images', stage: 'native' } } })
+      } else if (mode === 'native-empty') wire = JSON.stringify({ created: 1713833628, data: [] })
+      else if (mode === 'native-responses-object') wire = JSON.stringify(responseBody([item('wrong-protocol', fixture.small)]))
+      else if (mode === 'native-json-png' || mode === 'native-json-jpeg' || mode === 'native-json-webp' || mode === 'native-large-json') {
+        const key = mode === 'native-json-jpeg' ? 'jpeg' : mode === 'native-json-webp' ? 'webp' : mode === 'native-large-json' ? 'large' : 'small'
+        wire = JSON.stringify({
+          created: 1713833628, model: 'gpt-image-2.5-sunburst', quality: 'high', size: '1152x2048', output_format: 'webp',
+          data: [{ b64_json: fixture[key], revised_prompt: 'native prompt', vendor_result: { preserved: 'native-unknown-鲸🐋', exact: [0, false] } }],
+          usage: { total_tokens: 123 }, vendor_root: { preserved: true },
+        })
+      } else throw new Error('Unknown native fixture mode: ' + mode)
+      window.__wire = wire
+      return new Response(byteStream(wire, mode === 'native-wait-stream'), {
+        status, headers: { 'content-type': type, 'x-request-id': 'req_native_fixture' },
+      })
+    },
+  }
 }
 
 async function waitForCatalog(frame) {
@@ -167,19 +203,19 @@ async function waitForCatalog(frame) {
   throw new Error('Selected Key catalog did not finish loading')
 }
 
-async function openPage(theme = 'light', width = 1360, scenario = 'large') {
+async function openPage(theme = 'light', width = 1360, scenario = 'large', nativeBridge = true) {
   const page = await browser.newPage({ viewport: { width, height: 1000 }, deviceScaleFactor: 1 })
   page.setDefaultTimeout(20000)
   page.on('pageerror', error => failures.push(error.message))
   page.on('console', message => { if (message.type() === 'error') failures.push(message.text()) })
   const csp = "default-src 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data:; font-src data:; media-src data:; connect-src 'none'; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'"
-  const bootstrap = '(' + installBridge.toString() + ')(' + JSON.stringify({ theme, scenario, fixtures }) + ');'
+  const bootstrap = '(' + installBridge.toString() + ')(' + JSON.stringify({ theme, scenario, fixtures, nativeBridge }) + ');'
   const html = source['debug.html']
     .replace('<head>', '<head><meta http-equiv="Content-Security-Policy" content="' + csp + '"><script>' + bootstrap + '</script>')
     .replace('./debug.css', dataUrl('text/css', source['debug.css']))
     .replace('./image-client.js', dataUrl('text/javascript', source['image-client.js']))
     .replace('./debug.js', dataUrl('text/javascript', source['debug.js']))
-  await page.setContent('<!doctype html><html><body style="margin:0"><iframe title="Responses 调试" sandbox="allow-scripts" style="display:block;width:100%;height:2200px;border:0"></iframe></body></html>')
+  await page.setContent('<!doctype html><html><body style="margin:0"><iframe title="图片接口调试" sandbox="allow-scripts" style="display:block;width:100%;height:2200px;border:0"></iframe></body></html>')
   await page.locator('iframe').evaluate((element, value) => { element.srcdoc = value }, html)
   const frame = page.frameLocator('iframe')
   await frame.locator('#debugRun').waitFor()
@@ -202,30 +238,35 @@ async function resize({ page, frame }) {
   return size
 }
 
-async function direct(frame, scenario, body = { model: 'test', stream: false, extra: { keep: [false, 0, 'raw'] } }, cancel = false) {
+async function direct(frame, scenario, body = { model: 'test', stream: false, extra: { keep: [false, 0, 'raw'] } }, cancel = false, operation = 'responses') {
   return frame.locator('main').evaluate(async (main, options) => {
     window.__debugScenario = options.scenario
     const before = window.__bridgeCalls.length
+    const beforeNative = window.__nativeCalls.length
     const originalBody = JSON.stringify(options.body)
     const events = []
     const controller = new AbortController()
     if (options.cancel) setTimeout(() => controller.abort(), 30)
     const result = await window.CPRImageClient.run({
-      clientKeyId: 'key-fixture', body: options.body, signal: controller.signal, captureRaw: true,
+      operation: options.operation, clientKeyId: 'key-fixture', body: options.body, signal: controller.signal, captureRaw: true,
       onEvent(event) { events.push({ type: event.type, event: event.type === 'vendor.custom' ? event.event : null, rawLength: event.raw.length }) },
     })
     return {
       status: result.status, httpStatus: result.httpStatus, error: result.error,
+      operation: result.operation, transport: result.transport, endpoint: result.endpoint, bridgeInvoked: result.bridgeInvoked,
+      responseModel: result.responseModel, imageToolObservations: result.imageToolObservations,
       requestId: result.requestId, responseId: result.responseId, timings: result.timings,
       images: result.images.map(image => ({ itemId: image.itemId, mimeType: image.mimeType, width: image.width, height: image.height })),
+      partialImages: result.partialImages.map(image => ({ mimeType: image.mimeType, width: image.width, height: image.height })),
       events, headers: result.headers, warnings: result.warnings,
-      calls: window.__bridgeCalls.length - before, sent: window.__bridgeCalls.at(-1)?.bodyText,
+      calls: window.__bridgeCalls.length - before, nativeCalls: window.__nativeCalls.length - beforeNative,
+      sent: options.operation === 'images.generate' ? window.__nativeCalls.at(-1)?.bodyText : window.__bridgeCalls.at(-1)?.bodyText,
       aborts: window.__bridgeAborts, cancels: window.__readerCancels,
       capture: { bytes: result.capture.bytes, storedBytes: result.capture.storedBytes, complete: result.capture.complete, truncated: result.capture.truncated },
       rawMatches: result.capture.chunks.join('') === window.__wire,
       sourceUntouched: JSON.stringify(options.body) === originalBody,
     }
-  }, { scenario, body, cancel })
+  }, { scenario, body, cancel, operation })
 }
 
 try {
@@ -465,6 +506,176 @@ try {
     results.push({ scenario: 'debug-' + theme + '-' + width, passed: true, metrics })
     await current.page.close()
   }
+
+  const native = await openPage('light', 1360, 'native-json-webp')
+  const responsesDraft = JSON.stringify({ model: 'gpt-6-luna', input: '保留 Responses 草稿', tools: [{ type: 'image_generation', model: 'gpt-image-2.5-sunburst', size: '1152x2048' }] }, null, 2)
+  await native.frame.locator('#debugBody').fill(responsesDraft)
+  await native.frame.locator('#debugOperation').selectOption('images.generate')
+  const nativeDefault = JSON.parse(await native.frame.locator('#debugBody').inputValue())
+  assert.equal(nativeDefault.model, 'gpt-image-2.5-sunburst')
+  assert.equal(nativeDefault.n, 1)
+  assert.equal(nativeDefault.stream, false, 'Fixed Core native adapter requires non-stream JSON by default')
+  assert.equal(nativeDefault.partial_images, undefined)
+  assert.equal(nativeDefault.tools, undefined)
+  assert.equal(nativeDefault.input, undefined)
+  assert.equal(typeof nativeDefault.prompt, 'string')
+  assert.equal(await native.frame.locator('#debugEndpoint').textContent(), 'POST /v1/images/generations')
+  const rawNative = { model: 'gpt-image-2.5-sunburst', prompt: '鲸🐋', n: 1, size: '1152x2048', quality: 'high', output_format: 'webp', partial_images: 1, stream: true, vendor_option: { untouched: [0, false, 'native'] } }
+  const nativeDraft = JSON.stringify(rawNative, null, 2)
+  await native.frame.locator('#debugBody').fill(nativeDraft)
+  await native.frame.locator('#debugOperation').selectOption('responses')
+  assert.equal(await native.frame.locator('#debugBody').inputValue(), responsesDraft, 'Each route must retain its own exact edited body')
+  await native.frame.locator('#debugOperation').selectOption('images.generate')
+  assert.equal(await native.frame.locator('#debugBody').inputValue(), nativeDraft)
+  await native.frame.locator('#debugBody').fill('')
+  await native.frame.locator('#debugOperation').selectOption('responses')
+  await native.frame.locator('#debugOperation').selectOption('images.generate')
+  assert.equal(await native.frame.locator('#debugBody').inputValue(), '', 'An intentionally cleared draft must also survive route changes')
+  await native.frame.locator('#debugBody').fill(nativeDraft)
+  await native.frame.locator('#debugKey').selectOption('key-image-only')
+  await waitForCatalog(native.frame)
+  assert.equal(await native.frame.locator('#debugBody').inputValue(), nativeDraft, 'Native key changes must retain explicit raw experiments')
+  await native.frame.locator('#debugReset').click()
+  const imageOnlyTemplate = JSON.parse(await native.frame.locator('#debugBody').inputValue())
+  assert.equal(imageOnlyTemplate.model, 'gpt-image-2.5-flare', 'Native templates must not require a dialogue driver')
+  assert.equal(imageOnlyTemplate.stream, false)
+  await native.frame.locator('#debugRun').click()
+  await native.frame.locator('#debugRunState').getByText('完整结束', { exact: true }).waitFor()
+  let routeCalls = await native.frame.locator('main').evaluate(() => ({ responses: window.__bridgeCalls, native: window.__nativeCalls }))
+  assert.equal(routeCalls.responses.length, 0, 'Native generation must never call Responses')
+  assert.equal(routeCalls.native.length, 1)
+  assert.equal(routeCalls.native[0].bodyText, JSON.stringify(imageOnlyTemplate))
+  let nativeSnapshot = JSON.parse(await native.frame.locator('#debugRequestSnapshot').textContent())
+  assert.equal(nativeSnapshot.request.operation, 'images.generate')
+  assert.equal(nativeSnapshot.actualInvocation.transport, 'models.images.generate')
+  assert.equal(nativeSnapshot.actualInvocation.endpoint, '/v1/images/generations')
+  assert.equal(nativeSnapshot.actualInvocation.bridgeInvoked, true)
+  assert.ok(nativeSnapshot.serverReportedParameters.imageToolObservations.some(value => value.source === 'images.response' && value.size === '1152x2048' && value.quality === 'high'))
+  assert.ok((await native.frame.locator('#debugImages').textContent()).includes('32 × 24 · image/webp'), 'Native preview dimensions come from decoded image bytes')
+  await native.frame.locator('#debugOperation').selectOption('responses')
+  assert.equal(await native.frame.locator('#debugBody').inputValue(), responsesDraft)
+  assert.equal(JSON.parse(await native.frame.locator('#debugRequestSnapshot').textContent()).request.operation, 'images.generate', 'Changing editor mode must not relabel the last submitted request')
+  await native.frame.locator('#debugOperation').selectOption('images.generate')
+  await native.frame.locator('#debugKey').selectOption('key-empty')
+  await waitForCatalog(native.frame)
+  assert.equal(await native.frame.locator('#debugBody').inputValue(), '')
+  await native.frame.locator('#debugBody').fill(nativeDraft)
+  assert.equal(await native.frame.locator('#debugRun').isDisabled(), false, 'An empty catalog must not block a handwritten native request')
+  await native.frame.locator('main').evaluate(() => { window.__debugScenario = 'native-sse' })
+  await native.frame.locator('#debugRun').click()
+  await native.frame.locator('#debugRunState').getByText('完整结束', { exact: true }).waitFor()
+  routeCalls = await native.frame.locator('main').evaluate(() => ({ responses: window.__bridgeCalls, native: window.__nativeCalls }))
+  assert.equal(routeCalls.responses.length, 0)
+  assert.equal(routeCalls.native.length, 2, 'Each explicit click must issue exactly one native request')
+  assert.equal(routeCalls.native.at(-1).bodyText, JSON.stringify(rawNative), 'Native size/quality/model/stream/unknown fields must be forwarded unchanged')
+  assert.equal(await native.frame.locator('#debugImages img').count(), 1, 'Partial frames must not become additional final images')
+  assert.ok((await native.frame.locator('#debugImages').textContent()).includes('768 × 512 · image/png'), 'Actual MIME must win over requested WebP')
+  await native.frame.locator('#debugExport').click()
+  const nativeExport = JSON.parse(await native.frame.locator('#debugExportText').inputValue())
+  assert.equal(nativeExport.format, 'cpr-management-image-debug-v2')
+  assert.equal(nativeExport.operation, 'images.generate')
+  assert.equal(nativeExport.intendedRoute.bridgeMethod, 'models.images.generate')
+  assert.deepEqual(nativeExport.actualInvocation, { bridgeInvoked: true, transport: 'models.images.generate', endpoint: '/v1/images/generations' })
+  assert.deepEqual(nativeExport.request.body, rawNative)
+  assert.equal(nativeExport.completeCapture, true)
+  assert.ok(nativeExport.rawResponse.includes(fixtures.large))
+  assert.ok(nativeExport.rawResponse.includes(fixtures.small))
+  assert.ok(nativeExport.rawResponse.includes('native-unknown-鲸🐋'))
+  assert.ok(nativeExport.rawResponse.includes('image_generation.partial_image'))
+  assert.ok(nativeExport.rawResponse.includes('image_generation.completed'))
+  await native.frame.locator('#debugCloseExport').click()
+  const nativeSize = await resize(native)
+  await native.page.screenshot({ path: path.join(output, 'debug-native-light-1360.png'), fullPage: true })
+  results.push({ scenario: 'independent-native-route-drafts-image-only-key-unchanged-body-full-export', passed: true, metrics: nativeSize })
+
+  for (const [scenario, mime, width, height] of [
+    ['native-json-png', 'image/png', 32, 24],
+    ['native-json-jpeg', 'image/jpeg', 32, 24],
+    ['native-json-webp', 'image/webp', 32, 24],
+    ['native-large-json', 'image/png', 768, 512],
+  ]) {
+    const current = await direct(native.frame, scenario, rawNative, false, 'images.generate')
+    assert.equal(current.status, 'completed', 'Native JSON does not use Responses status:completed')
+    assert.equal(current.nativeCalls, 1)
+    assert.equal(current.calls, 0)
+    assert.equal(current.sourceUntouched, true)
+    assert.equal(current.rawMatches, true)
+    assert.equal(current.sent, JSON.stringify(rawNative))
+    assert.deepEqual(current.images.map(image => [image.mimeType, image.width, image.height]), [[mime, width, height]])
+    assert.equal(current.requestId, 'req_native_fixture')
+    assert.equal(current.capture.complete, true)
+    results.push({ scenario, passed: true })
+  }
+  const nativeSse = await direct(native.frame, 'native-sse', rawNative, false, 'images.generate')
+  assert.equal(nativeSse.status, 'completed')
+  assert.equal(nativeSse.images.length, 1)
+  assert.equal(nativeSse.partialImages.length, 0)
+  assert.ok(nativeSse.events.some(event => event.type === 'image_generation.partial_image'))
+  assert.ok(nativeSse.events.some(event => event.type === 'image_generation.completed' && event.rawLength > 1024 * 1024))
+  assert.equal(nativeSse.rawMatches, true)
+  assert.equal(nativeSse.nativeCalls, 1)
+  assert.equal(nativeSse.calls, 0)
+  const partialOnly = await direct(native.frame, 'native-partial-only', rawNative, false, 'images.generate')
+  assert.equal(partialOnly.status, 'incomplete')
+  assert.equal(partialOnly.error.code, 'missing_completion')
+  assert.equal(partialOnly.images.length, 0)
+  assert.deepEqual(partialOnly.partialImages, [{ mimeType: 'image/png', width: 32, height: 24 }])
+  for (const scenario of ['native-empty', 'native-responses-object']) {
+    const rejectedProtocol = await direct(native.frame, scenario, rawNative, false, 'images.generate')
+    assert.equal(rejectedProtocol.status, 'incomplete', 'A Responses-shaped or empty document is not native success')
+    assert.equal(rejectedProtocol.images.length, 0)
+    assert.equal(rejectedProtocol.calls, 0)
+  }
+  results.push({ scenario: 'native-sse-large-completion-partial-only-and-protocol-separation', passed: true })
+  for (const scenario of ['native-error-400', 'native-error-503']) {
+    const rejectedNative = await direct(native.frame, scenario, rawNative, false, 'images.generate')
+    assert.equal(rejectedNative.status, 'failed')
+    assert.equal(rejectedNative.error.kind, 'http')
+    assert.equal(rejectedNative.nativeCalls, 1)
+    assert.equal(rejectedNative.calls, 0, 'Native HTTP failures must not trigger a Responses fallback')
+    assert.equal(rejectedNative.sent, JSON.stringify(rawNative))
+    results.push({ scenario, passed: true })
+  }
+  for (const scenario of ['native-wait-headers', 'native-wait-stream']) {
+    const canceledNative = await direct(native.frame, scenario, rawNative, true, 'images.generate')
+    assert.equal(canceledNative.status, 'canceled')
+    assert.equal(canceledNative.nativeCalls, 1)
+    assert.equal(canceledNative.calls, 0)
+    assert.equal(canceledNative.capture.complete, false)
+    results.push({ scenario, passed: true })
+  }
+  const unknownOperation = await direct(native.frame, 'native-json-webp', rawNative, false, 'unknown')
+  assert.equal(unknownOperation.error.code, 'invalid_operation')
+  assert.equal(unknownOperation.nativeCalls, 0)
+  assert.equal(unknownOperation.calls, 0)
+  assert.equal(unknownOperation.transport, null)
+  assert.equal(unknownOperation.bridgeInvoked, false)
+  await native.page.close()
+
+  const oldCore = await openPage('light', 420, 'json-png', false)
+  await oldCore.frame.locator('#debugOperation').selectOption('images.generate')
+  await oldCore.frame.locator('#debugBody').fill(nativeDraft)
+  assert.equal(await oldCore.frame.locator('#debugRun').isDisabled(), true)
+  assert.equal(await oldCore.frame.locator('#debugBody').getAttribute('readonly'), null)
+  assert.ok((await oldCore.frame.locator('#debugCapability').textContent()).includes('当前 Core 缺少 models.images.generate'))
+  const unavailable = await direct(oldCore.frame, 'native-json-webp', rawNative, false, 'images.generate')
+  assert.equal(unavailable.status, 'failed')
+  assert.equal(unavailable.error.code, 'images_bridge_unavailable')
+  assert.equal(unavailable.calls, 0)
+  assert.equal(unavailable.nativeCalls, 0)
+  assert.equal(unavailable.transport, null)
+  assert.equal(unavailable.endpoint, null)
+  assert.equal(unavailable.bridgeInvoked, false)
+  const oldCoreSize = await resize(oldCore)
+  await oldCore.page.screenshot({ path: path.join(output, 'debug-native-unavailable-420.png'), fullPage: true })
+  await oldCore.frame.locator('#debugOperation').selectOption('responses')
+  await oldCore.frame.locator('main').evaluate(() => { window.__debugScenario = 'json-png' })
+  await oldCore.frame.locator('#debugRun').click()
+  await oldCore.frame.locator('#debugRunState').getByText('完整结束', { exact: true }).waitFor()
+  assert.equal(await oldCore.frame.locator('main').evaluate(() => window.__nativeCalls.length), 0)
+  await oldCore.page.close()
+  results.push({ scenario: 'old-core-explicit-native-capability-missing-zero-dispatch-responses-preserved', passed: true, metrics: oldCoreSize })
+
   assert.deepEqual(failures, [], 'Actual sandbox assets must have no JS/CSP errors')
 } finally {
   await browser.close()

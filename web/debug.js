@@ -4,6 +4,7 @@
   const byId = id => document.getElementById(id);
   const client = window.CPRImageClient;
   const ui = {
+    operation: byId('debugOperation'), endpoint: byId('debugEndpoint'), capability: byId('debugCapability'), operationHelp: byId('debugOperationHelp'),
     key: byId('debugKey'), refresh: byId('debugRefresh'), models: byId('debugModels'),
     template: byId('debugTemplate'), reset: byId('debugReset'), format: byId('debugFormat'),
     body: byId('debugBody'), bodySize: byId('debugBodySize'), run: byId('debugRun'),
@@ -26,9 +27,53 @@
     failed: '调用失败', canceled: '已取消'
   };
   const stateLabels = { completed: '完整结束', incomplete: '未完整结束', failed: '失败', canceled: '已取消' };
-  let bootstrap = null, controller = null, latest = null, currentRequest = null, currentHeaders = null;
+  let bootstrap = null, controller = null, latest = null, currentRequest = null, currentHeaders = null, currentTransport = null;
   let elapsedTimer = null, loadingKeys = false, loadingCatalog = false, closed = false, visibleEvents = [];
   let modelCatalog = null, catalogKey = '', catalogRequest = 0, generatedTemplate = '';
+  let operation = 'responses';
+  const drafts = new Map();
+  const templateOptions = {
+    responses: [['v051', 'v0.5.1 生图模板'], ['text', '最小文本请求']],
+    'images.generate': [['images-json', 'Images 原生 JSON'], ['images-stream', 'Images 流式实验']]
+  };
+  function target() { return client.operations[operation]; }
+  function operationInformation() {
+    const current = target();
+    const supported = client.supports(operation);
+    ui.endpoint.textContent = 'POST ' + current.endpoint;
+    ui.capability.textContent = supported ? '宿主已提供 ' + current.bridgeMethod
+      : '当前 Core 缺少 ' + current.bridgeMethod + '，需要安装带此管理桥能力的 Core 后运行；正文仍可编辑。';
+    ui.capability.classList.toggle('unavailable', !supported);
+    ui.operationHelp.textContent = operation === 'images.generate'
+      ? '独立 Images 接口：顶层 model / prompt / size，不经过对话模型。默认非流式 JSON；手动填写 stream:true 可实验，当前 Core 可能不支持。'
+      : 'Responses 接口：顶层 model 是对话主控，图片模型与尺寸放在 tools 中的 image_generation。两种通路分别保留编辑内容。';
+    ui.body.placeholder = operation === 'images.generate' ? '粘贴完整 Images JSON 对象' : '粘贴完整 Responses JSON 对象';
+  }
+  function switchOperation(next) {
+    if (controller || !client.operations[next] || next === operation) return;
+    drafts.set(operation, { body: ui.body.value, generatedTemplate, template: ui.template.value, key: ui.key.value });
+    operation = next;
+    const saved = drafts.get(next);
+    ui.template.replaceChildren();
+    for (const [value, label] of templateOptions[next]) {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = label; ui.template.appendChild(option);
+    }
+    if (saved) ui.template.value = saved.template;
+    ui.body.value = saved?.body || '';
+    generatedTemplate = saved?.generatedTemplate || '';
+    let templateError = '';
+    if (!saved || saved.key !== ui.key.value && generatedTemplate && ui.body.value === generatedTemplate) {
+      ui.body.value = ''; generatedTemplate = '';
+      if (modelCatalog && catalogKey === ui.key.value) {
+        try { loadTemplate(); }
+        catch (error) { templateError = error.message + ' 仍可手工输入本通路 JSON。'; }
+      }
+    }
+    controls();
+    notice(templateError || '已切换至 ' + target().label + '，保留各自编辑稿。' + (client.supports(operation)
+      ? '检查正文后点击运行。' : '当前 Core 尚未公开此通路，未发送任何请求。'), !!templateError || !client.supports(operation));
+  }
   const bytes = value => value >= 1024 * 1024 ? (value / 1024 / 1024).toFixed(2) + ' MiB'
     : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : value + ' B';
   const duration = value => Number.isFinite(value) ? (value / 1000).toFixed(2) + ' s' : '—';
@@ -43,7 +88,7 @@
   }
   function controls() {
     const active = controller !== null;
-    ui.run.disabled = active || loadingKeys || loadingCatalog || !ui.key.value || !ui.body.value.trim() || !window.codexProxyPlugin?.models?.responses;
+    ui.run.disabled = active || loadingKeys || loadingCatalog || !ui.key.value || !ui.body.value.trim() || !client.supports(operation);
     ui.cancel.disabled = !active;
     ui.key.disabled = active || loadingKeys;
     ui.refresh.disabled = active || loadingKeys;
@@ -51,6 +96,8 @@
     ui.reset.disabled = active || loadingKeys || loadingCatalog;
     ui.format.disabled = active;
     ui.template.disabled = active;
+    ui.operation.disabled = active;
+    operationInformation();
     ui.body.readOnly = active;
     ui.export.disabled = active || !latest;
     ui.bodySize.textContent = bytes(new TextEncoder().encode(ui.body.value).byteLength) + ' / 8 MiB';
@@ -71,18 +118,25 @@
   }
   function template() {
     if (!modelCatalog || catalogKey !== ui.key.value) throw new Error('请先读取所选 Key 的模型目录。');
+    const images = (Array.isArray(modelCatalog.imageModels) ? modelCatalog.imageModels : [])
+      .filter(model => typeof model === 'string' && model.startsWith('gpt-image-'));
+    const imageModel = ['gpt-image-2.5-sunburst', 'gpt-image-2.6-sunburst'].find(model => images.includes(model)) || images[0];
+    const prompt = '一只白色鹈鹕骑着橙色自行车，晴朗的海边小路，精致插画。';
+    if (operation === 'images.generate') {
+      if (!imageModel) throw new Error('所选 Key 的目录没有图片模型，无法生成 Images 模板。');
+      const body = { model: imageModel, prompt, n: 1, size: '1024x1024', quality: 'auto', output_format: 'webp', stream: false };
+      if (ui.template.value === 'images-stream') { body.stream = true; body.partial_images = 1; }
+      return body;
+    }
     const drivers = (Array.isArray(modelCatalog.models) ? modelCatalog.models : [])
       .filter(model => typeof model === 'string' && model && !model.startsWith('gpt-image-'));
     const driver = ['gpt-6-luna', 'gpt-5.6-luna', bootstrap?.driverModel].find(model => drivers.includes(model)) || drivers[0];
     if (!driver) throw new Error('所选 Key 的目录没有可用的对话模型，无法生成 Responses 模板。');
     if (ui.template.value === 'text') return { model: driver, stream: true, store: false, input: '仅回复 OK。' };
-    const images = (Array.isArray(modelCatalog.imageModels) ? modelCatalog.imageModels : [])
-      .filter(model => typeof model === 'string' && model.startsWith('gpt-image-'));
-    const imageModel = ['gpt-image-2.5-sunburst', 'gpt-image-2.6-sunburst'].find(model => images.includes(model)) || images[0];
     if (!imageModel) throw new Error('所选 Key 的目录没有可用的图片模型。可以选择纯文本模板检查 Responses 通路。');
     return {
       model: driver, stream: true, store: false,
-      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '一只白色鹈鹕骑着橙色自行车，晴朗的海边小路，精致插画。' }] }],
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }],
       instructions: 'Use image_generation to create exactly one image corresponding closely to the user instruction. Preserve its original language and visual constraints.',
       tools: [{ type: 'image_generation', model: imageModel, action: 'auto', size: '1024x1024', quality: 'auto', output_format: 'png' }],
       tool_choice: 'auto', parallel_tool_calls: false, include: ['reasoning.encrypted_content']
@@ -170,7 +224,10 @@
   }
   function renderSnapshot() {
     ui.snapshot.textContent = JSON.stringify(client.redact({
-      submittedTo: 'CPR 管理桥 models.responses',
+      submittedTo: currentTransport ? 'CPR 管理桥 ' + currentTransport.transport : '尚未调用管理桥',
+      intendedRoute: currentRequest ? client.operations[currentRequest.operation] : null,
+      actualInvocation: currentTransport || { bridgeInvoked: false, transport: null, endpoint: null },
+      endpointMeaning: 'API 合同路径；不代表最终上游 URL 或上游原始字节',
       request: currentRequest,
       response: currentHeaders,
       serverReportedParameters: serverParameters(latest)
@@ -236,7 +293,7 @@
       image.alt = '管理桥返回的第 ' + (index + 1) + ' 张图片';
       const caption = document.createElement('figcaption');
       const information = document.createElement('span');
-      information.textContent = value.width + ' × ' + value.height + ' · ' + value.mimeType;
+      information.textContent = (value.partial ? '部分图片 · 尚未完成 · ' : '') + value.width + ' × ' + value.height + ' · ' + value.mimeType;
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'text-button';
@@ -267,7 +324,7 @@
         upstreamStage: result.error.upstreamStage, details: result.error.details
       }, { maxString: 8000, maxItems: 100 }), null, 2);
     }
-    renderImages(result.images);
+    renderImages(result.images.length ? result.images : (result.partialImages || []).map(image => ({ ...image, partial: true })));
     const capture = result.capture;
     const complete = capture && capture.complete && !capture.truncated;
     ui.captureState.textContent = (complete ? '响应内容已完整捕获' : '仅捕获部分响应')
@@ -277,10 +334,11 @@
       + (result.warnings.length ? ' · ' + result.warnings.join('；') : '');
     if (result.error?.code === 'no_available_provider') {
       const model = currentRequest?.body?.model;
-      const listed = catalogKey === currentRequest?.clientKeyId && Array.isArray(modelCatalog?.models)
-        ? modelCatalog.models.includes(model) : null;
+      const native = currentRequest?.operation === 'images.generate';
+      const models = native ? modelCatalog?.imageModels : modelCatalog?.models;
+      const listed = catalogKey === currentRequest?.clientKeyId && Array.isArray(models) ? models.includes(model) : null;
       notice(listed === false
-        ? '提交的主控模型未出现在所选 Key 的模型目录中。可点击“载入模板”选取可用模型；本次 JSON 已保留。'
+        ? '提交的' + (native ? '图片' : '主控') + '模型未出现在所选 Key 的模型目录中。可点击“载入模板”选取可用模型；本次 JSON 已保留。'
         : '宿主未找到可用的 Provider。请核对该 Key 的模型授权、账号状态及额度规则；本次响应尚不能确定具体原因。', true);
     } else {
       notice(result.status === 'completed' ? '本次管理桥响应完整结束。' : '本次状态：' + (stateLabels[result.status] || result.status) + '。可查看错误字段或导出诊断。',
@@ -295,7 +353,8 @@
     controller = new AbortController();
     latest = null;
     currentHeaders = null;
-    currentRequest = { clientKeyId: ui.key.value, body };
+    currentTransport = null;
+    currentRequest = { operation, clientKeyId: ui.key.value, body };
     visibleEvents = [];
     ui.events.replaceChildren();
     ui.eventCount.textContent = '0';
@@ -315,14 +374,15 @@
     ui.state.className = 'state-badge running';
     renderSnapshot();
     controls();
-    notice('本次请求正在执行；参数已按当前 JSON 提交，不会自动重试。');
+    notice('正在调用 ' + target().bridgeMethod + '；参数按当前 JSON 提交，不会自动重试或切换通路。');
     const began = performance.now();
     elapsedTimer = setInterval(() => { if (!closed) ui.total.textContent = duration(performance.now() - began); }, 100);
     try {
       latest = await client.run({
-        clientKeyId: currentRequest.clientKeyId, body, signal: controller.signal, captureRaw: true,
+        operation: currentRequest.operation, clientKeyId: currentRequest.clientKeyId, body, signal: controller.signal, captureRaw: true,
         onPhase: appendPhase,
         onEvent: appendEvent,
+        onTransport(value) { currentTransport = value; if (!closed) renderSnapshot(); },
         onHeaders(value) {
           if (closed) return;
           currentHeaders = value;
@@ -349,7 +409,11 @@
     const capture = latest.capture;
     const complete = !!capture?.complete && !capture?.truncated;
     const document = {
-      format: 'cpr-management-responses-debug-v1',
+      format: 'cpr-management-image-debug-v2',
+      operation: latest.operation,
+      intendedRoute: client.operations[currentRequest.operation],
+      actualInvocation: { bridgeInvoked: latest.bridgeInvoked, transport: latest.transport, endpoint: latest.endpoint },
+      endpointMeaning: 'API 合同路径；不代表最终上游 URL 或上游原始字节',
       source: '提交给 CPR 管理桥的 JSON 与管理桥返回的响应；不是上游字节抓包',
       startedAt: new Date(latest.startedAtMs).toISOString(),
       completeCapture: complete,
@@ -362,6 +426,7 @@
       error: client.redact(latest.error),
       warnings: latest.warnings,
       images: latest.images.map(image => ({ itemId: image.itemId, mimeType: image.mimeType, width: image.width, height: image.height, base64Characters: image.base64.length })),
+      partialImages: (latest.partialImages || []).map(image => ({ itemId: image.itemId, mimeType: image.mimeType, width: image.width, height: image.height, base64Characters: image.base64.length })),
       capturedBytes: capture?.storedBytes || 0,
       rawResponse: client.redactText((capture?.chunks || []).join(''))
     };
@@ -384,6 +449,7 @@
     ui.copyState.textContent = copied ? '已复制。可粘贴到本地文件保存。' : '文本已全选，请按 Ctrl+C（macOS 使用 Command+C）复制。';
   }
 
+  ui.operation.addEventListener('change', () => switchOperation(ui.operation.value));
   ui.refresh.addEventListener('click', () => { void refreshKeys(); });
   ui.models.addEventListener('click', () => { if (!controller) void loadCatalog(true); });
   ui.reset.addEventListener('click', () => {

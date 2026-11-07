@@ -3,7 +3,7 @@ name: Build CPR image bridge plugin
 on:
   push:
     branches:
-      - builds/cpr-image-bridge-v0.7.7-official
+      - builds/cpr-image-bridge-v0.7.8-official
   workflow_dispatch:
 
 permissions:
@@ -61,14 +61,14 @@ jobs:
           test -f host-contract-test.log || printf 'host contract test did not start\n' > host-contract-test.log
           printf 'source_commit=%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/host-contract-result.txt"
           tail -n 300 host-contract-test.log >> "$RUNNER_TEMP/host-contract-result.txt"
-          git checkout --orphan logs/cpr-image-bridge-v0.7.7-official-host-contract
+          git checkout --orphan logs/cpr-image-bridge-v0.7.8-official-host-contract
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/host-contract-result.txt" ./test-output.txt
           git add -- test-output.txt
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'ci: record official host image contract result'
-          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.7-official-host-contract
+          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.8-official-host-contract
 
   package:
     strategy:
@@ -122,14 +122,14 @@ jobs:
           set -euo pipefail
           test -f cargo-test.log || printf 'cargo test did not start\n' > cargo-test.log
           tail -n 300 cargo-test.log > "$RUNNER_TEMP/test-output.txt"
-          git checkout --orphan 'logs/cpr-image-bridge-v0.7.7-official-${{ matrix.target }}'
+          git checkout --orphan 'logs/cpr-image-bridge-v0.7.8-official-${{ matrix.target }}'
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/test-output.txt" ./test-output.txt
           git add -- test-output.txt
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'ci: capture image bridge cargo failure'
-          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.7-official-${{ matrix.target }}
+          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.8-official-${{ matrix.target }}
       - name: Build release executable
         run: cargo build --locked --release --target '${{ matrix.target }}'
       - name: Build official plugin packaging CLI
@@ -182,8 +182,154 @@ jobs:
             dist/debug-ui-qa/*.png
           if-no-files-found: ignore
 
+  native-images-core:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUST_MIN_STACK: 16777216
+      CPR_VERSION: '3.42.0-imagebridge.0.7.8'
+      CPR_GIT_SHA: 'ca5901ba568ab398948dcf32239854337c6928dc'
+      CPR_BUILD_TYPE: 'development'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the compatible current official Core
+        uses: actions/checkout@v4
+        with:
+          repository: zyycn/codex-proxy-rs
+          ref: ca5901ba568ab398948dcf32239854337c6928dc
+          path: native-host
+      - name: Configure matching Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26.13.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '12.6.0'
+          run_install: false
+      - name: Cache native Core Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native-host/backend
+          key: native-images-core-ca5901ba
+      - name: Apply the exact-base Core bridge patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 core-patches/native-images/apply.py native-host 2>&1 | tee native-core-test.log
+          git -C native-host diff --check
+      - name: Build the matching Core web application
+        working-directory: native-host/frontend
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile
+          pnpm typecheck 2>&1 | tee -a ../../native-core-test.log
+          pnpm build 2>&1 | tee -a ../../native-core-test.log
+      - name: Validate the iframe bridge contract
+        shell: bash
+        run: |
+          set -o pipefail
+          node core-patches/native-images/verify-bridge.mjs native-host 2>&1 | tee -a native-core-test.log
+      - name: Test real Core authorization and native Images routing
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --manifest-path native-host/backend/Cargo.toml -- --check 2>&1 | tee -a native-core-test.log
+          cargo test --locked --manifest-path native-host/backend/Cargo.toml \
+            -p gateway-api --test main admin::plugins::management -- --nocapture \
+            2>&1 | tee -a native-core-test.log
+          cargo test --locked --manifest-path native-host/backend/Cargo.toml \
+            -p gateway-api --test main openai::images -- --nocapture \
+            2>&1 | tee -a native-core-test.log
+      - name: Confirm native bridge tests actually executed
+        run: |
+          python3 - <<'PY'
+          import pathlib, re
+          text = pathlib.Path("native-core-test.log").read_text(encoding="utf-8", errors="replace")
+          required = [
+              "native_image_bridge_preserves_provider_bytes_and_commits_large_json_once",
+              "native_image_bridge_does_not_rewrite_stream_or_unknown_parameters",
+              "native_image_bridge_preserves_explicit_turn_header",
+              "native_image_bridge_keeps_request_policy_in_the_execution_chain",
+              "native_image_bridge_requires_admin_target_and_explicit_key_authorization",
+              "native_image_bridge_revokes_while_waiting_and_cancels_execution",
+          ]
+          for name in required:
+              assert re.search(r"^test admin::plugins::management::" + name + r" \.\.\. ok$", text, re.M), name
+          assert re.search(r"^test openai::images::.+ \.\.\. ok$", text, re.M), "native Images HTTP tests did not execute"
+          print("Verified named native bridge and Images endpoint tests executed successfully")
+          PY
+      - name: Build the matching Core test binary
+        working-directory: native-host/backend
+        shell: bash
+        run: |
+          set -o pipefail
+          CPR_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            cargo build --release --locked --bin codex-proxy-rs \
+            2>&1 | tee -a ../../native-core-test.log
+      - name: Package an identified Core test bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native-core-bundle/web native-core-dist
+          cp native-host/backend/target/release/codex-proxy-rs native-core-bundle/codex-proxy-rs
+          cp -R native-host/frontend/dist native-core-bundle/web/dist
+          cp core-patches/native-images/README.md native-core-bundle/CORE-BRIDGE-README.md
+          python3 - <<'PY'
+          import json, os, pathlib
+          source = {
+            "kind": "core-native-images-test-bundle",
+            "officialCoreBase": "ca5901ba568ab398948dcf32239854337c6928dc",
+            "pluginSourceCommit": os.environ["GITHUB_SHA"],
+            "workflowRunId": os.environ["GITHUB_RUN_ID"],
+            "target": "x86_64-unknown-linux-gnu",
+            "deployment": "Deploy binary and web/dist together only to a compatible test instance; preserve existing data, configuration and official plugin resources. This is not an official full Core release or a production downgrade instruction."
+          }
+          pathlib.Path("native-core-bundle/SOURCE.json").write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8")
+          PY
+          tar -C native-core-bundle -czf native-core-dist/cpr-core-native-images-ca5901ba-linux-amd64.tar.gz .
+          (cd native-core-dist && sha256sum cpr-core-native-images-ca5901ba-linux-amd64.tar.gz > cpr-core-native-images-ca5901ba-linux-amd64.tar.gz.sha256)
+      - name: Upload Core bridge test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpr-native-images-core-linux-amd64
+          path: native-core-dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Core bridge build and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-images-core-evidence
+          path: native-core-test.log
+          if-no-files-found: ignore
+
+      - name: Publish bounded Core bridge diagnostic log
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f native-core-test.log || printf 'Core bridge build did not start\n' > native-core-test.log
+          printf 'source_commit=%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/native-core-result.txt"
+          tail -n 400 native-core-test.log >> "$RUNNER_TEMP/native-core-result.txt"
+          git checkout --orphan logs/cpr-image-bridge-v0.7.8-native-core
+          git rm -rf . >/dev/null 2>&1 || true
+          cp "$RUNNER_TEMP/native-core-result.txt" ./test-output.txt
+          git add -- test-output.txt
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'ci: record native Images Core bridge result'
+          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.8-native-core
+
   collect:
-    needs: [package, host-contract, browser-ui]
+    needs: [package, host-contract, browser-ui, native-images-core]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -195,11 +341,17 @@ jobs:
           pattern: cpr-image-bridge-*
           path: dist
           merge-multiple: true
+      - name: Download matching Core test bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: cpr-native-images-core-linux-amd64
+          path: dist
       - name: Verify packages and hashes
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" = 3
+          test "$(find dist -maxdepth 1 -name 'community.codex-image-bridge-*.tar.gz' | wc -l)" = 3
+          test -f dist/cpr-core-native-images-ca5901ba-linux-amd64.tar.gz
           for checksum in dist/*.sha256; do
             ( cd dist && sha256sum -c "$(basename "$checksum")" )
           done
@@ -211,11 +363,11 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/ci-packages"
           cp dist/* "$RUNNER_TEMP/ci-packages/"
-          git checkout --orphan compiled/cpr-image-bridge-v0.7.7-official
+          git checkout --orphan compiled/cpr-image-bridge-v0.7.8-official
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/ci-packages/"* .
           git add -- *.tar.gz *.sha256
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -m 'build: publish image bridge v0.7.7 packages'
-          git push --force origin HEAD:refs/heads/compiled/cpr-image-bridge-v0.7.7-official
+              commit -m 'build: publish image bridge v0.7.8 packages'
+          git push --force origin HEAD:refs/heads/compiled/cpr-image-bridge-v0.7.8-official

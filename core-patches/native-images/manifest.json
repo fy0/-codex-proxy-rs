@@ -1,0 +1,54 @@
+{
+  "baseCommit": "ca5901ba568ab398948dcf32239854337c6928dc",
+  "sourceRepository": "https://github.com/zyycn/codex-proxy-rs",
+  "files": {
+    "backend/crates/gateway-api/src/admin/plugins/management.rs": {
+      "before": "c442b1e65f92bd59937314dd0bca9d2555b3a3c9675d8c441f91443b842e63a1",
+      "after": "05a9d800693a392eed34b6dbdbe0f1f26f6caef35fb69cbecea71f5be92daec3"
+    },
+    "backend/crates/gateway-api/src/openai/endpoint.rs": {
+      "before": "68548e6dd1e05ac43c2af90da093297e28c4b2281185a0fa44f4975b7bc3ede8",
+      "after": "5b29c3ef38fcc3e0fe1d75869e40a9a2667add49993c24a35ed920d64f4d6a31"
+    },
+    "backend/crates/gateway-api/src/openai/images/http.rs": {
+      "before": "35e27606f8740703da3bfa8bca1badfdfe5af20e5598a0012aa5abade22118cd",
+      "after": "7de04bbf80c8634398979f50c2a37ffff4249f1623d0346421f78b586950ecd7"
+    },
+    "backend/crates/gateway-api/src/openai/images/mod.rs": {
+      "before": "ae58e84e95395784f19c1d75ca3ffdda834cbd74fa9d96cbff62bfda9e8cadd8",
+      "after": "07e510ceab33059b2f398a2037a343b660412756eb290406c57a4d21036afe1d"
+    },
+    "backend/crates/gateway-api/src/openai/responses/http.rs": {
+      "before": "a59ffd39f053f4265653098fc88989d10e3b64e3157731586f11d28b7fcacf94",
+      "after": "1f0f1a5eab0e7433d62af643ce0f6e204493d078ba9e10f8423cb0233bf7b545"
+    },
+    "backend/crates/gateway-api/src/openai/responses/mod.rs": {
+      "before": "592fde3eb5e8fa1c4ea07dabcecef64a60f54df76fc0cfe2e6edc9a7b0e2c489",
+      "after": "6f7039dfa15a32cb8ef48f39330cbb2dc0631aa2517ca6f4214e0efd9e6ede42"
+    },
+    "backend/crates/gateway-api/tests/admin/plugins/management.rs": {
+      "before": "c284f910283e47147342a533fd2271e9657e3adb4f8a424ae786f7f72b1a99f7",
+      "after": "1ed526015d622995af43211df97c40ea26a01a91163d0ec51a989b9f55bb9059"
+    },
+    "frontend/src/api/modules/plugins/extensions.ts": {
+      "before": "bd49cc3ef4fb0e1d39220f7f25c7c386a303a285911252a41b61b719c4f78c89",
+      "after": "bf08a6da088dc7bb301ad436d341f6293f77ad1dbf803f1adca2028f6684292f"
+    },
+    "frontend/src/views/plugins/management/bridge-contract.ts": {
+      "before": "1da9c9fce25882d304ac8a40a95f7b0c680be53c5f1e79256e57489d7805415c",
+      "after": "03f0082a796a68507fc3ad0551cbeeafe1dff80c47819b3a7dedfd2c0157154c"
+    },
+    "frontend/src/views/plugins/management/bridge-models.ts": {
+      "before": "d9fc60ebd2ad2d4ca65d34f0c267245e479492762a3eabf48cb85947842945e2",
+      "after": "b67c7a6d1fc3c7bf036c03468e5bcca462d2c7fbd5c874ffef19b83dc19ffcce"
+    },
+    "frontend/src/views/plugins/management/bridge-runtime.ts": {
+      "before": "b0386c0bbe7865e7d9601d516295c716ab67571ff3fe5ce695293671c11ad453",
+      "after": "7721e14b75cf818f30b189e662363735fbd2795436dd1ec745ab35a8d3c13f39"
+    },
+    "frontend/src/views/plugins/management/model-streams.ts": {
+      "before": "594856d0df3106c6d0f96a8c3a1cf8110cb8ecbf48c79728a9d2a1841214a2ec",
+      "after": "34b4a9a8f54e5aac7aba8b9468fc2b2678f23325b0dbb3a69b380a4f0c689ccb"
+    }
+  }
+}
