@@ -76,7 +76,7 @@ python core-patches/native-images/apply.py native-host
 固定基线工具链为 Rust `1.99.1`、Node `26.13.0`、pnpm `12.6.0`。Windows 开发机磁盘限制下仅生成补丁、执行 Node 合同测试及 rustfmt；Cargo 编译和测试由 GitHub Actions 完成。
 
 ```bash
-cargo fmt --manifest-path native-host/backend/Cargo.toml -- --check
+cargo fmt --manifest-path native-host/backend/Cargo.toml -p gateway-api -- --check
 
 RUST_MIN_STACK=16777216 cargo test --manifest-path native-host/backend/Cargo.toml \
   -p gateway-api --test main admin::plugins::management --locked
