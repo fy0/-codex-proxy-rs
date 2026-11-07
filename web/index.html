@@ -113,6 +113,7 @@
           </select>
         </div>
       </div>
+      <p class="field-note">尺寸按所选值提交。当前 Codex 上游可能回报 auto 并返回其他尺寸；2K / 4K 尚未在该通道验收。结果会显示实际像素和服务端参数，不自动放大图片。</p>
       <div class="two-up">
         <div><label for="batchCount">本次张数</label><select id="batchCount">
           <option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option>
@@ -140,7 +141,7 @@
       <div id="validationMessage" class="notice" role="status"></div>
       <div id="backendNotice" class="notice" role="status"></div>
     </section>
-    <section class="panel results" aria-label="异步生成任务">
+    <section class="panel results" aria-label="即时生成任务">
       <div class="results-top">
         <div class="section-title"><span class="section-index">03</span><h2>生成任务与预览</h2></div>
         <span class="status" id="status" role="status">尚无任务</span>

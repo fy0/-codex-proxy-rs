@@ -167,14 +167,32 @@ async function openPage(theme, width, options = {}) {
   if (options.dailyStatus) {
     Object.assign(responseFixture.accounts[0].dailyUsage, {
       status: options.dailyStatus,
-      usedUsd: null,
+      usedUsd: options.knownCost ?? null,
       remainingUsd: null,
+      complete: false,
       unknownCostCount: options.dailyStatus === 'unknown'
         ? 2
         : 0,
     })
-    responseFixture.accounts[0].assessment.excluded = true
+    responseFixture.accounts[0].assessment = {
+      accountId: 'qa-studio',
+      excluded: options.dailyStatus === 'reached',
+      reasons: [{
+        code: options.dailyStatus === 'reached' ? 'daily_limit_reached' : 'daily_usage_unknown',
+        message: options.dailyStatus === 'reached' ? '今日已知费用达到日限额，暂停分配' : '费用观测尚未完整，仅提示，不因此拦截',
+      }],
+    }
   }
+  if (options.expiredWindow) {
+    responseFixture.accounts[0].quota.windows[0] = { windowSeconds: 18000, usedPercent: 100, resetAtMs: now - 1000 }
+    responseFixture.accounts[0].assessment = {
+      accountId: 'qa-studio',
+      excluded: false,
+      reasons: [{ code: 'window_reset_pending', message: '旧额度窗口已重置，等待更新，不因此拦截' }],
+    }
+  }
+  if (options.mixedWindows)
+    responseFixture.accounts[0].quota.windows.unshift({ windowSeconds: 18000, usedPercent: 100, resetAtMs: now - 1000 })
   if (options.legacy) {
     for (const rule of responseFixture.configuration.accounts)
       delete rule.dailyLimitUsd
@@ -370,10 +388,16 @@ try {
       const costPage = await openPage('light', 1360, { dailyStatus })
       const window = costPage.frame.getByRole('region', { name: 'Studio · 主力账号 每日费用', exact: true })
       await window.getByText(dailyStatus === 'unknown'
-        ? '费用待确认'
-        : '记录已过期', { exact: true }).waitFor()
+        ? '记录未齐'
+        : '待刷新', { exact: true }).waitFor()
       assert.equal(await window.locator('.qg-daily-usage strong').textContent(), '—', 'Unknown cost must not be shown as zero')
       assert.equal(await window.getByRole('progressbar').getAttribute('aria-valuenow'), null, 'Unknown or stale cost must not advertise a measured progress value')
+      const card = costPage.frame.locator('[data-testid="account-card"]').first()
+      assert.equal(await card.locator('.qg-account-blocked').count(), 0)
+      assert.equal(await card.evaluate(element => element.classList.contains('qg-account-blocked')), false, 'Unknown or stale daily costs do not exclude the account')
+      await card.getByText('未拦截', { exact: true }).waitFor()
+      assert.equal(await card.locator('.qg-account-reasons-info').count(), 1, 'Observation notices use informational styling')
+      assert.equal(await window.locator('.qg-badge-warning').count(), 0)
       await costPage.page.screenshot({
         path: path.join(outDirectory, `daily-${dailyStatus}.png`),
         fullPage: true,
@@ -381,6 +405,35 @@ try {
       results.push({ scenario: `daily-${dailyStatus}`, passed: true })
       await costPage.page.close()
     }
+
+    for (const [dailyStatus, knownCost] of [['unknown', '6.25'], ['stale', '6.25'], ['reached', '20.01']]) {
+      const partialPage = await openPage('light', 1360, { dailyStatus, knownCost })
+      const card = partialPage.frame.locator('[data-testid="account-card"]').first()
+      const dailyWindow = card.getByRole('region', { name: 'Studio · 主力账号 每日费用', exact: true })
+      assert.equal(await dailyWindow.locator('.qg-daily-usage strong').textContent(), `$${knownCost}`, 'Unpriced records must not erase known fees')
+      assert.equal(await dailyWindow.getByRole('progressbar').getAttribute('aria-valuenow'), dailyStatus === 'reached' ? '100' : '31.25')
+      assert.equal(await card.evaluate(element => element.classList.contains('qg-account-blocked')), dailyStatus === 'reached', 'Only confirmed exceedance blocks with partial cost data')
+      await card.getByText(dailyStatus === 'reached' ? '已拦截' : '未拦截', { exact: true }).waitFor()
+      results.push({ scenario: `daily-partial-${dailyStatus}`, passed: true })
+      await partialPage.page.close()
+    }
+
+    const resetPage = await openPage('light', 1360, { expiredWindow: true })
+    const resetCard = resetPage.frame.locator('[data-testid="account-card"]').first()
+    const resetWindow = resetCard.getByRole('region', { name: 'Studio · 主力账号 5 小时额度', exact: true })
+    await resetWindow.getByText('上周期', { exact: true }).waitFor()
+    await resetWindow.getByText('已重置，等待新观测；旧窗口不拦截', { exact: true }).waitFor()
+    assert.equal(await resetWindow.evaluate(element => element.classList.contains('qg-window-warning')), false, 'Expired 100% usage is historical and cannot look like an active block')
+    await resetCard.getByText('未拦截', { exact: true }).waitFor()
+    results.push({ scenario: 'reset-window-allows', passed: true })
+    await resetPage.page.close()
+
+    const mixedPage = await openPage('light', 1360, { mixedWindows: true })
+    const currentWindow = mixedPage.frame.getByRole('region', { name: 'Studio · 主力账号 5 小时额度', exact: true })
+    await currentWindow.getByText('42%', { exact: true }).waitFor()
+    await currentWindow.getByText('已使用', { exact: true }).waitFor()
+    results.push({ scenario: 'current-window-preferred-over-expired-peak', passed: true })
+    await mixedPage.page.close()
 
     const legacyPage = await openPage('light', 1360, { legacy: true })
     for (const switchControl of await legacyPage.frame.getByRole('switch', { name: /每日费用保护$/ }).all())

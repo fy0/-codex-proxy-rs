@@ -51,7 +51,7 @@ pub async fn protected_ids(
                     return Ok(None);
                 }
                 // 所有账号调度共用每日保护，不限于图片任务。
-                // 冷缓存、过期或不完整的观测直接阻止账号；请求路径不扫描日账本。
+                // 仅已记录费用达到阈值才阻止账号；请求路径不扫描日账本。
                 if daily_usage(&rule, now_ms()?, max_age).excluded() {
                     return Ok(Some(rule.account_id));
                 }
@@ -221,7 +221,7 @@ impl QuotaGuard {
             .buffer_unordered(MAX_PARALLEL_REFRESHES)
             .collect::<Vec<Result<(), PluginFault>>>();
         // 账号较多、额度服务缓慢或日账本较大时，维护回调仍受总预算约束。
-        // 被取消的每日刷新会释放名额，并保持未知观测对应的账号关闭。
+        // 被取消的每日刷新会释放名额；未知状态本身不会阻止账号。
         if let Ok(results) = tokio::time::timeout(RECONCILE_BUDGET, work).await {
             for result in results {
                 result?;

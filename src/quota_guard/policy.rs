@@ -1,4 +1,4 @@
-//! 根据宿主额度事实评估账号保护，不缓存或推算额度恢复
+//! 只有已观测到的超限才拦截；缺失或过期观测仅作提示。
 
 use gateway_plugin_sdk::call::data::{QuotaDetails, QuotaWindowDetails};
 use serde::Serialize;
@@ -82,25 +82,42 @@ impl Assessment {
     fn new(rule: &AccountRule, reasons: Vec<Reason>) -> Self {
         Self {
             account_id: rule.account_id.clone(),
-            excluded: !reasons.is_empty(),
+            excluded: reasons.iter().any(|reason| {
+                matches!(
+                    reason.code,
+                    ReasonCode::LimitReached | ReasonCode::DailyLimitReached
+                )
+            }),
             reasons,
         }
     }
 }
 
+fn zero_limits(rule: &AccountRule) -> Vec<Reason> {
+    [
+        (FIVE_HOUR_SECONDS, rule.five_hour_limit_percent),
+        (WEEK_SECONDS, rule.weekly_limit_percent),
+    ]
+    .into_iter()
+    .filter(|(_, limit)| *limit == Some(0.0))
+    .map(|(seconds, _)| Reason {
+        window_seconds: Some(seconds),
+        limit_percent: Some(0.0),
+        ..Reason::new(ReasonCode::LimitReached, "保护阈值设为 0，已暂停该账号")
+    })
+    .collect()
+}
+
 #[must_use]
 pub fn unavailable(rule: &AccountRule) -> Assessment {
-    Assessment::new(
-        rule,
-        if rule.windows_enabled() {
-            vec![Reason::new(
-                ReasonCode::QuotaUnavailable,
-                "无法读取额度观测，暂不使用此账号",
-            )]
-        } else {
-            Vec::new()
-        },
-    )
+    let mut reasons = zero_limits(rule);
+    if rule.windows_enabled() {
+        reasons.push(Reason::new(
+            ReasonCode::QuotaUnavailable,
+            "暂未读取到额度观测；此信息不拦截账号",
+        ));
+    }
+    Assessment::new(rule, reasons)
 }
 
 #[must_use]
@@ -110,67 +127,52 @@ pub fn assess(
     now_ms: i64,
     max_age_seconds: u64,
 ) -> Assessment {
+    let mut reasons = zero_limits(rule);
     if !rule.windows_enabled() {
-        return Assessment::new(rule, Vec::new());
+        return Assessment::new(rule, reasons);
     }
-    if quota.schema_version != 1 {
-        return Assessment::new(
-            rule,
-            vec![Reason::new(
-                ReasonCode::UnsupportedSchema,
-                "额度观测版本不受支持，暂不使用此账号",
-            )],
-        );
-    }
-    if quota.account_id != rule.account_id {
-        return Assessment::new(
-            rule,
-            vec![Reason::new(
-                ReasonCode::AccountMismatch,
-                "额度观测与所选账号不一致，暂不使用此账号",
-            )],
-        );
-    }
-    let Some(observed_at_ms) = quota.observed_at_ms else {
-        return Assessment::new(
-            rule,
-            vec![Reason::new(
-                ReasonCode::ObservationMissing,
-                "缺少额度观测时间，暂不使用此账号",
-            )],
-        );
+    let invalid = if quota.schema_version != 1 {
+        Some((
+            ReasonCode::UnsupportedSchema,
+            "额度观测版本不受支持；此信息不拦截账号",
+        ))
+    } else if quota.account_id != rule.account_id {
+        Some((ReasonCode::AccountMismatch, "额度观测属于其他账号，已忽略"))
+    } else if quota.observed_at_ms.is_none() {
+        Some((
+            ReasonCode::ObservationMissing,
+            "缺少额度观测时间；此信息不拦截账号",
+        ))
+    } else if quota.observed_at_ms.is_some_and(|at| at > now_ms) {
+        Some((
+            ReasonCode::ObservationInFuture,
+            "额度观测时间晚于当前时间，已忽略",
+        ))
+    } else {
+        None
     };
-    if observed_at_ms > now_ms {
-        return Assessment::new(
-            rule,
-            vec![Reason::new(
-                ReasonCode::ObservationInFuture,
-                "额度观测时间晚于当前时间，暂不使用此账号",
-            )],
-        );
+    if let Some((code, message)) = invalid {
+        reasons.push(Reason::new(code, message));
+        return Assessment::new(rule, reasons);
     }
-    let max_age_ms = max_age_seconds
-        .checked_mul(1_000)
-        .and_then(|milliseconds| i64::try_from(milliseconds).ok());
-    let age_ms = now_ms.checked_sub(observed_at_ms);
-    if !matches!((age_ms, max_age_ms), (Some(age), Some(maximum)) if maximum > 0 && age <= maximum)
-    {
-        return Assessment::new(
-            rule,
-            vec![Reason::new(
-                ReasonCode::ObservationStale,
-                "额度观测已过期，暂不使用此账号",
-            )],
-        );
+    let max_age_ms = max_age_seconds.saturating_mul(1_000).min(i64::MAX as u64) as i64;
+    let age_ms = quota.observed_at_ms.and_then(|at| now_ms.checked_sub(at));
+    let fresh = matches!(age_ms, Some(age) if age >= 0 && age <= max_age_ms);
+    if !fresh {
+        reasons.push(Reason::new(
+            ReasonCode::ObservationStale,
+            "额度观测较旧；仅同一窗口的已知超限继续生效",
+        ));
     }
 
-    let mut reasons = Vec::new();
     for (seconds, limit) in [
         (FIVE_HOUR_SECONDS, rule.five_hour_limit_percent),
         (WEEK_SECONDS, rule.weekly_limit_percent),
     ] {
-        let Some(limit) = limit else { continue };
-        // primary/secondary 是协议槽位，具名桶也不能代表账号通用额度
+        let Some(limit) = limit.filter(|value| *value > 0.0) else {
+            continue;
+        };
+        // primary/secondary 是协议槽位；只使用账号通用的 Codex 窗口。
         let mut found = false;
         for window in quota.windows.iter().filter(|window| {
             window
@@ -180,7 +182,7 @@ pub fn assess(
                 && window.window_seconds == Some(seconds)
         }) {
             found = true;
-            if let Some(reason) = assess_window(window, now_ms, limit) {
+            if let Some(reason) = assess_window(window, now_ms, limit, fresh) {
                 reasons.push(reason);
             }
         }
@@ -190,7 +192,7 @@ pub fn assess(
                 limit_percent: Some(limit),
                 ..Reason::new(
                     ReasonCode::WindowMissing,
-                    "缺少已启用保护的额度窗口，暂不使用此账号",
+                    "暂未观测到此额度窗口；此信息不拦截账号",
                 )
             });
         }
@@ -198,8 +200,7 @@ pub fn assess(
     Assessment::new(rule, reasons)
 }
 
-/// 上游百分比窗口与本地已记录费用分别判断。
-/// 百分比保护全部关闭时，不要求宿主必须提供 quota_details。
+/// 百分比窗口和当天已记录费用独立判断，信息提示不会改变排除状态。
 pub fn add_daily(assessment: &mut Assessment, usage: &super::daily::DailyUsage) {
     use super::daily::DailyStatus;
     let (code, message) = match usage.status {
@@ -210,14 +211,14 @@ pub fn add_daily(assessment: &mut Assessment, usage: &super::daily::DailyUsage) 
         ),
         DailyStatus::Unknown => (
             ReasonCode::DailyUsageUnknown,
-            "今日费用观测不完整或含未知费用，暂不使用此账号",
+            "今日费用尚未完整观测；已知费用未触及限额时仍可使用",
         ),
         DailyStatus::Stale => (
             ReasonCode::DailyObservationStale,
-            "今日费用观测已过期，暂不使用此账号",
+            "今日费用观测待更新；此信息不拦截账号",
         ),
     };
-    assessment.excluded = true;
+    assessment.excluded |= usage.excluded();
     assessment.reasons.push(Reason {
         window_seconds: Some(86_400),
         reset_at_ms: Some(usage.reset_at_ms),
@@ -225,35 +226,44 @@ pub fn add_daily(assessment: &mut Assessment, usage: &super::daily::DailyUsage) 
     });
 }
 
-fn assess_window(window: &QuotaWindowDetails, now_ms: i64, limit: f64) -> Option<Reason> {
+fn assess_window(
+    window: &QuotaWindowDetails,
+    now_ms: i64,
+    limit: f64,
+    fresh: bool,
+) -> Option<Reason> {
     let reason = |code, message| Some(Reason::for_window(code, message, window, limit));
-    let Some(used) = window
-        .used_percent
-        .filter(|used| used.is_finite() && (0.0..=100.0).contains(used))
-    else {
-        return reason(
-            ReasonCode::UsageUnknown,
-            "额度窗口缺少可靠的使用率，暂不使用此账号",
-        );
-    };
-    let Some(reset_at_ms) = window.reset_at_ms else {
-        return reason(
-            ReasonCode::ResetUnknown,
-            "额度窗口缺少重置时间，暂不使用此账号",
-        );
-    };
-    // 旧窗口跨过重置时间不代表已经恢复，需由宿主提供新样本
-    if reset_at_ms <= now_ms {
+    // 重置边界之后旧窗口不再是当前窗口的超限证据。
+    if window.reset_at_ms.is_some_and(|at| at <= now_ms) {
         return reason(
             ReasonCode::WindowExpired,
-            "额度窗口已到重置时间，等待新的额度观测",
+            "旧额度窗口已结束，等待新观测；此信息不拦截账号",
         );
+    }
+    // 无重置时间的旧样本不能证明仍处于同一窗口。
+    if !fresh && window.reset_at_ms.is_none() {
+        return reason(ReasonCode::ResetUnknown, "旧额度观测缺少重置时间，已忽略");
     }
     if window.limit_reached {
         return reason(ReasonCode::LimitReached, "额度窗口已触顶");
     }
-    if used >= limit {
-        return reason(ReasonCode::LimitReached, "额度使用率已达到保护上限");
+    match window
+        .used_percent
+        .filter(|used| used.is_finite() && *used >= 0.0)
+    {
+        Some(used) if used >= limit => reason(ReasonCode::LimitReached, "额度使用率已达到保护上限"),
+        None => reason(
+            ReasonCode::UsageUnknown,
+            "额度窗口使用率未知；此信息不拦截账号",
+        ),
+        Some(_) if window.reset_at_ms.is_none() => reason(
+            ReasonCode::ResetUnknown,
+            "额度窗口重置时间未知；此信息不拦截账号",
+        ),
+        Some(_) => None,
     }
-    None
 }
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod tests;

@@ -933,6 +933,10 @@ body {
   font-size: 11px;
 }
 
+.qg-account-reasons-info {
+  color: var(--qg-muted);
+}
+
 .qg-account-reasons svg {
   width: 14px;
   height: 14px;

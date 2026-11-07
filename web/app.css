@@ -72,6 +72,10 @@ footer {font-size:12px;color:var(--muted);text-align:center;margin:23px 0 0; }
 @media (max-width:550px) { .root {padding:16px;} .panel {padding:16px;}h1{font-size:24px;} .presets{grid-template-columns:repeat(2,minmax(0,1fr));} }
 /* 插件配置生成器：与原生管理页同样采用自然文档流，保持 14px 基准。 */
 .config-panel {margin-bottom:18px;}
+#legacyPanel {margin-top:18px;}
+.task-parameters {font-size:11px;color:var(--muted);margin-top:6px;}
+.task-parameters summary {padding:6px 0;font-size:11px;font-weight:500;}
+.task-parameters pre {white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;margin:0 0 8px;}
 .config-head {display:flex;justify-content:space-between;align-items:flex-start;gap:14px;}
 .config-head .section-title {margin-bottom:5px;}
 .config-head p {margin:0 0 19px;color:var(--muted);}

@@ -724,7 +724,14 @@
     error.className = 'task-error';
     const requestId = document.createElement('div');
     requestId.className = 'task-model';
-    details.append(prompt, model, timing, error, requestId);
+    const parameterReport = document.createElement('details');
+    parameterReport.className = 'task-parameters';
+    parameterReport.hidden = true;
+    const parameterHeading = document.createElement('summary');
+    parameterHeading.textContent = '服务端参数回报';
+    const parameterText = document.createElement('pre');
+    parameterReport.append(parameterHeading, parameterText);
+    details.append(prompt, model, timing, error, parameterReport, requestId);
     const actions = document.createElement('div');
     actions.className = 'task-actions';
     const cancel = document.createElement('button');
@@ -745,7 +752,7 @@
     actions.append(cancel, download, load);
     card.append(head, preview, details, actions);
     container.appendChild(card);
-    task.node = {card, state, info, img, model, timing, error, requestId, cancel, download, load};
+    task.node = {card, state, info, img, model, timing, error, requestId, cancel, download, load, parameterReport, parameterText};
     renderTask(task);
   }
   function renderTask(task) {
@@ -769,6 +776,8 @@
     n.timing.hidden = !n.timing.textContent;
     n.error.textContent = task.error || '';
     n.error.hidden = !task.error;
+    n.parameterReport.hidden = !task.parameterReport;
+    n.parameterText.textContent = task.parameterReport || '';
     n.requestId.textContent = task.requestId ? '请求 ID：' + task.requestId : '';
     n.requestId.hidden = !task.requestId;
     n.cancel.hidden = !pending;
@@ -828,6 +837,14 @@
       });
       task.requestId = result.requestId || result.responseId || null;
       task.timings = result.timings;
+      const reported = [...new Set((result.imageToolObservations || []).map(item =>
+        item.source + ': ' + ['model', 'size', 'quality', 'output_format', 'output_compression', 'action']
+          .filter(key => item[key] !== undefined).map(key => key + '=' + item[key]).join(', ')))];
+      task.parameterReport = [
+        '响应模型：' + (result.responseModel || '未返回'),
+        ...(reported.length ? reported : ['服务端未回报图片工具参数']),
+        '以上来自响应内容；实际图片尺寸以解码像素为准。'
+      ].join('\n');
       if (controller.signal.aborted || result.status === 'canceled') {
         task.status = timedOut ? 'failed' : 'canceled';
         task.error = timedOut ? '达到本页请求超时 ' + seconds(budget) : null;
@@ -853,7 +870,7 @@
       task.actualWidth = image.width;
       task.actualHeight = image.height;
       if (task.size !== 'auto' && task.size !== image.width + 'x' + image.height) {
-        throw new Error('图片已返回，但请求尺寸 ' + task.size + '，实际尺寸 ' + image.width + 'x' + image.height + '；不会将其标记为所选尺寸生成成功。');
+        throw new Error('图片已返回，但请求尺寸 ' + task.size + '，实际尺寸 ' + image.width + 'x' + image.height + '；请展开服务端参数回报核对返回值。本页保留原图，不插值放大。');
       }
       task.status = 'succeeded';
       task.error = null;

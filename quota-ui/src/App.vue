@@ -162,7 +162,7 @@ watch(candidatePageCount, (value) => {
           <Settings2 aria-hidden="true" />
           <span class="qg-setting-copy">
             <span id="qg-observation-age-label" class="qg-setting-label">额度观测有效期</span>
-            <span id="qg-observation-age-help" class="qg-setting-description">超过有效期后暂停受保护账号</span>
+            <span id="qg-observation-age-help" class="qg-setting-description">超过此时间提示更新；仅确认超限才拦截</span>
           </span>
           <span class="qg-number-field qg-age-field">
             <input id="qg-observation-age" type="number" aria-labelledby="qg-observation-age-label" aria-describedby="qg-observation-age-help" :value="draft.maxObservationAgeSeconds" min="60" max="86400" step="30" :disabled="locked" @change="updateObservationAge">
@@ -289,6 +289,7 @@ watch(candidatePageCount, (value) => {
           :model-value="rule"
           :info="infoFor(rule.accountId)"
           :state="states.get(rule.accountId)"
+          :evaluated-at-ms="overview.evaluatedAtMs"
           :saved-rule="savedRules.get(rule.accountId)"
           :awaiting-refresh="saved"
           :disabled="locked"
@@ -308,11 +309,11 @@ watch(candidatePageCount, (value) => {
       <details class="qg-daily-help">
         <summary>日费用如何统计与保护？</summary>
         <p>每日费用按账号统计全部 CPR 请求，覆盖所有模型与 Client Key；使用 CPR 记录的实际或估算 USD 费用，不代表官方套餐额度。按请求开始时间归属 UTC 自然日，跨午夜的请求计入开始那天；每天 UTC 00:00 换日，默认关闭。</p>
-        <p>达到日限额后暂停新分配。费用未知、数据不完整或记录过期时也会暂停受保护账号；在途请求与结算延迟可能使最终费用超过阈值，因此日限额不是严格的原子预算。</p>
+        <p>只有当天已记录费用达到日限额才暂停新分配。新账号没有使用记录时从 0 开始；未计价记录、读取失败或观测过期只提示，不单独拦截。已知费用始终保留；在途请求与结算延迟可能使最终费用超过阈值，因此日限额不是严格的原子预算。</p>
       </details>
 
       <footer class="qg-footer">
-        <span>状态按已保存规则评估，达到任一阈值即暂停分配</span>
+        <span>按已保存规则评估；确认超限才拦截，未知状态不单独拦截</span>
         <div v-if="filteredRules.length > 20" class="qg-pagination">
           <select v-model.number="pageSize" aria-label="每页账号数">
             <option :value="20">

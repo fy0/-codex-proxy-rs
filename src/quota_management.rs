@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_daily_usage_is_included_in_the_account_assessment() {
+    fn unknown_daily_usage_is_visible_without_excluding_the_account() {
         let rule: AccountRule = serde_json::from_value(json!({
             "accountId":"daily-only","fiveHourLimitPercent":null,
             "weeklyLimitPercent":null,"dailyLimitUsd":"1"
@@ -550,7 +550,7 @@ mod tests {
         let usage = quota_guard::daily_usage(&rule, 1_000, 300);
         quota_guard::add_daily(&mut assessment, &usage);
         let value = serde_json::to_value(assessment).unwrap();
-        assert_eq!(value["excluded"], true);
+        assert_eq!(value["excluded"], false);
         assert_eq!(value["reasons"][0]["code"], "daily_usage_unknown");
         assert_eq!(value["reasons"][0]["windowSeconds"], 86_400);
     }

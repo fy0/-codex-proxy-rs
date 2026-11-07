@@ -27,7 +27,8 @@
   };
   const stateLabels = { completed: '完整结束', incomplete: '未完整结束', failed: '失败', canceled: '已取消' };
   let bootstrap = null, controller = null, latest = null, currentRequest = null, currentHeaders = null;
-  let elapsedTimer = null, loadingKeys = false, closed = false, visibleEvents = [];
+  let elapsedTimer = null, loadingKeys = false, loadingCatalog = false, closed = false, visibleEvents = [];
+  let modelCatalog = null, catalogKey = '', catalogRequest = 0, generatedTemplate = '';
   const bytes = value => value >= 1024 * 1024 ? (value / 1024 / 1024).toFixed(2) + ' MiB'
     : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : value + ' B';
   const duration = value => Number.isFinite(value) ? (value / 1000).toFixed(2) + ' s' : '—';
@@ -42,12 +43,12 @@
   }
   function controls() {
     const active = controller !== null;
-    ui.run.disabled = active || !ui.key.value || !ui.body.value.trim() || !window.codexProxyPlugin?.models?.responses;
+    ui.run.disabled = active || loadingKeys || loadingCatalog || !ui.key.value || !ui.body.value.trim() || !window.codexProxyPlugin?.models?.responses;
     ui.cancel.disabled = !active;
     ui.key.disabled = active || loadingKeys;
     ui.refresh.disabled = active || loadingKeys;
-    ui.models.disabled = active || !ui.key.value;
-    ui.reset.disabled = active;
+    ui.models.disabled = active || loadingKeys || loadingCatalog || !ui.key.value;
+    ui.reset.disabled = active || loadingKeys || loadingCatalog;
     ui.format.disabled = active;
     ui.template.disabled = active;
     ui.body.readOnly = active;
@@ -69,11 +70,16 @@
     return document;
   }
   function template() {
-    const driver = bootstrap?.driverModel || 'gpt-5.6-luna';
-    const configured = Array.isArray(bootstrap?.imageModels) ? bootstrap.imageModels : [];
-    const imageModel = configured.includes('gpt-image-2.5-sunburst') ? 'gpt-image-2.5-sunburst'
-      : configured[0] || 'gpt-image-2.5-sunburst';
+    if (!modelCatalog || catalogKey !== ui.key.value) throw new Error('请先读取所选 Key 的模型目录。');
+    const drivers = (Array.isArray(modelCatalog.models) ? modelCatalog.models : [])
+      .filter(model => typeof model === 'string' && model && !model.startsWith('gpt-image-'));
+    const driver = ['gpt-6-luna', 'gpt-5.6-luna', bootstrap?.driverModel].find(model => drivers.includes(model)) || drivers[0];
+    if (!driver) throw new Error('所选 Key 的目录没有可用的对话模型，无法生成 Responses 模板。');
     if (ui.template.value === 'text') return { model: driver, stream: true, store: false, input: '仅回复 OK。' };
+    const images = (Array.isArray(modelCatalog.imageModels) ? modelCatalog.imageModels : [])
+      .filter(model => typeof model === 'string' && model.startsWith('gpt-image-'));
+    const imageModel = ['gpt-image-2.5-sunburst', 'gpt-image-2.6-sunburst'].find(model => images.includes(model)) || images[0];
+    if (!imageModel) throw new Error('所选 Key 的目录没有可用的图片模型。可以选择纯文本模板检查 Responses 通路。');
     return {
       model: driver, stream: true, store: false,
       input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '一只白色鹈鹕骑着橙色自行车，晴朗的海边小路，精致插画。' }] }],
@@ -81,6 +87,46 @@
       tools: [{ type: 'image_generation', model: imageModel, action: 'auto', size: '1024x1024', quality: 'auto', output_format: 'png' }],
       tool_choice: 'auto', parallel_tool_calls: false, include: ['reasoning.encrypted_content']
     };
+  }
+  function loadTemplate() {
+    generatedTemplate = JSON.stringify(template(), null, 2);
+    ui.body.value = generatedTemplate;
+  }
+  async function loadCatalog(show = false) {
+    const sequence = ++catalogRequest;
+    const key = ui.key.value;
+    modelCatalog = null;
+    catalogKey = '';
+    ui.catalog.hidden = true;
+    if (!ui.body.value.trim() || ui.body.value === generatedTemplate) {
+      ui.body.value = '';
+      generatedTemplate = '';
+    }
+    loadingCatalog = !!key;
+    controls();
+    if (!key) { notice('宿主没有返回可选的 Client Key。', true); return; }
+    notice('正在读取所选 Key 的模型目录…');
+    try {
+      const catalog = await request('POST', 'api/models', { clientKeyId: key });
+      if (closed || sequence !== catalogRequest || key !== ui.key.value) return;
+      modelCatalog = catalog;
+      catalogKey = key;
+      ui.modelList.textContent = JSON.stringify(client.redact(catalog), null, 2);
+      if (show) { ui.catalog.hidden = false; ui.catalog.open = true; }
+      if (!ui.body.value.trim() || ui.body.value === generatedTemplate) {
+        try {
+          loadTemplate();
+          notice('已按所选 Key 的模型目录载入模板。请检查参数后运行。');
+        } catch (error) { notice(error.message + ' 也可以手动输入 JSON 进行调试。', true); }
+      } else {
+        notice('已读取所选 Key 的模型目录，保留当前手写 JSON。点击“载入模板”可使用该 Key 的可用模型。');
+      }
+    } catch (error) {
+      if (!closed && sequence === catalogRequest)
+        notice('读取模型目录失败：' + (error.message || error) + '。可重试读取目录，或保留手写 JSON 运行。', true);
+    } finally {
+      if (sequence === catalogRequest) { loadingCatalog = false; controls(); }
+    }
   }
   async function refreshKeys() {
     if (loadingKeys || controller) return;
@@ -105,23 +151,29 @@
         option.textContent = '没有已启用的 Client Key';
         ui.key.appendChild(option);
       } else if (keys.some(key => key.id === old)) ui.key.value = old;
-      if (!ui.body.value.trim()) ui.body.value = JSON.stringify(template(), null, 2);
       ui.version.textContent = '插件 ' + safeText(state.pluginVersion || '—') + ' · 管理桥 v' + window.codexProxyPlugin.version;
-      notice(keys.length ? '已读取 ' + keys.length + ' 个 Client Key。编辑 JSON 后点击“运行一次”。'
-        + (state.keysNextCursor ? ' 当前为宿主返回的第一页 Key。' : '') : '宿主没有返回可选的 Client Key。', !keys.length);
+      await loadCatalog();
     } catch (error) {
-      if (!ui.body.value.trim()) ui.body.value = JSON.stringify(template(), null, 2);
       notice('读取 Key 失败：' + (error.message || error), true);
     } finally {
       loadingKeys = false;
       controls();
     }
   }
+  function serverParameters(result) {
+    const observations = Array.isArray(result?.imageToolObservations) ? result.imageToolObservations : [];
+    return {
+      label: '服务端参数回报；实际图片尺寸见预览',
+      responseModel: result?.responseModel || '未返回',
+      imageToolObservations: observations.length ? observations : '未返回'
+    };
+  }
   function renderSnapshot() {
     ui.snapshot.textContent = JSON.stringify(client.redact({
       submittedTo: 'CPR 管理桥 models.responses',
       request: currentRequest,
-      response: currentHeaders
+      response: currentHeaders,
+      serverReportedParameters: serverParameters(latest)
     }, { maxString: 16000, maxItems: 100 }), null, 2);
   }
   function appendPhase(value) {
@@ -197,6 +249,7 @@
     });
   }
   function renderResult(result) {
+    renderSnapshot();
     ui.state.textContent = stateLabels[result.status] || result.status;
     ui.state.className = 'state-badge ' + result.status;
     ui.http.textContent = result.httpStatus === null ? '未收到' : String(result.httpStatus);
@@ -222,8 +275,17 @@
       + (capture?.truncated ? ' · 已达到捕获上限，导出不是完整响应' : '')
       + (result.eventCount > 300 ? ' · 预览仅展示最近 300 条' : '')
       + (result.warnings.length ? ' · ' + result.warnings.join('；') : '');
-    notice(result.status === 'completed' ? '本次管理桥响应完整结束。' : '本次状态：' + (stateLabels[result.status] || result.status) + '。可查看错误字段或导出诊断。',
-      result.status === 'failed' || result.status === 'incomplete');
+    if (result.error?.code === 'no_available_provider') {
+      const model = currentRequest?.body?.model;
+      const listed = catalogKey === currentRequest?.clientKeyId && Array.isArray(modelCatalog?.models)
+        ? modelCatalog.models.includes(model) : null;
+      notice(listed === false
+        ? '提交的主控模型未出现在所选 Key 的模型目录中。可点击“载入模板”选取可用模型；本次 JSON 已保留。'
+        : '宿主未找到可用的 Provider。请核对该 Key 的模型授权、账号状态及额度规则；本次响应尚不能确定具体原因。', true);
+    } else {
+      notice(result.status === 'completed' ? '本次管理桥响应完整结束。' : '本次状态：' + (stateLabels[result.status] || result.status) + '。可查看错误字段或导出诊断。',
+        result.status === 'failed' || result.status === 'incomplete');
+    }
   }
   async function runOnce() {
     if (controller || closed) return;
@@ -295,6 +357,7 @@
       status: latest.status,
       request: client.redact(currentRequest),
       response: { httpStatus: latest.httpStatus, requestId: latest.requestId, responseId: latest.responseId, headers: latest.headers },
+      serverReportedParameters: client.redact(serverParameters(latest)),
       timings: latest.timings,
       error: client.redact(latest.error),
       warnings: latest.warnings,
@@ -322,29 +385,19 @@
   }
 
   ui.refresh.addEventListener('click', () => { void refreshKeys(); });
-  ui.models.addEventListener('click', async () => {
-    if (!ui.key.value || controller) return;
-    ui.models.disabled = true;
-    try {
-      const catalog = await request('POST', 'api/models', { clientKeyId: ui.key.value });
-      if (closed) return;
-      ui.catalog.hidden = false;
-      ui.catalog.open = true;
-      ui.modelList.textContent = JSON.stringify(client.redact(catalog), null, 2);
-    } catch (error) { notice('读取模型目录失败：' + (error.message || error), true); }
-    finally { controls(); }
-  });
+  ui.models.addEventListener('click', () => { if (!controller) void loadCatalog(true); });
   ui.reset.addEventListener('click', () => {
-    ui.body.value = JSON.stringify(template(), null, 2);
-    notice('已载入 ' + ui.template.selectedOptions[0].textContent + '。请检查参数后运行。');
+    try {
+      loadTemplate();
+      notice('已按所选 Key 载入 ' + ui.template.selectedOptions[0].textContent + '。请检查参数后运行。');
+    } catch (error) { notice(error.message, true); }
     controls();
-  });
-  ui.format.addEventListener('click', () => {
+  });  ui.format.addEventListener('click', () => {
     try { ui.body.value = JSON.stringify(JSON.parse(ui.body.value), null, 2); controls(); }
     catch (error) { notice('JSON 格式错误：' + error.message, true); }
   });
   ui.body.addEventListener('input', controls);
-  ui.key.addEventListener('change', () => { ui.catalog.hidden = true; controls(); });
+  ui.key.addEventListener('change', () => { void loadCatalog(); });
   ui.search.addEventListener('input', filterEvents);
   ui.run.addEventListener('click', () => { void runOnce(); });
   ui.cancel.addEventListener('click', () => {

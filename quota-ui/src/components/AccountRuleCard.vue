@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AccountInfo, AccountOverview, AccountRule } from '../api/modules/quota'
-import { CircleAlert, Trash2 } from '@lucide/vue'
+import { CircleAlert, Info, Trash2 } from '@lucide/vue'
 import { computed } from 'vue'
 import { accountName, formatDate, highestUsageWindow, isProtected } from '../presenter'
 import DailyQuotaWindow from './DailyQuotaWindow.vue'
@@ -9,6 +9,7 @@ import QuotaWindow from './QuotaWindow.vue'
 const props = defineProps<{
   info: AccountInfo
   state?: AccountOverview
+  evaluatedAtMs?: number
   savedRule?: AccountRule
   awaitingRefresh?: boolean
   disabled?: boolean
@@ -25,7 +26,7 @@ const status = computed(() => {
   if (!isProtected(props.savedRule))
     return { label: '保护已关闭', tone: 'neutral' }
   if (!props.state)
-    return { label: '状态未知', tone: 'warning' }
+    return { label: '等待观测', tone: 'info' }
   if (props.state.assessment.excluded)
     return { label: '已拦截', tone: 'warning' }
   return { label: '未拦截', tone: 'success' }
@@ -66,7 +67,8 @@ function updateDailyLimit(value: string | null) {
         :model-value="rule.fiveHourLimitPercent"
         label="5 小时"
         :account-name="name"
-        :window="highestUsageWindow(state?.quota?.windows, 18000)"
+        :window="highestUsageWindow(state?.quota?.windows, 18000, evaluatedAtMs)"
+        :evaluated-at-ms="evaluatedAtMs"
         :disabled="disabled"
         @update:model-value="updateLimit('fiveHourLimitPercent', $event)"
       />
@@ -74,7 +76,8 @@ function updateDailyLimit(value: string | null) {
         :model-value="rule.weeklyLimitPercent"
         label="每周"
         :account-name="name"
-        :window="highestUsageWindow(state?.quota?.windows, 604800)"
+        :window="highestUsageWindow(state?.quota?.windows, 604800, evaluatedAtMs)"
+        :evaluated-at-ms="evaluatedAtMs"
         :disabled="disabled"
         @update:model-value="updateLimit('weeklyLimitPercent', $event)"
       />
@@ -87,8 +90,9 @@ function updateDailyLimit(value: string | null) {
         @update:model-value="updateDailyLimit"
       />
     </div>
-    <div v-if="reasons.length && !awaitingRefresh" class="qg-account-reasons">
-      <CircleAlert aria-hidden="true" />
+    <div v-if="reasons.length && !awaitingRefresh" class="qg-account-reasons" :class="{ 'qg-account-reasons-info': !state?.assessment.excluded }">
+      <CircleAlert v-if="state?.assessment.excluded" aria-hidden="true" />
+      <Info v-else aria-hidden="true" />
       <span>{{ reasons.join(' · ') }}</span>
     </div>
   </article>

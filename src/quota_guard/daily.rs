@@ -106,6 +106,8 @@ pub struct DailyUsage {
     pub used_usd: Option<String>,
     pub remaining_usd: Option<String>,
     pub status: DailyStatus,
+    /// 当天已结束请求的费用是否已完整读取；不包含仍在运行请求的未来费用。
+    pub complete: bool,
     pub unknown_cost_count: u64,
     pub in_flight_count: u64,
     pub observed_at_ms: Option<i64>,
@@ -116,10 +118,7 @@ pub struct DailyUsage {
 
 impl DailyUsage {
     pub fn excluded(&self) -> bool {
-        matches!(
-            self.status,
-            DailyStatus::Reached | DailyStatus::Unknown | DailyStatus::Stale
-        )
+        self.status == DailyStatus::Reached
     }
 }
 
@@ -128,8 +127,10 @@ struct Snapshot {
     day_start_ms: i64,
     observed_at_ms: i64,
     total: Usd,
+    known_cost_count: u64,
     unknown_cost_count: u64,
     in_flight_count: u64,
+    complete: bool,
 }
 
 #[derive(Default)]
@@ -160,6 +161,7 @@ fn view(
         used_usd: None,
         remaining_usd: None,
         status: DailyStatus::Disabled,
+        complete: false,
         unknown_cost_count: 0,
         in_flight_count: 0,
         observed_at_ms: None,
@@ -175,43 +177,46 @@ fn view(
         return result;
     };
     result.limit_usd = Some(limit.text());
-    // 启用的零阈值立即阻止调度，冷启动时也一样。
+    // 零阈值是用户明确暂停；其他阈值只在已知费用达到时拦截。
     if limit == Usd::default() {
         result.status = DailyStatus::Reached;
     }
-    let Some(entry) = entry else {
-        return result;
-    };
+    let Some(entry) = entry else { return result };
     let Some(snapshot) = entry.snapshot.as_ref() else {
         return result;
     };
     result.observed_at_ms = Some(snapshot.observed_at_ms);
-    if snapshot.day_start_ms != day_start_ms {
+    if snapshot.day_start_ms != day_start_ms || snapshot.observed_at_ms > now_ms {
         if limit != Usd::default() {
             result.status = DailyStatus::Stale;
         }
         return result;
     }
+
     result.unknown_cost_count = snapshot.unknown_cost_count;
     result.in_flight_count = snapshot.in_flight_count;
     let max_age_ms = max_age_seconds.saturating_mul(1_000).min(i64::MAX as u64) as i64;
-    let age = now_ms.checked_sub(snapshot.observed_at_ms);
-    if !matches!(age, Some(age) if age >= 0 && age <= max_age_ms) {
-        if limit != Usd::default() {
-            result.status = DailyStatus::Stale;
-        }
-        return result;
+    let fresh = matches!(now_ms.checked_sub(snapshot.observed_at_ms),
+        Some(age) if age >= 0 && age <= max_age_ms);
+    result.complete =
+        snapshot.complete && snapshot.unknown_cost_count == 0 && !entry.failed && fresh;
+    // 已知部分费用是下界，不能因为其他记录未计价而丢弃。
+    // 完整空账本为 0；全部费用未知或尚未读到明细时仍返回 null。
+    if snapshot.known_cost_count > 0 || (snapshot.complete && snapshot.unknown_cost_count == 0) {
+        result.used_usd = Some(snapshot.total.text());
     }
-    if entry.failed || snapshot.unknown_cost_count != 0 {
-        return result;
-    }
-    result.used_usd = Some(snapshot.total.text());
-    result.remaining_usd = Some(limit.remaining(snapshot.total).text());
     result.status = if snapshot.total >= limit {
         DailyStatus::Reached
-    } else {
+    } else if !fresh {
+        DailyStatus::Stale
+    } else if result.complete {
         DailyStatus::Ready
+    } else {
+        DailyStatus::Unknown
     };
+    if result.complete || result.status == DailyStatus::Reached {
+        result.remaining_usd = Some(limit.remaining(snapshot.total).text());
+    }
     result
 }
 
@@ -230,6 +235,7 @@ fn unavailable() -> PluginFault {
 async fn collect_usage<F, Fut>(
     account_id: &str,
     observed_at_ms: i64,
+    deadline: tokio::time::Instant,
     mut fetch: F,
 ) -> Result<Snapshot, PluginFault>
 where
@@ -242,28 +248,42 @@ where
         day_start_ms,
         observed_at_ms,
         total: Usd::default(),
+        known_cost_count: 0,
         unknown_cost_count: 0,
         in_flight_count: 0,
+        complete: false,
     };
     let mut cursor = None;
     let mut cursors = HashSet::new();
     let mut records = HashSet::new();
-    for _ in 0..MAX_PAGES {
-        let page = fetch(ListUsageRecords {
-            filter: UsageRecordFilter {
-                start_ms: day_start_ms,
-                end_ms,
-                provider: None,
-                model: None,
-                account_ref: Some(account_id.to_owned()),
-                client_key_ref: None,
-            },
-            cursor: cursor.clone(),
-            limit: Some(PAGE_SIZE),
-        })
-        .await?;
+    for page_index in 0..MAX_PAGES {
+        // 所有页共用一个总期限；截止时已验证的费用仍保留为下界。
+        let page = match tokio::time::timeout_at(
+            deadline,
+            fetch(ListUsageRecords {
+                filter: UsageRecordFilter {
+                    start_ms: day_start_ms,
+                    end_ms,
+                    provider: None,
+                    model: None,
+                    account_ref: Some(account_id.to_owned()),
+                    client_key_ref: None,
+                },
+                cursor: cursor.clone(),
+                limit: Some(PAGE_SIZE),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(page)) => page,
+            Ok(Err(fault)) if fault.code == ErrorCode::Cancelled || page_index == 0 => {
+                return Err(fault);
+            }
+            Err(_) if page_index == 0 => return Err(unavailable()),
+            _ => return Ok(snapshot),
+        };
         if page.items.len() > usize::from(PAGE_SIZE) {
-            return Err(unavailable());
+            return Ok(snapshot);
         }
         for record in page.items {
             if record.id.is_empty()
@@ -272,38 +292,55 @@ where
                 || record.data.account_ref.as_deref() != Some(account_id)
                 || !(day_start_ms..end_ms).contains(&record.data.started_at_ms)
             {
-                // 部分页、重复记录或归属不匹配的结果不能视为完整总额。
-                return Err(unavailable());
+                // 无效页不宣称完整；已验证记录的费用仍是可用下界。
+                return Ok(snapshot);
             }
             if record.data.outcome == UsageOutcome::Running {
                 snapshot.in_flight_count += 1;
                 continue;
             }
+            // SDK data.cost 映射 CPR 原生 cost_amount / cost_currency。
+            // billing_snapshot 是费用细节，不是另一笔应累加的费用。
             let cost = match record.data.cost {
                 UsageCost::Known {
                     amount, currency, ..
                 } if currency.eq_ignore_ascii_case("USD") => Usd::cost(&amount),
+                UsageCost::Unavailable
+                    if matches!(
+                        record.data.outcome,
+                        UsageOutcome::Failed | UsageOutcome::Cancelled
+                    ) =>
+                {
+                    // 没有计费的失败/取消执行审计不属于待计价的成功用量。
+                    continue;
+                }
                 _ => None,
             };
             match cost.and_then(|cost| snapshot.total.checked_add(cost)) {
-                Some(total) => snapshot.total = total,
+                Some(total) => {
+                    snapshot.total = total;
+                    snapshot.known_cost_count += 1;
+                }
                 None => snapshot.unknown_cost_count += 1,
             }
         }
         match page.next_cursor {
-            None => return Ok(snapshot),
+            None => {
+                snapshot.complete = true;
+                return Ok(snapshot);
+            }
             Some(next)
                 if !next.is_empty() && next.len() <= 4_096 && cursors.insert(next.clone()) =>
             {
                 cursor = Some(next);
             }
-            _ => return Err(unavailable()),
+            _ => return Ok(snapshot),
         }
     }
-    Err(unavailable())
+    Ok(snapshot)
 }
 
-/// 刷新名额不持互斥锁守卫；取消或超时会使旧观测失效并释放刷新标记。
+/// 刷新名额不持互斥锁守卫；取消或超时释放名额，保留当天已知费用。
 struct RefreshLease {
     account_id: String,
     completed: bool,
@@ -335,7 +372,18 @@ impl RefreshLease {
         if let Ok(mut cache) = CACHE.lock() {
             if let Some(entry) = cache.get_mut(&self.account_id) {
                 entry.failed = snapshot.is_none();
-                if let Some(snapshot) = snapshot {
+                if let Some(mut snapshot) = snapshot {
+                    if let Some(previous) = entry.snapshot.as_ref() {
+                        // 部分刷新不能抹掉同一天已确认的费用；完整账本允许更正。
+                        if (!snapshot.complete || snapshot.unknown_cost_count != 0)
+                            && previous.day_start_ms == snapshot.day_start_ms
+                            && previous.observed_at_ms <= snapshot.observed_at_ms
+                            && previous.total > snapshot.total
+                        {
+                            snapshot.total = previous.total;
+                            snapshot.known_cost_count = previous.known_cost_count;
+                        }
+                    }
                     entry.snapshot = Some(snapshot);
                 }
                 entry.refreshing = false;
@@ -359,7 +407,7 @@ impl Drop for RefreshLease {
 }
 
 /// 宿主持久用量记录充当账本，不新增插件状态命名空间或推测计数。
-/// 刷新不完整时保持账号关闭，等待后续完整观测。
+/// 刷新不完整只影响完整性提示；未知费用不会阻止账号。
 pub async fn refresh_daily_usage(
     host: &HostClient,
     rule: &AccountRule,
@@ -371,7 +419,8 @@ pub async fn refresh_daily_usage(
     let Some(lease) = RefreshLease::begin(&rule.account_id) else {
         return Ok(());
     };
-    let operation = collect_usage(&rule.account_id, now_ms, |query| {
+    let deadline = tokio::time::Instant::now() + REFRESH_TIMEOUT;
+    let operation = collect_usage(&rule.account_id, now_ms, deadline, |query| {
         super::host_calls::limited(async move {
             host.service::<ListRecords>(query).await.map_err(|error| {
                 // 不透传服务错误正文、计费快照或详细资料。
@@ -390,22 +439,18 @@ pub async fn refresh_daily_usage(
             })
         })
     });
-    match tokio::time::timeout(REFRESH_TIMEOUT, operation).await {
-        Ok(Ok(snapshot)) => {
+    match operation.await {
+        Ok(snapshot) => {
             lease.finish(Some(snapshot));
             Ok(())
         }
-        Ok(Err(fault)) => {
+        Err(fault) => {
             lease.finish(None);
             if fault.code == ErrorCode::Cancelled {
                 Err(fault)
             } else {
                 Ok(())
             }
-        }
-        Err(_) => {
-            lease.finish(None);
-            Ok(())
         }
     }
 }

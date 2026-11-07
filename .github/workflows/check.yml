@@ -3,7 +3,7 @@ name: Build CPR image bridge plugin
 on:
   push:
     branches:
-      - builds/cpr-image-bridge-v0.7.6-official
+      - builds/cpr-image-bridge-v0.7.7-official
   workflow_dispatch:
 
 permissions:
@@ -61,14 +61,14 @@ jobs:
           test -f host-contract-test.log || printf 'host contract test did not start\n' > host-contract-test.log
           printf 'source_commit=%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/host-contract-result.txt"
           tail -n 300 host-contract-test.log >> "$RUNNER_TEMP/host-contract-result.txt"
-          git checkout --orphan logs/cpr-image-bridge-v0.7.6-official-host-contract
+          git checkout --orphan logs/cpr-image-bridge-v0.7.7-official-host-contract
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/host-contract-result.txt" ./test-output.txt
           git add -- test-output.txt
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'ci: record official host image contract result'
-          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.6-official-host-contract
+          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.7-official-host-contract
 
   package:
     strategy:
@@ -122,14 +122,14 @@ jobs:
           set -euo pipefail
           test -f cargo-test.log || printf 'cargo test did not start\n' > cargo-test.log
           tail -n 300 cargo-test.log > "$RUNNER_TEMP/test-output.txt"
-          git checkout --orphan 'logs/cpr-image-bridge-v0.7.6-official-${{ matrix.target }}'
+          git checkout --orphan 'logs/cpr-image-bridge-v0.7.7-official-${{ matrix.target }}'
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/test-output.txt" ./test-output.txt
           git add -- test-output.txt
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m 'ci: capture image bridge cargo failure'
-          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.6-official-${{ matrix.target }}
+          git push --force origin HEAD:refs/heads/logs/cpr-image-bridge-v0.7.7-official-${{ matrix.target }}
       - name: Build release executable
         run: cargo build --locked --release --target '${{ matrix.target }}'
       - name: Build official plugin packaging CLI
@@ -164,19 +164,20 @@ jobs:
         run: |
           npm install --prefix "${RUNNER_TEMP}/cpr-browser-qa" --no-audit --no-fund playwright@1.53.2
           node "${RUNNER_TEMP}/cpr-browser-qa/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Verify actual workbench and debug resources in the plugin sandbox
+      - name: Verify workbench, debugger and quota resources in the plugin sandbox
         shell: bash
         run: |
           node quota-ui/scripts/verify-workbench.mjs --playwright-module "${RUNNER_TEMP}/cpr-browser-qa/node_modules/playwright/index.mjs"
           node ci/verify-image-debug-ui.mjs --playwright-module "${RUNNER_TEMP}/cpr-browser-qa/node_modules/playwright/index.mjs"
+          node quota-ui/scripts/verify-built-ui.mjs --playwright-module "${RUNNER_TEMP}/cpr-browser-qa/node_modules/playwright/index.mjs"
       - name: Upload browser reports and previews
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-ui-evidence
           path: |
-            quota-ui/dist/qa/workbench-report.json
-            quota-ui/dist/qa/workbench-preview.png
+            quota-ui/dist/qa/*.json
+            quota-ui/dist/qa/*.png
             dist/debug-ui-qa/*.json
             dist/debug-ui-qa/*.png
           if-no-files-found: ignore
@@ -210,11 +211,11 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/ci-packages"
           cp dist/* "$RUNNER_TEMP/ci-packages/"
-          git checkout --orphan compiled/cpr-image-bridge-v0.7.6-official
+          git checkout --orphan compiled/cpr-image-bridge-v0.7.7-official
           git rm -rf . >/dev/null 2>&1 || true
           cp "$RUNNER_TEMP/ci-packages/"* .
           git add -- *.tar.gz *.sha256
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -m 'build: publish image bridge v0.7.6 packages'
-          git push --force origin HEAD:refs/heads/compiled/cpr-image-bridge-v0.7.6-official
+              commit -m 'build: publish image bridge v0.7.7 packages'
+          git push --force origin HEAD:refs/heads/compiled/cpr-image-bridge-v0.7.7-official

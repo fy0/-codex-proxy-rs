@@ -1,5 +1,5 @@
 //! 基于 Apache-2.0 的 cpr-quota-guard v0.2.3 配额保护逻辑；
-//! 保留原有五小时与周窗口的证据检查规则，不自行推断额度恢复。
+//! 五小时、周窗口与 UTC 每日费用仅在已知超限时拦截，未知状态保留提示。
 mod config;
 mod daily;
 mod host_calls;

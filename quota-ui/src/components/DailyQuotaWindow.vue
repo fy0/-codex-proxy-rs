@@ -15,24 +15,24 @@ const previousLimit = ref(limit.value ?? '')
 const invalid = computed(() => limit.value !== null && !isValidUsd(limit.value))
 const pending = computed(() => limit.value !== (props.savedLimit ?? null))
 const known = computed(() => props.usage?.usedUsd != null && formatUsd(props.usage.usedUsd) !== '未知')
-const complete = computed(() => known.value && ['ready', 'reached'].includes(props.usage?.status ?? ''))
+const complete = computed(() => known.value && (props.usage?.complete ?? ['ready', 'reached'].includes(props.usage?.status ?? '')))
 const state = computed(() => {
   if (!props.usage || props.usage.status === 'disabled') {
     if (pending.value && limit.value !== null)
       return { label: '保存后生效', tone: 'neutral' }
     if (props.savedLimit != null)
-      return { label: '暂无观测', tone: 'warning' }
+      return { label: '等待观测', tone: 'info' }
     return { label: '未开启', tone: 'neutral' }
   }
   return {
     ready: { label: '记录正常', tone: 'success' },
     reached: { label: '达到限额', tone: 'warning' },
-    unknown: { label: '费用待确认', tone: 'warning' },
-    stale: { label: '记录已过期', tone: 'warning' },
+    unknown: { label: '记录未齐', tone: 'info' },
+    stale: { label: '待刷新', tone: 'info' },
   }[props.usage.status]
 })
 const width = computed(() => {
-  if (!complete.value || props.usage?.limitUsd == null)
+  if (!known.value || props.usage?.limitUsd == null)
     return 0
   const savedLimit = Number(props.usage.limitUsd)
   return savedLimit === 0
@@ -41,9 +41,9 @@ const width = computed(() => {
 })
 const description = computed(() => {
   if (props.usage?.status === 'unknown')
-    return '费用数据不完整，暂停分配'
+    return '按已知费用判断，未知记录不单独拦截'
   if (props.usage?.status === 'stale')
-    return '费用记录已过期，暂停分配'
+    return '等待费用更新，未确认超限不拦截'
   if (pending.value)
     return '保存后按新日限额保护'
   if (props.usage?.status === 'reached')
@@ -84,14 +84,14 @@ function updateLimit(event: Event) {
 </script>
 
 <template>
-  <section class="qg-window qg-daily-window" :class="{ 'qg-window-warning': state.tone === 'warning', 'qg-window-unknown': !complete }" :aria-label="`${accountName} 每日费用`">
+  <section class="qg-window qg-daily-window" :class="{ 'qg-window-warning': state.tone === 'warning', 'qg-window-unknown': !known }" :aria-label="`${accountName} 每日费用`">
     <div class="qg-window-heading">
       <span>每日费用 <span class="qg-currency">USD</span></span>
       <span class="qg-badge" :class="`qg-badge-${state.tone}`">{{ state.label }}</span>
     </div>
     <div class="qg-daily-usage">
       <strong :title="known ? formatUsd(usage?.usedUsd) : undefined">{{ known ? formatUsd(usage?.usedUsd) : '—' }}</strong>
-      <span>{{ known ? (complete ? '今日已记录' : '已知费用，待核对') : (savedLimit != null ? '暂无完整记录' : '开启后统计') }}</span>
+      <span>{{ known ? (complete ? '今日已记录' : '今日已知费用，待补齐') : (savedLimit != null ? '尚无可计价记录' : '开启后统计') }}</span>
     </div>
     <div
       class="qg-progress"
@@ -99,8 +99,8 @@ function updateLimit(event: Event) {
       :aria-label="`${accountName} 每日费用使用率`"
       aria-valuemin="0"
       aria-valuemax="100"
-      :aria-valuenow="complete ? width : undefined"
-      :aria-valuetext="complete ? `${formatUsd(usage?.usedUsd)} / ${formatUsd(usage?.limitUsd)}，按已保存日限额` : state.label"
+      :aria-valuenow="known ? width : undefined"
+      :aria-valuetext="known ? `${complete ? '今日已记录' : '今日已知'} ${formatUsd(usage?.usedUsd)} / ${formatUsd(usage?.limitUsd)}，按已保存日限额` : state.label"
     >
       <div class="qg-progress-fill" :style="{ width: `${width}%` }" />
     </div>

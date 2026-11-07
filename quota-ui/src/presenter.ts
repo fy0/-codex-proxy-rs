@@ -54,9 +54,11 @@ export function percent(value: number | null | undefined) {
     : `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value)}%`
 }
 
-export function highestUsageWindow(windows: QuotaWindow[] | undefined, seconds: number) {
-  // 同周期可能有多个通用窗口，不能只显示较低的第一个值
-  return windows?.filter(window => window.windowSeconds === seconds)
+export function highestUsageWindow(windows: QuotaWindow[] | undefined, seconds: number, evaluatedAtMs = Date.now()) {
+  const matching = windows?.filter(window => window.windowSeconds === seconds) ?? []
+  const current = matching.filter(window => window.resetAtMs == null || window.resetAtMs > evaluatedAtMs)
+  // 已重置的旧窗口只作历史展示，不能盖住仍在生效的新窗口。
+  return (current.length ? current : matching)
     .reduce<QuotaWindow | undefined>((highest, window) => {
       if (!highest || (window.usedPercent != null && (highest.usedPercent == null || window.usedPercent > highest.usedPercent)))
         return window

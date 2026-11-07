@@ -39,6 +39,7 @@ export interface DailyUsage {
   usedUsd: string | null
   remainingUsd: string | null
   status: 'disabled' | 'ready' | 'reached' | 'unknown' | 'stale'
+  complete?: boolean
   unknownCostCount: number
   inFlightCount: number
   observedAtMs: number | null

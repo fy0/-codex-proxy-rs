@@ -152,6 +152,7 @@
     const started = clock();
     const result = {
       status: 'incomplete', images: [], text: '', requestId: null, responseId: null, httpStatus: null,
+      responseModel: null, imageToolObservations: [],
       request: null, headers: [], error: null, warnings: [], eventCount: 0, startedAtMs,
       timings: { headersMs: null, firstByteMs: null, firstEventMs: null, firstImageMs: null, totalMs: 0 },
       capture: input.captureRaw ? { chunks: [], bytes: 0, storedBytes: 0, truncated: false, complete: false } : null
@@ -186,6 +187,22 @@
         upstreamStage: safeIdentifier(value.stage) || (isRecord(details) ? safeIdentifier(details.stage) : null)
       };
     }
+    function observeImageTool(tool, eventType, source) {
+      if (!isRecord(tool) || !['image_generation', 'image_generation_call'].includes(tool.type)) return;
+      const parameters = {};
+      for (const key of ['model', 'size', 'quality', 'output_format', 'action']) {
+        const value = safeIdentifier(tool[key]);
+        if (value && value.length <= 128) parameters[key] = value;
+      }
+      if (typeof tool.output_compression === 'number' && Number.isFinite(tool.output_compression))
+        parameters.output_compression = tool.output_compression;
+      if (!Object.keys(parameters).length) return;
+      const fingerprint = JSON.stringify({ source, ...parameters });
+      if (result.imageToolObservations.some(({ eventType: previousType, ...observed }) => JSON.stringify(observed) === fingerprint)) return;
+      // 这是服务端响应中的参数回报，不是对其内部最终执行参数的保证。完整原始事件由调试页另行捕获。
+      if (result.imageToolObservations.length === 32) result.imageToolObservations.shift();
+      result.imageToolObservations.push({ eventType, source, ...parameters });
+    }
     function collectItem(item) {
       if (!isRecord(item) || item.type !== 'image_generation_call' || typeof item.result !== 'string' || !item.result) return;
       const itemId = safeIdentifier(item.id);
@@ -197,10 +214,15 @@
       if (!isRecord(document)) return;
       const responseId = safeIdentifier(document.id);
       if (responseId) result.responseId = responseId;
+      const responseModel = safeIdentifier(document.model);
+      if (responseModel) result.responseModel = responseModel;
+      if (Array.isArray(document.tools))
+        document.tools.forEach(tool => observeImageTool(tool, type, 'response.tools'));
       const requestId = safeIdentifier(document.request_id);
       if (!result.requestId && requestId) result.requestId = requestId;
       if (Array.isArray(document.output)) {
         document.output.forEach(collectItem);
+        document.output.forEach(item => observeImageTool(item, type, 'response.output'));
         const texts = [];
         for (const item of document.output)
           for (const part of Array.isArray(item && item.content) ? item.content : [])
@@ -234,6 +256,7 @@
       if (isRecord(event)) {
         if (typeof event.request_id === 'string' && !result.requestId) result.requestId = safeIdentifier(event.request_id);
         if (type === 'response.output_item.done') collectItem(event.item);
+        if (isRecord(event.item)) observeImageTool(event.item, type, 'event.item');
         if (type === 'response.output_text.delta' && typeof event.delta === 'string') result.text += event.delta;
         if (isRecord(event.response)) documentResult(event.response, type);
         else if (type === 'json') documentResult(event, type);

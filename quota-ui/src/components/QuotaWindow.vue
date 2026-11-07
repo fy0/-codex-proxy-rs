@@ -7,15 +7,19 @@ const props = defineProps<{
   label: string
   accountName: string
   window?: QuotaWindow
+  evaluatedAtMs?: number
   disabled?: boolean
 }>()
 const limit = defineModel<number | null>({ required: true })
 const previousLimit = ref(limit.value ?? 95)
 const observed = computed(() => props.window?.usedPercent != null)
+const expired = computed(() => props.window?.resetAtMs != null && props.window.resetAtMs <= (props.evaluatedAtMs ?? Date.now()))
 const width = computed(() => Math.min(100, Math.max(0, props.window?.usedPercent ?? 0)))
 const tone = computed(() => {
   if (!observed.value)
     return 'unknown'
+  if (expired.value)
+    return 'normal'
   if (limit.value !== null && width.value >= limit.value)
     return 'warning'
   return 'normal'
@@ -46,7 +50,7 @@ function updateLimit(event: Event) {
     <div class="qg-window-heading">
       <span>{{ label }}额度</span>
       <div class="qg-window-usage">
-        <strong>{{ observed ? percent(window?.usedPercent) : '未知' }}</strong><span>{{ observed ? '已使用' : '暂无观测' }}</span>
+        <strong>{{ observed ? percent(window?.usedPercent) : '未知' }}</strong><span>{{ observed ? (expired ? '上周期' : '已使用') : '暂无观测' }}</span>
       </div>
     </div>
     <div
@@ -56,7 +60,7 @@ function updateLimit(event: Event) {
       aria-valuemin="0"
       aria-valuemax="100"
       :aria-valuenow="observed ? width : undefined"
-      :aria-valuetext="percent(window?.usedPercent)"
+      :aria-valuetext="`${expired ? '上周期 ' : ''}${percent(window?.usedPercent)}`"
     >
       <div class="qg-progress-fill" :style="{ width: `${width}%` }" />
       <span v-if="limit !== null" class="qg-progress-limit" :style="{ left: `${limit}%` }" aria-hidden="true" />
@@ -74,7 +78,7 @@ function updateLimit(event: Event) {
       </div>
     </div>
     <p class="qg-window-reset">
-      重置 {{ formatDate(window?.resetAtMs) }}
+      {{ expired ? '已重置，等待新观测；旧窗口不拦截' : `重置 ${formatDate(window?.resetAtMs)}` }}
     </p>
   </section>
 </template>

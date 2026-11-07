@@ -56,11 +56,14 @@ function installFixture(images) {
         id: 'ig_fixture_' + index, type: 'image_generation_call', status: 'completed',
         result: (large ? images.large : images.small).split(',')[1],
       }
-      const response = { id: 'resp_fixture_' + index, status: mode, output: [item] }
+      const response = {
+        id: 'resp_fixture_' + index, model: 'gpt-6-luna', status: mode, output: [item],
+        tools: [{ type: 'image_generation', model: 'gpt-image-2-codex', size: 'auto', quality: 'auto', output_format: 'png' }],
+      }
       if (mode === 'failed') response.error = { code: 'fixture_failed', message: 'Synthetic response failure' }
       if (mode === 'incomplete') response.incomplete_details = { reason: 'max_output_tokens' }
       const events = [
-        { type: 'response.created', response: { id: response.id, status: 'in_progress' } },
+        { type: 'response.created', response: { id: response.id, model: response.model, tools: response.tools, status: 'in_progress' } },
         { type: 'response.output_item.done', output_index: 0, item },
         { type: 'response.' + mode, response },
       ]
@@ -330,6 +333,7 @@ try {
       downloadMatches: download.href === image.src, filename: download.download,
       chunks: call.chunks, maximumChunk: call.maximumChunk, calls: window.__workbenchFixture.modelCalls.length,
       actualSize: document.querySelector('#taskGrid .task-model').textContent,
+      parameterReport: document.querySelector('#taskGrid .task-parameters pre').textContent,
     }
   })
   assert.equal(preview.mime, 'image/png')
@@ -341,6 +345,8 @@ try {
   assert.ok(preview.chunks > 1 && preview.maximumChunk <= 65536)
   assert.equal(preview.calls, 1)
   assert.match(preview.actualSize, /实际 1024×1024/)
+  assert.match(preview.parameterReport, /model=gpt-image-2-codex/)
+  assert.match(preview.parameterReport, /size=auto/)
   await primary.page.screenshot({ path: path.join(output, 'workbench-preview.png'), fullPage: false })
   passed('即时单次桥调用、v0.5.1 JSON 深比较、无账号绑定、大图跨块预览与下载属性', preview)
 
@@ -382,6 +388,8 @@ try {
 
   await frame.locator('#legacyPanel > summary').click()
   await frame.locator('#legacyGrid [data-task-id="legacy-complete"]').waitFor()
+  const legacyGap = await frame.evaluate(() => document.getElementById('legacyPanel').getBoundingClientRect().top - document.querySelector('.layout').getBoundingClientRect().bottom)
+  assert.ok(legacyGap >= 16, '旧后台任务记录与上方卡片保留明确间距')
   assert.equal(await frame.evaluate(() => window.__workbenchFixture.calls.filter(call => call.path === 'api/jobs/image').length), 0)
   assert.equal(await frame.locator('#legacyGrid .task-card').count(), 5)
   await frame.locator('#legacyGrid [data-task-id="legacy-complete"]').getByText('读取旧图片', { exact: true }).click()
@@ -424,6 +432,23 @@ try {
   await assertClean(frame)
   await primary.page.close()
   passed('偏好 CAS 保存与刷新恢复，原配置不被偏好覆盖')
+
+  const mismatch = await openPage(images)
+  await mismatch.frame.locator('#size').selectOption('2160x3840')
+  await mismatch.frame.locator('#generate').click()
+  await waitCalls(mismatch.frame, 1)
+  assert.equal(await mismatch.frame.evaluate(() => window.__workbenchFixture.modelCalls[0].body.tools[0].size), '2160x3840')
+  await release(mismatch.frame, 0)
+  await waitCards(mismatch.frame, 'failed', 1)
+  const mismatchCard = mismatch.frame.locator('#taskGrid .task-card')
+  assert.match(await mismatchCard.locator('.task-error').innerText(), /请求尺寸 2160x3840，实际尺寸 1024x1024/)
+  assert.equal(await mismatchCard.locator('img').evaluate(image => image.src === window.__workbenchFixture.images.small), true, '尺寸不符仍保留原始图片，不插值或丢弃')
+  await mismatchCard.locator('.task-parameters summary').click()
+  assert.match(await mismatchCard.locator('.task-parameters pre').innerText(), /size=auto/)
+  assert.equal(await mismatch.frame.evaluate(() => window.__workbenchFixture.modelCalls.length), 1, '尺寸不符不自动重试')
+  await assertClean(mismatch.frame)
+  await mismatch.page.close()
+  passed('请求尺寸、服务端auto回报、实际像素分别可见；不伪造4K、不自动重试')
 
   const queue = await openPage(images)
   await queue.frame.locator('#parallelism').selectOption('4')

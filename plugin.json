@@ -3,7 +3,7 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "Codex Image Bridge: immediate Responses image workbench, raw request debugger, legacy image history, and account quota protection.",
   "license": "Apache-2.0",
   "engines": {
@@ -167,7 +167,7 @@
             "dailyLimitUsd": {
               "type": ["string", "null"],
               "title": "每日已记录费用上限（USD）",
-              "description": "默认关闭。覆盖该账号全部 CPR 请求，按 UTC 00:00 重置。精确十进制字符串，0 立即阻止。依据宿主持久用量记录；观测未知或过期时阻止调度；并发与记账延迟可能使最终费用超过此阈值，不是原子硬预算。",
+              "description": "默认关闭。覆盖该账号全部 CPR 请求，按 UTC 00:00 重置。精确十进制字符串，0 立即阻止。依据宿主持久用量记录；仅当天已知费用达到阈值才拦截，未知或过期观测不单独阻止调度；并发与记账延迟可能使最终费用超过此阈值，不是原子硬预算。",
               "pattern": "^[0-9]{1,18}(\\.[0-9]{1,12})?$",
               "default": null
             }
@@ -177,7 +177,7 @@
       "maxObservationAgeSeconds": {
         "type": "integer",
         "title": "额度观测有效期（秒）",
-        "description": "超过有效期视为未知，不对受保护账号放行。",
+        "description": "超过有效期提示更新；缺失或过期观测不单独拦截，已确认同一窗口超限保留至重置。",
         "minimum": 60,
         "maximum": 86400,
         "default": 300
