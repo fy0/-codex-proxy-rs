@@ -515,8 +515,44 @@ mod tests {
     #[test]
     fn management_route_and_page_are_registered() {
         let registration = registration();
-        assert_eq!(registration.routes.len(), 8);
+        assert!(
+            registration
+                .routes
+                .iter()
+                .any(|route| { route.method == "GET" && route.path == "api/account-options" })
+        );
         assert_eq!(registration.pages[0].entry, "web/index.html");
         assert_eq!(registration.pages[0].title, "画图测试");
+        let debug = registration
+            .pages
+            .iter()
+            .find(|page| page.id == "responses-debug")
+            .expect("raw Responses debugger must have its own management page");
+        assert_eq!(debug.entry, "web/debug.html");
+        let manifest: Value = serde_json::from_str(include_str!("../plugin.json")).unwrap();
+        let quota = crate::quota_management::registration();
+        for page in registration.pages.iter().chain(quota.pages.iter()) {
+            assert!(
+                manifest["resources"].get(&page.entry).is_some(),
+                "management page entry must be packaged: {}",
+                page.entry
+            );
+        }
+        let registered = registration
+            .resources
+            .iter()
+            .chain(quota.resources.iter())
+            .map(|resource| resource.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let packaged = manifest["resources"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            registered, packaged,
+            "registered and packaged resources must match"
+        );
     }
 }
