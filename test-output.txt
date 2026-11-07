@@ -1,0 +1,209 @@
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m bytemuck v1.25.2
+[1m[92m  Downloaded[0m adler2 v2.0.1
+[1m[92m  Downloaded[0m byteorder-lite v0.1.0
+[1m[92m  Downloaded[0m autocfg v1.5.1
+[1m[92m  Downloaded[0m bitflags v2.13.2
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m multiversion_no_op v1.0.0
+[1m[92m  Downloaded[0m futures-core v0.3.34
+[1m[92m  Downloaded[0m quick-error v2.0.1
+[1m[92m  Downloaded[0m core_detect v1.0.0
+[1m[92m  Downloaded[0m quote v1.0.47
+[1m[92m  Downloaded[0m bytes v1.12.1
+[1m[92m  Downloaded[0m rustversion v1.0.23
+[1m[92m  Downloaded[0m futures-task v0.3.34
+[1m[92m  Downloaded[0m cfg-if v1.0.5
+[1m[92m  Downloaded[0m multer v3.1.0
+[1m[92m  Downloaded[0m pin-project-lite v0.2.17
+[1m[92m  Downloaded[0m base64 v0.22.1
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m version_check v0.9.5
+[1m[92m  Downloaded[0m tokio-macros v2.7.2
+[1m[92m  Downloaded[0m fdeflate v0.3.7
+[1m[92m  Downloaded[0m futures-macro v0.3.34
+[1m[92m  Downloaded[0m simd-adler32 v0.3.10
+[1m[92m  Downloaded[0m thiserror v2.0.21
+[1m[92m  Downloaded[0m slab v0.4.12
+[1m[92m  Downloaded[0m thiserror-impl v2.0.21
+[1m[92m  Downloaded[0m zmij v1.0.23
+[1m[92m  Downloaded[0m zune-core v0.5.3
+[1m[92m  Downloaded[0m crc32fast v1.5.4
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m semver v1.0.28
+[1m[92m  Downloaded[0m mime v0.3.18
+[1m[92m  Downloaded[0m httparse v1.10.1
+[1m[92m  Downloaded[0m unicode-ident v1.0.27
+[1m[92m  Downloaded[0m simdutf8 v0.1.5
+[1m[92m  Downloaded[0m getrandom v0.4.3
+[1m[92m  Downloaded[0m serde_core v1.0.229
+[1m[92m  Downloaded[0m serde_derive v1.0.229
+[1m[92m  Downloaded[0m proc-macro2 v1.0.107
+[1m[92m  Downloaded[0m spin v0.9.9
+[1m[92m  Downloaded[0m base64 v0.23.1
+[1m[92m  Downloaded[0m miniz_oxide v0.9.1
+[1m[92m  Downloaded[0m socket2 v0.6.5
+[1m[92m  Downloaded[0m uuid v1.29.1
+[1m[92m  Downloaded[0m miniz_oxide v0.8.9
+[1m[92m  Downloaded[0m flate2 v1.1.11
+[1m[92m  Downloaded[0m image-webp v0.2.4
+[1m[92m  Downloaded[0m zune-jpeg v0.5.15
+[1m[92m  Downloaded[0m serde v1.0.229
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m png v0.18.1
+[1m[92m  Downloaded[0m mio v1.2.4
+[1m[92m  Downloaded[0m http v1.5.0
+[1m[92m  Downloaded[0m serde_json v1.0.154
+[1m[92m  Downloaded[0m futures-util v0.3.34
+[1m[92m  Downloaded[0m moxcms v0.8.1
+[1m[92m  Downloaded[0m zlib-rs v0.6.8
+[1m[92m  Downloaded[0m syn v3.0.9
+[1m[92m  Downloaded[0m image v0.25.10
+[1m[92m  Downloaded[0m encoding_rs v0.8.44
+[1m[92m  Downloaded[0m libc v0.2.191
+[1m[92m  Downloaded[0m pxfm v0.1.30
+[1m[92m  Downloaded[0m tokio v1.54.1
+[1m[92m   Compiling[0m proc-macro2 v1.0.107
+[1m[92m   Compiling[0m quote v1.0.47
+[1m[92m   Compiling[0m unicode-ident v1.0.27
+[1m[92m   Compiling[0m cfg-if v1.0.5
+[1m[92m   Compiling[0m libc v0.2.191
+[1m[92m   Compiling[0m serde_core v1.0.229
+[1m[92m   Compiling[0m simd-adler32 v0.3.10
+[1m[92m   Compiling[0m rustversion v1.0.23
+[1m[92m   Compiling[0m autocfg v1.5.1
+[1m[92m   Compiling[0m crc32fast v1.5.4
+[1m[92m   Compiling[0m syn v3.0.9
+[1m[92m   Compiling[0m adler2 v2.0.1
+[1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m pin-project-lite v0.2.17
+[1m[92m   Compiling[0m bytes v1.12.1
+[1m[92m   Compiling[0m itoa v1.0.18
+[1m[92m   Compiling[0m zmij v1.0.23
+[1m[92m   Compiling[0m encoding_rs v0.8.44
+[1m[92m   Compiling[0m miniz_oxide v0.9.1
+[1m[92m   Compiling[0m httparse v1.10.1
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m   Compiling[0m thiserror v2.0.21
+[1m[92m   Compiling[0m serde v1.0.229
+[1m[92m   Compiling[0m version_check v0.9.5
+[1m[92m   Compiling[0m getrandom v0.4.3
+[1m[92m   Compiling[0m serde_json v1.0.154
+[1m[92m   Compiling[0m multer v3.1.0
+[1m[92m   Compiling[0m flate2 v1.1.11
+[1m[92m   Compiling[0m mio v1.2.4
+[1m[92m   Compiling[0m socket2 v0.6.5
+[1m[92m   Compiling[0m miniz_oxide v0.8.9
+[1m[92m   Compiling[0m fdeflate v0.3.7
+[1m[92m   Compiling[0m slab v0.4.12
+[1m[92m   Compiling[0m futures-task v0.3.34
+[1m[92m   Compiling[0m quick-error v2.0.1
+[1m[92m   Compiling[0m scopeguard v1.2.0
+[1m[92m   Compiling[0m zune-core v0.5.3
+[1m[92m   Compiling[0m futures-core v0.3.34
+[1m[92m   Compiling[0m multiversion_no_op v1.0.0
+[1m[92m   Compiling[0m bitflags v2.13.2
+[1m[92m   Compiling[0m core_detect v1.0.0
+[1m[92m   Compiling[0m simdutf8 v0.1.5
+[1m[92m   Compiling[0m byteorder-lite v0.1.0
+[1m[92m   Compiling[0m pxfm v0.1.30
+[1m[92m   Compiling[0m futures-macro v0.3.34
+[1m[92m   Compiling[0m serde_derive v1.0.229
+[1m[92m   Compiling[0m tokio-macros v2.7.2
+[1m[92m   Compiling[0m thiserror-impl v2.0.21
+[1m[92m   Compiling[0m tokio v1.54.1
+[1m[92m   Compiling[0m futures-util v0.3.34
+[1m[92m   Compiling[0m moxcms v0.8.1
+[1m[92m   Compiling[0m image-webp v0.2.4
+[1m[92m   Compiling[0m png v0.18.1
+[1m[92m   Compiling[0m zune-jpeg v0.5.15
+[1m[92m   Compiling[0m semver v1.0.28
+[1m[92m   Compiling[0m http v1.5.0
+[1m[92m   Compiling[0m bytemuck v1.25.2
+[1m[92m   Compiling[0m spin v0.9.9
+[1m[92m   Compiling[0m mime v0.3.18
+[1m[92m   Compiling[0m base64 v0.23.1
+[1m[92m   Compiling[0m gateway-plugin-sdk v0.1.0 (https://github.com/zyycn/codex-proxy-rs.git?rev=96e8443ede051abdd8f0bac69462a7cfe2945633#96e8443e)
+[1m[92m   Compiling[0m image v0.25.10
+[1m[92m   Compiling[0m uuid v1.29.1
+[1m[92m   Compiling[0m base64 v0.22.1
+[1m[92m   Compiling[0m cpr-image-bridge v0.7.6 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 21.58s
+[1m[92m     Running[0m unittests src/main.rs (target/debug/deps/cpr_image_bridge-f7f2f367694989ae)
+
+running 57 tests
+test access::tests::native_images_are_visible_when_key_has_matching_accounts ... ok
+test access::tests::response_bridge_checks_driver_access_only_for_same_accounts ... ok
+test bridge::tests::accepts_data_url_edits_and_mask ... ok
+test bridge::tests::direct_edits_use_native_images_wire_shape ... ok
+test bridge::tests::preserves_prompt_and_uses_explicit_image_model ... ok
+test bridge::tests::parses_standard_multipart_edit ... ok
+test bridge::tests::rejects_missing_edit_images_and_unsupported_url_result ... ok
+test config::tests::auto_mode_prefers_codex_native_images ... ok
+test config::tests::configured_driver_takes_effect ... ok
+test config::tests::defaults_to_eight_per_account_and_accepts_old_config ... ok
+test config::tests::image_models_are_configurable_without_exposing_unlisted_models ... ok
+test config::tests::image_pool_is_explicit_and_no_scope_defaults_fail_closed ... ok
+test config::tests::rejects_invalid_configuration ... ok
+test jobs::integration_tests::absent_history_is_empty_without_creating_state ... ok
+test jobs::integration_tests::cancel_changes_only_selected_history_status_and_keeps_files ... ok
+test jobs::integration_tests::old_statuses_and_unknown_fields_survive_without_execution ... ok
+test jobs::integration_tests::bounded_recovery_rotates_past_missing_files ... ok
+test jobs::integration_tests::stale_state_write_surfaces_conflict_without_retry_or_reset ... ok
+test management::tests::account_choices_include_email_without_changing_identity ... ok
+test management::tests::management_route_and_page_are_registered ... FAILED
+test management::tests::preference_schema_accepts_4k_and_rejects_bad_values ... ok
+test models::tests::no_scope_does_not_add_any_image_or_distort_regular_models ... ok
+test models::tests::only_qualified_images_added_and_normal_models_preserved ... ok
+test jobs::integration_tests::unavailable_or_invalid_state_never_becomes_empty_history ... ok
+test quota_guard::config::tests::daily_limits_are_decimal_strings_and_zero_is_enabled ... ok
+test quota_guard::config::tests::old_rules_keep_daily_protection_disabled_and_percent_defaults ... ok
+test quota_guard::daily::tests::an_in_flight_record_is_visible_without_fabricating_a_final_fee ... ok
+test jobs::integration_tests::only_complete_committed_running_images_are_recovered ... ok
+test quota_guard::daily::tests::empty_complete_ledger_is_zero_but_cold_cache_is_unknown ... ok
+test quota_guard::daily::tests::incomplete_duplicate_mismatched_and_unbounded_pagination_is_rejected ... ok
+test quota_guard::daily::tests::invalid_currency_amount_is_unknown_not_zero_or_rounded ... ok
+test quota_guard::daily::tests::money_is_exact_bounded_and_never_rounded ... ok
+test quota_guard::daily::tests::public_usage_contract_is_camel_case_with_explicit_currency_timezone_and_nulls ... ok
+test quota_guard::daily::tests::rebuilding_after_restart_recovers_the_host_ledger ... ok
+test quota_guard::daily::tests::refresh_leases_are_single_flight_and_cancellation_fails_closed ... ok
+test quota_guard::daily::tests::stale_failed_future_and_new_day_observations_fail_closed ... ok
+test quota_guard::daily::tests::unknown_final_fees_and_running_requests_are_distinct ... ok
+test quota_guard::daily::tests::complete_pagination_counts_all_keys_models_and_operations_once ... ok
+test quota_guard::host_calls::tests::independent_callers_share_one_callback_limit ... ok
+test quota_guard::runtime::tests::refresh_selection_is_bounded_fair_and_attempts_do_not_hold_a_network_lock ... ok
+test quota_management::tests::saving_daily_rules_preserves_image_configuration_and_old_window_rules ... ok
+test quota_management::tests::unknown_daily_usage_is_included_in_the_account_assessment ... ok
+test response::tests::can_parse_final_json_and_stream_result ... ok
+test response::tests::incomplete_and_error_are_not_false_successes ... ok
+test response::tests::prefers_completed_outputs_and_keeps_fallback_when_empty ... ok
+test state_migration::tests::empty_batch_is_supported_and_unsupported_versions_rejected ... ok
+test state_migration::tests::manifest_declares_compatible_target_only_for_workbench ... ok
+test state_migration::tests::original_preference_is_kept_without_mutation ... ok
+test tests::codex_native_header_parity_generates_safe_turn_id ... ok
+test tests::codex_native_header_parity_preserves_valid_turn_and_originator ... ok
+test tests::detects_multipart_model_after_an_uploaded_image ... ok
+test tests::image_model_registry_does_not_accept_unrecognized_models ... ok
+test tests::response_header_replacement_drops_stale_lengths_and_compression ... ok
+test tests::targets_only_images_and_skips_codex_native_catalog ... ok
+test quota_guard::host_calls::tests::timeout_cancels_queued_and_active_calls_without_leaking_permits ... ok
+test policy::tests::detects_tool_and_native_images_without_secret_headers ... ok
+test jobs::integration_tests::archived_image_chunks_preserve_bytes_and_reject_invalid_offsets ... ok
+
+failures:
+
+---- management::tests::management_route_and_page_are_registered stdout ----
+
+thread 'management::tests::management_route_and_page_are_registered' (3224) panicked at src/management.rs:518:9:
+assertion `left == right` failed
+  left: 9
+ right: 8
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    management::tests::management_route_and_page_are_registered
+
+test result: FAILED. 56 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+[1m[91merror[0m: test failed, to rerun pass `--bin cpr-image-bridge`
