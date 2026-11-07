@@ -27,7 +27,7 @@ const operationMock = dataModule('export function errorMessage(error, fallback) 
 
 async function compile(relative, replacements = {}) {
   const source = await readFile(path.join(core, relative), 'utf8')
-  let code = stripTypeScriptTypes(source, { mode: 'transform', sourceMap: false })
+  let code = stripTypeScriptTypes(source, { mode: 'strip' })
   for (const [name, replacement] of Object.entries(replacements)) {
     const quoted = JSON.stringify(replacement)
     code = code.replaceAll("from '" + name + "'", 'from ' + quoted)
