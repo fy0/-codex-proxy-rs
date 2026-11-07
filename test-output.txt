@@ -1,0 +1,34 @@
+source_commit=c5ec7593a925d71aadfa6f360d240dc3c78e4999
+[1m[92m    Updating[0m crates.io index
+[1m[92m   Compiling[0m gateway-core v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-core)
+[1m[92m   Compiling[0m gateway-protocol v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-protocol)
+[1m[92m   Compiling[0m gateway-host v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-host)
+[1m[92m   Compiling[0m gateway-admin v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-admin)
+[1m[92m   Compiling[0m provider-openai v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/providers/openai)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+[1m[92m     Running[0m tests/main.rs (host/backend/target/debug/deps/main-dfca2b6dbc075cc5)
+
+running 3 tests
+test provider::contract::image_bridge_callback_contract::native_images_model_target_is_invalid_before_any_upstream_send ... ok
+test provider::contract::image_bridge_callback_contract::native_images_provider_endpoint_preserves_original_parameters ... ok
+test provider::contract::image_bridge_callback_contract::responses_image_tool_crosses_real_parser_and_http_transport ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1090 filtered out; finished in 0.04s
+
+[1m[92m   Compiling[0m gateway-core v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-core)
+[1m[92m   Compiling[0m gateway-protocol v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-protocol)
+[1m[92m   Compiling[0m gateway-store v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-store)
+[1m[92m   Compiling[0m gateway-plugin-runtime v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-plugin/runtime)
+[1m[92m   Compiling[0m gateway-plugin-sdk v0.1.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-plugin/sdk)
+[1m[92m   Compiling[0m gateway-admin v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-admin)
+[1m[92m   Compiling[0m gateway-host v0.0.0 (/home/runner/work/-codex-proxy-rs/-codex-proxy-rs/host/backend/crates/gateway-host)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 54.47s
+[1m[92m     Running[0m unittests src/lib.rs (host/backend/target/debug/deps/gateway_plugin_runtime-5219937890998f0a)
+
+running 3 tests
+test callback::model::image_bridge_capacity_contract::small_image_event_is_read_decoded_committed_and_finalized ... ok
+test callback::model::image_bridge_capacity_contract::image_event_with_small_raw_frame_exceeds_default_runtime_budget ... ok
+test callback::model::image_bridge_capacity_contract::sdk_eight_mib_limit_still_applies_with_a_larger_runtime_budget ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
