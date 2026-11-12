@@ -1,0 +1,66 @@
+name: Verify image bridge quota isolation
+
+on:
+  push:
+    branches:
+      - fix/image-bridge-quota-isolation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: zyycn/codex-proxy-rs
+          ref: 96e8443ede051abdd8f0bac69462a7cfe2945633
+          path: host
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+          targets: ${{ matrix.target }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-image-bridge-v73
+      - name: Check formatting and run plugin regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo generate-lockfile
+          cargo test --locked 2>&1 | tee quota-isolation-test.log
+      - name: Build and package plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target '${{ matrix.target }}'
+          cargo install --locked --path host/backend/apps/plugin-cli --root "${RUNNER_TEMP}/cpr-tools"
+          "${RUNNER_TEMP}/cpr-tools/bin/cpr-plugin" package \
+            --manifest plugin.json \
+            --binary './target/${{ matrix.target }}/release/cpr-image-bridge' \
+            --target '${{ matrix.target }}' \
+            --resource-map web=web \
+            --output-dir dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quota-isolation-${{ matrix.target }}
+          path: |
+            quota-isolation-test.log
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error

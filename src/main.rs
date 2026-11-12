@@ -5,6 +5,7 @@ mod jobs;
 mod management;
 mod models;
 mod policy;
+mod policy_error;
 mod quota_guard;
 mod quota_management;
 mod response;
@@ -72,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let registry = Arc::clone(&registry);
                 async move {
                     match call {
-                        MiddlewareCall::Http(call) => handle_http(*call, &config)
+                        MiddlewareCall::Http(call) => handle_http(*call, &config, &registry)
                             .await
                             .map(MiddlewareResult::Http),
                         MiddlewareCall::Request(call) => handle_request(*call, &config, &registry)
@@ -359,7 +360,77 @@ fn prepare_codex_image_headers(request: &mut HttpRequest, call_id: &str) {
     );
 }
 
-async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, PluginFault> {
+async fn handle_http(
+    call: HttpCall,
+    config: &Config,
+    registry: &policy::ImageRegistry,
+) -> Result<HttpResponse, PluginFault> {
+    let response = handle_http_inner(call, config).await?;
+    annotate_policy_denial(response, registry).await
+}
+
+async fn annotate_policy_denial(
+    mut response: HttpResponse,
+    registry: &policy::ImageRegistry,
+) -> Result<HttpResponse, PluginFault> {
+    if response.status == 200
+        && header_value(&response.headers, "content-type").is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("text/event-stream")
+        })
+        && let Some(id) = header_value(&response.headers, "x-gateway-request-id")
+    {
+        let mut filter = policy_error::SseFilter::new(registry.denials.clone(), id.to_owned());
+        response.body = response.body.map_frames(move |frame| {
+            Ok(match frame {
+                HttpFrame::Data(bytes) => filter.push(bytes).map(HttpFrame::Data),
+                trailers => Some(trailers),
+            })
+        });
+        remove_headers(&mut response.headers, &["content-length"]);
+        return Ok(response);
+    }
+    if response.status != 403 {
+        return Ok(response);
+    }
+    // 只使用宿主签发的模型请求 ID，不使用客户端头或上游请求 ID 进行关联。
+    let Some(denial) = header_value(&response.headers, "x-gateway-request-id")
+        .and_then(|id| registry.denials.remove(id))
+    else {
+        return Ok(response);
+    };
+    let Some(raw) = read_body(&mut response.body, 64 * 1024).await? else {
+        return Err(PluginFault::new(
+            ErrorCode::Fault,
+            "policy error body is too large",
+        ));
+    };
+    let body = serde_json::from_slice::<Value>(&raw).ok();
+    if body
+        .as_ref()
+        .and_then(|body| body.pointer("/error/code"))
+        .and_then(Value::as_str)
+        != Some("policy_denied")
+    {
+        response.body = HttpBody::from_bytes(raw);
+        return Ok(response);
+    }
+    response.status = denial.status();
+    replace_body(
+        &mut response,
+        serde_json::to_vec(&denial.body()).unwrap(),
+        "application/json",
+    );
+    remove_headers(&mut response.headers, &["cache-control"]);
+    add_header(&mut response.headers, "cache-control", "no-store");
+    Ok(response)
+}
+
+async fn handle_http_inner(call: HttpCall, config: &Config) -> Result<HttpResponse, PluginFault> {
     let HttpCall {
         mut request,
         next,
@@ -668,6 +739,94 @@ async fn handle_http(call: HttpCall, config: &Config) -> Result<HttpResponse, Pl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn denied_response(request_id: &str, code: &str) -> HttpResponse {
+        let mut response = error_response(403, code, "Request blocked by policy.");
+        add_header(&mut response.headers, "x-gateway-request-id", request_id);
+        add_header(&mut response.headers, "x-request-id", "original-request-id");
+        response
+    }
+
+    fn quota_denial() -> policy_error::Denial {
+        policy_error::Denial {
+            kind: policy_error::DenialKind::Quota,
+            model: Some("gpt-6.1-sol".into()),
+            candidate_count: 3,
+            scoped_candidate_count: 1,
+            quota_blocked_count: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn quota_http_error_identifies_its_source_and_preserves_request_ids() {
+        let registry = policy::ImageRegistry::default();
+        registry.denials.record("own-request", quota_denial());
+        let mut response =
+            annotate_policy_denial(denied_response("own-request", "policy_denied"), &registry)
+                .await
+                .unwrap();
+        assert_eq!(response.status, 429);
+        assert_eq!(
+            header_value(&response.headers, "x-request-id"),
+            Some("original-request-id")
+        );
+        assert_eq!(
+            header_value(&response.headers, "x-gateway-request-id"),
+            Some("own-request")
+        );
+        let raw = read_body(&mut response.body, 64 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&raw).unwrap(),
+            quota_denial().body()
+        );
+        assert_eq!(
+            header_value(&response.headers, "content-length"),
+            Some(raw.len().to_string().as_str())
+        );
+        assert!(registry.denials.remove("own-request").is_none());
+    }
+
+    #[tokio::test]
+    async fn unrelated_policy_errors_never_inherit_another_requests_quota_denial() {
+        let registry = policy::ImageRegistry::default();
+        registry.denials.record("own-request", quota_denial());
+        let mut response =
+            annotate_policy_denial(denied_response("other-request", "policy_denied"), &registry)
+                .await
+                .unwrap();
+        assert_eq!(response.status, 403);
+        let raw = read_body(&mut response.body, 64 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&raw).unwrap()["error"]["code"],
+            "policy_denied"
+        );
+        assert!(registry.denials.remove("own-request").is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_error_code_on_the_same_request_is_preserved() {
+        let registry = policy::ImageRegistry::default();
+        registry.denials.record("own-request", quota_denial());
+        let mut response =
+            annotate_policy_denial(denied_response("own-request", "upstream_denied"), &registry)
+                .await
+                .unwrap();
+        assert_eq!(response.status, 403);
+        let raw = read_body(&mut response.body, 64 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&raw).unwrap()["error"]["code"],
+            "upstream_denied"
+        );
+    }
 
     #[test]
     fn targets_only_images_and_skips_codex_native_catalog() {

@@ -1,4 +1,4 @@
-# CPR Image Bridge v0.7.8 (official SDK)
+# CPR Image Bridge v0.8.1 (official SDK)
 
 面向官方 [zyycn/codex-proxy-rs](https://github.com/zyycn/codex-proxy-rs) 的独立 Rust 插件。SDK、宿主合同测试和打包工具固定提交 `96e8443ede051abdd8f0bac69462a7cfe2945633`；协议要求 RPC v7、middleware v6、scheduler v3、management v2，Rust 1.99.1。
 
@@ -93,6 +93,20 @@ v0.7.8 增加每日记账 IANA 时区、当日手工校准和具体的记录未�
 额度保护与图片账号筛选合并在同一个 scheduler。原独立 `cpr-quota-guard` 若仍有启用的 scheduler 绑定，不会被本插件静默停用；需要在实际部署中核对并移除重叠绑定。建议插件故障策略为 reject。升级本插件不会自动修改其它插件实例。
 
 原版 Quota Guard 代码来源为 [Mr-xiongyq/cpr-quota-guard](https://github.com/Mr-xiongyq/cpr-quota-guard)，Apache-2.0，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+### 调度拒绝诊断
+
+额度只按账号判断，不保存模型全局封禁。某个账号触发保护后，其他合格账号仍交由 CPR 原生调度；只有当前请求范围内的候选账号全部不可用才拒绝。Responses 中允许调用 `image_generation` 的请求也需要图片账号范围，显式 `tool_choice: "none"` 的普通请求不受图片白名单限制。
+
+同时启用本插件的 HTTP 中间件与 scheduler 时，本插件引起的 HTTP JSON 和 SSE 策略拒绝使用以下机器码：
+
+| code | HTTP | 含义 |
+| --- | --- | --- |
+| `cpr_quota_guard_exhausted` | 429 | 当前范围内的候选账号均触发额度保护 |
+| `cpr_image_scope_denied` | 403 | 图片模型未启用，或没有候选账号属于图片白名单 / 分组 |
+| `cpr_image_access_denied` | 403 | 图片范围内没有当前 Client Key 获准使用的账号 |
+
+响应保留请求 ID，并增加 `error.source: "community.codex-image-bridge"`、当前模型及候选 / 范围内 / 超限账号数量；不公开账号 ID、邮箱或凭据。只通过宿主签发的 `x-gateway-request-id` 关联本实例的拒绝记录，其他插件或宿主策略的错误保持原样。SSE 保留既有 HTTP 状态和事件名称，在失败事件中提供相同错误信息；WebSocket 仍使用宿主错误合同。
 
 ## 配置和标准 API
 

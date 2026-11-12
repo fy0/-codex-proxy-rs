@@ -3,7 +3,7 @@
   "publisher": "community",
   "name": "codex-image-bridge",
   "displayName": "Codex Image Bridge",
-  "version": "0.7.8",
+  "version": "0.8.1",
   "description": "Codex Image Bridge: immediate image workbench, Responses and native Images debugger, local-day quota accounting and manual calibration.",
   "license": "Apache-2.0",
   "engines": {

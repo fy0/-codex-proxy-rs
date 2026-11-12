@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::config::Config;
+use crate::policy_error::{Denial, DenialKind, DenialRegistry};
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
     call::{
@@ -28,6 +29,7 @@ pub struct ImageIntent {
 #[derive(Default)]
 pub struct ImageRegistry {
     entries: Mutex<HashMap<String, ImageIntent>>,
+    pub denials: DenialRegistry,
 }
 
 impl ImageRegistry {
@@ -90,6 +92,10 @@ pub fn image_intent(operation: &str, body: &[u8]) -> Option<String> {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| Some("gpt-image-1".to_owned()));
+    }
+    // 显式关闭工具的普通对话不能被可用工具清单误判成生图请求。
+    if payload.get("tool_choice").and_then(Value::as_str) == Some("none") {
+        return None;
     }
     let tools = payload.get("tools")?.as_array()?;
     tools
@@ -155,6 +161,23 @@ pub async fn schedule(
     if req.provider != "openai" {
         return Ok(TypedReply::new(AccountScheduleDecision::Delegate));
     }
+    registry.denials.remove(&req.request_id);
+    if req.candidates.is_empty() {
+        return Ok(TypedReply::new(AccountScheduleDecision::Delegate));
+    }
+    let reject = |kind, scoped, blocked| {
+        registry.denials.record(
+            &req.request_id,
+            Denial {
+                kind,
+                model: req.model.clone(),
+                candidate_count: req.candidates.len(),
+                scoped_candidate_count: scoped,
+                quota_blocked_count: blocked,
+            },
+        );
+        TypedReply::new(AccountScheduleDecision::Reject)
+    };
     let intent = registry.get(&req.request_id);
     // 如果因绑定或载荷协议无法登记的图像模型已进入调度，至少按白名单收窄。
     let image_model = intent
@@ -164,7 +187,7 @@ pub async fn schedule(
     // 额度保护对所有 OpenAI 请求有效；生图白名单仅对实际图片请求生效。
     let mut approved = if let Some(model) = image_model {
         if !config.enabled_image_model(model) || !config.has_image_scope() {
-            return Ok(TypedReply::new(AccountScheduleDecision::Reject));
+            return Ok(reject(DenialKind::ImageScope, 0, 0));
         }
         let group = group_accounts(&call.host, &config.image_group_ids).await?;
         let explicit = config
@@ -179,7 +202,7 @@ pub async fn schedule(
             .map(|c| c.account_id.clone())
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return Ok(TypedReply::new(AccountScheduleDecision::Reject));
+            return Ok(reject(DenialKind::ImageScope, 0, 0));
         }
         let mut approved = candidates.iter().cloned().collect::<HashSet<_>>();
         if let Some(intent) = intent.as_ref() {
@@ -207,16 +230,20 @@ pub async fn schedule(
             .collect::<HashSet<_>>()
     };
     if approved.is_empty() {
-        return Ok(TypedReply::new(AccountScheduleDecision::Reject));
+        return Ok(reject(DenialKind::ImageAccess, 0, 0));
     }
-    // 按原额度插件的保守证据策略过滤，额度缺失/过期时拒绝使用受保护账号。
+    // 只排除当前请求中已确认超限的账号；不按模型保存或扩大封禁范围。
     let quota_candidates = approved.iter().cloned().collect::<Vec<_>>();
     let blocked =
         crate::quota_guard::protected_ids(&call.host, &quota_candidates, &config.quota_guard)
             .await?;
     approved.retain(|id| !blocked.contains(id));
     if approved.is_empty() {
-        return Ok(TypedReply::new(AccountScheduleDecision::Reject));
+        return Ok(reject(
+            DenialKind::Quota,
+            quota_candidates.len(),
+            blocked.len(),
+        ));
     }
     let excluded = req
         .candidates
@@ -232,6 +259,10 @@ pub async fn schedule(
         }
     }))
 }
+
+#[cfg(test)]
+#[path = "policy/integration_tests.rs"]
+mod integration_tests;
 
 #[cfg(test)]
 mod tests {
