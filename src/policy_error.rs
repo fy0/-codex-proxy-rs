@@ -13,6 +13,7 @@ const MAX_ENTRIES: usize = 4096;
 #[derive(Clone, Copy)]
 pub enum DenialKind {
     Quota,
+    QuotaFiltered,
     ImageScope,
     ImageAccess,
 }
@@ -30,13 +31,14 @@ impl Denial {
     pub fn status(&self) -> u16 {
         match self.kind {
             DenialKind::Quota => 429,
-            DenialKind::ImageScope | DenialKind::ImageAccess => 403,
+            DenialKind::QuotaFiltered | DenialKind::ImageScope | DenialKind::ImageAccess => 403,
         }
     }
 
     pub fn code(&self) -> &'static str {
         match self.kind {
             DenialKind::Quota => "cpr_quota_guard_exhausted",
+            DenialKind::QuotaFiltered => "cpr_quota_guard_filtered_policy_denied",
             DenialKind::ImageScope => "cpr_image_scope_denied",
             DenialKind::ImageAccess => "cpr_image_access_denied",
         }
@@ -47,6 +49,11 @@ impl Denial {
             DenialKind::Quota => format!(
                 "CPR Image Bridge quota guard blocked all {} account(s) remaining in this request's scope ({} host candidate(s)). Other accounts and models are not globally disabled.",
                 self.scoped_candidate_count, self.candidate_count,
+            ),
+            DenialKind::QuotaFiltered => format!(
+                "Gateway policy denied this request after CPR Image Bridge quota guard excluded {} of {} scoped account(s); {} candidate(s) remained. Check session/account restrictions if the session is bound to an excluded account. This is not a global model quota ban.",
+                self.quota_blocked_count, self.scoped_candidate_count,
+                self.scoped_candidate_count.saturating_sub(self.quota_blocked_count),
             ),
             DenialKind::ImageScope => "CPR Image Bridge found no account in the configured image scope for this request. Requests declaring an image_generation tool also require an allowed image account.".to_owned(),
             DenialKind::ImageAccess => "CPR Image Bridge found no image account allowed by this Client Key.".to_owned(),

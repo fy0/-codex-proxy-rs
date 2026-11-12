@@ -1,7 +1,7 @@
 //! 通过真实 SDK 会话执行调度和额度回调，验证账号隔离及请求级拒绝归因。
 use super::*;
 use gateway_plugin_sdk::{
-    CallContext, Contributions, Frame, Handshake, Message, PROTOCOL_VERSION, Stage,
+    CallBudgets, CallContext, Contributions, Frame, Handshake, Message, PROTOCOL_VERSION, Stage,
     call::data::{ACCESS_CHECK, QUOTA_DETAILS},
     client::{
         CallFuture, CallReply, PluginCall, PluginHandler, PluginSession, SessionConfig, read_frame,
@@ -67,10 +67,13 @@ impl Host {
         let (host, plugin) = tokio::io::duplex(64 * 1024);
         let (plugin_reader, plugin_writer) = tokio::io::split(plugin);
         let task = tokio::spawn(async move {
-            let session =
+            let mut session =
                 PluginSession::accept(plugin_reader, plugin_writer, SessionConfig::default())
                     .await
                     .unwrap();
+            session
+                .set_call_budgets(CallBudgets::from([(Stage::Scheduling, 10_000)]))
+                .unwrap();
             session.run(handler).await.unwrap();
         });
         let (reader, writer) = tokio::io::split(host);
@@ -249,7 +252,10 @@ async fn one_accounts_limit_never_denies_other_accounts_or_persists_a_model_ban(
         host.schedule("r3", "another-model", &["b", "c"]).await,
         json!({"decision":"delegate"})
     );
-    assert!(host.registry.denials.remove("r1").is_none());
+    assert_eq!(
+        host.registry.denials.remove("r1").unwrap().code(),
+        "cpr_quota_guard_filtered_policy_denied"
+    );
     host.quota("a", 10.0);
     assert_eq!(
         host.schedule("r4", "gpt-6.1-sol", &["a", "b", "c"]).await,

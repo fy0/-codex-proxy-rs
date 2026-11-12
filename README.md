@@ -103,6 +103,7 @@ v0.7.8 增加每日记账 IANA 时区、当日手工校准和具体的记录未�
 | code | HTTP | 含义 |
 | --- | --- | --- |
 | `cpr_quota_guard_exhausted` | 429 | 当前范围内的候选账号均触发额度保护 |
+| `cpr_quota_guard_filtered_policy_denied` | 403 | Guard 仅排除部分账号，宿主仍拒绝请求；需核对会话是否必须跟随被排除账号，不能据此判断其他账号也超限 |
 | `cpr_image_scope_denied` | 403 | 图片模型未启用，或没有候选账号属于图片白名单 / 分组 |
 | `cpr_image_access_denied` | 403 | 图片范围内没有当前 Client Key 获准使用的账号 |
 

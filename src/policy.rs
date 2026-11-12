@@ -245,6 +245,20 @@ pub async fn schedule(
             blocked.len(),
         ));
     }
+    if !blocked.is_empty() {
+        // 宿主可能因会话必须跟随被排除账号而拒绝切换。保存过滤事实，
+        // 仅在最终确为 policy_denied 时补充诊断，不将其称为全部账号超限。
+        registry.denials.record(
+            &req.request_id,
+            Denial {
+                kind: DenialKind::QuotaFiltered,
+                model: req.model.clone(),
+                candidate_count: req.candidates.len(),
+                scoped_candidate_count: quota_candidates.len(),
+                quota_blocked_count: blocked.len(),
+            },
+        );
+    }
     let excluded = req
         .candidates
         .iter()

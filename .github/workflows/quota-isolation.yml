@@ -10,6 +10,37 @@ permissions:
   contents: read
 
 jobs:
+  host-policy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: zyycn/codex-proxy-rs
+          ref: 96e8443ede051abdd8f0bac69462a7cfe2945633
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          key: image-bridge-host-contract-96e8443
+      - name: Verify real Core session behavior after plugin account filtering
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path backend/Cargo.toml \
+            -p provider-openai --test main \
+            provider::contract::session_binding::child_binding_respects_filtered_delegation_and_explicit_plugin_choices \
+            -- --exact --nocapture 2>&1 | tee host-policy-test.log
+          grep -q '1 passed' host-policy-test.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: official-host-policy-evidence
+          path: host-policy-test.log
   plugin:
     strategy:
       fail-fast: false
