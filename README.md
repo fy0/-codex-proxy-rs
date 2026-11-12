@@ -107,7 +107,7 @@ v0.7.8 增加每日记账 IANA 时区、当日手工校准和具体的记录未�
 | `cpr_image_scope_denied` | 403 | 图片模型未启用，或没有候选账号属于图片白名单 / 分组 |
 | `cpr_image_access_denied` | 403 | 图片范围内没有当前 Client Key 获准使用的账号 |
 
-响应保留请求 ID，并增加 `error.source: "community.codex-image-bridge"`、当前模型及候选 / 范围内 / 超限账号数量；不公开账号 ID、邮箱或凭据。只通过宿主签发的 `x-gateway-request-id` 关联本实例的拒绝记录，其他插件或宿主策略的错误保持原样。SSE 保留既有 HTTP 状态和事件名称，在失败事件中提供相同错误信息；WebSocket 仍使用宿主错误合同。
+响应保留请求 ID，并增加 `error.source: "community.codex-image-bridge"`、当前模型及候选 / 范围内 / 超限账号数量；不公开账号 ID、邮箱或凭据。只通过宿主签发的 `x-gateway-request-id` 关联本实例的拒绝或过滤记录，没有关联记录的策略错误保持原样。SSE 保留既有 HTTP 状态和事件名称，在失败事件中提供相同错误信息；WebSocket 仍使用宿主错误合同。
 
 ## 配置和标准 API
 

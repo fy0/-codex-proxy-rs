@@ -327,6 +327,16 @@ async fn handle_request(
         marked_image.or_else(|| policy::image_intent(&request.head.operation, &request.body));
     if let Some(model) = image_model {
         if !config.has_image_scope() || !config.enabled_image_model(&model) {
+            registry.denials.record(
+                &request.head.request_id,
+                policy_error::Denial {
+                    kind: policy_error::DenialKind::ImageScope,
+                    model: request.head.model.clone(),
+                    candidate_count: 0,
+                    scoped_candidate_count: 0,
+                    quota_blocked_count: 0,
+                },
+            );
             return Err(PluginFault::new(
                 ErrorCode::PermissionDenied,
                 "image model or account scope is disabled",
@@ -373,6 +383,19 @@ async fn annotate_policy_denial(
     mut response: HttpResponse,
     registry: &policy::ImageRegistry,
 ) -> Result<HttpResponse, PluginFault> {
+    // 本层不解压正文，也不消费已知超出诊断预算的错误响应。
+    if header_value(&response.headers, "content-encoding")
+        .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"))
+        || (response.status == 403
+            && header_value(&response.headers, "content-length")
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_some_and(|length| length > 64 * 1024))
+    {
+        if let Some(id) = header_value(&response.headers, "x-gateway-request-id") {
+            registry.denials.remove(id);
+        }
+        return Ok(response);
+    }
     if response.status == 200
         && header_value(&response.headers, "content-type").is_some_and(|value| {
             value
@@ -859,6 +882,60 @@ mod tests {
             serde_json::from_slice::<Value>(&raw).unwrap()["error"]["code"],
             "upstream_denied"
         );
+    }
+
+    #[tokio::test]
+    async fn lazy_sse_response_can_explain_a_denial_recorded_after_response_headers() {
+        let registry = policy::ImageRegistry::default();
+        let event =
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"policy_denied\"}}\n\n";
+        let mut response = HttpResponse::new(200, HttpBody::from_bytes(event.to_vec()));
+        add_header(
+            &mut response.headers,
+            "x-gateway-request-id",
+            "late-request",
+        );
+        add_header(&mut response.headers, "content-type", "text/event-stream");
+        let mut response = annotate_policy_denial(response, &registry).await.unwrap();
+        registry.denials.record("late-request", quota_denial());
+        assert_eq!(response.status, 200);
+        let raw = read_body(&mut response.body, 64 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        let text = std::str::from_utf8(&raw).unwrap();
+        assert!(text.starts_with("event: error\n"));
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(data).unwrap()["error"],
+            quota_denial().body()["error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_or_declared_large_errors_are_forwarded_without_consuming_the_body() {
+        for (name, value) in [("content-encoding", "gzip"), ("content-length", "100000")] {
+            let registry = policy::ImageRegistry::default();
+            registry.denials.record("own-request", quota_denial());
+            let raw = b"opaque body from another layer";
+            let mut response = HttpResponse::new(403, HttpBody::from_bytes(raw.to_vec()));
+            add_header(&mut response.headers, "x-gateway-request-id", "own-request");
+            add_header(&mut response.headers, name, value);
+            let mut response = annotate_policy_denial(response, &registry).await.unwrap();
+            assert_eq!(response.status, 403);
+            assert_eq!(header_value(&response.headers, name), Some(value));
+            assert_eq!(
+                read_body(&mut response.body, 64 * 1024)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                raw
+            );
+            assert!(registry.denials.remove("own-request").is_none());
+        }
     }
 
     #[test]
