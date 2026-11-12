@@ -395,6 +395,9 @@ async fn annotate_policy_denial(
         return Ok(response);
     }
     if response.status != 403 {
+        if let Some(id) = header_value(&response.headers, "x-gateway-request-id") {
+            registry.denials.remove(id);
+        }
         return Ok(response);
     }
     // 只使用宿主签发的模型请求 ID，不使用客户端头或上游请求 ID 进行关联。
@@ -807,6 +810,36 @@ mod tests {
             "policy_denied"
         );
         assert!(registry.denials.remove("own-request").is_some());
+    }
+
+    #[tokio::test]
+    async fn partial_quota_filtering_is_distinguished_from_all_accounts_exhausted() {
+        let registry = policy::ImageRegistry::default();
+        let denial = policy_error::Denial {
+            kind: policy_error::DenialKind::QuotaFiltered,
+            scoped_candidate_count: 3,
+            ..quota_denial()
+        };
+        registry.denials.record("own-request", denial.clone());
+        let mut response =
+            annotate_policy_denial(denied_response("own-request", "policy_denied"), &registry)
+                .await
+                .unwrap();
+        assert_eq!(response.status, 403);
+        let raw = read_body(&mut response.body, 64 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&raw).unwrap(),
+            denial.body()
+        );
+        assert!(
+            denial.body()["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 candidate(s) remained")
+        );
     }
 
     #[tokio::test]

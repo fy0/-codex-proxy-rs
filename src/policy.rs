@@ -15,6 +15,7 @@ use gateway_plugin_sdk::{
     },
     client::{HostClient, TypedCall, TypedReply},
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 const TTL: Duration = Duration::from_secs(12 * 60);
@@ -72,41 +73,33 @@ impl ImageRegistry {
 
 /// 从协议语义识别实际生图操作，避免客户端私有 header 伪造。
 pub fn image_intent(operation: &str, body: &[u8]) -> Option<String> {
-    if body.len() > 4 * 1024 * 1024 {
-        // 大正文中若存在生图工具声明而没有内部校验标记，
-        // 不应静默委托普通对话调度。保守拒绝而不是漏拦。
-        let image_tool = b"\"image_generation\"";
-        if operation == "generate_image"
-            || body
-                .windows(image_tool.len())
-                .any(|window| window == image_tool)
-        {
-            return Some("__unverified_image_intent__".to_owned());
-        }
-        return None;
+    // 仅解析路由相关字段，其余字段由 serde 跳过，不复制大型 input 或图片。
+    // 不能对正文做字符串搜索：代码片段中的工具名称不是实际工具声明。
+    #[derive(Deserialize)]
+    struct IntentTool {
+        #[serde(rename = "type")]
+        kind: String,
+        model: Option<String>,
     }
-    let payload: Value = serde_json::from_slice(body).ok()?;
+    #[derive(Deserialize)]
+    struct IntentBody {
+        model: Option<String>,
+        tools: Option<Vec<IntentTool>>,
+        tool_choice: Option<Value>,
+    }
+    let payload: IntentBody = serde_json::from_slice(body).ok()?;
     if operation == "generate_image" {
-        return payload
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| Some("gpt-image-1".to_owned()));
+        return payload.model.or_else(|| Some("gpt-image-1".to_owned()));
     }
     // 显式关闭工具的普通对话不能被可用工具清单误判成生图请求。
-    if payload.get("tool_choice").and_then(Value::as_str) == Some("none") {
+    if payload.tool_choice.as_ref().and_then(Value::as_str) == Some("none") {
         return None;
     }
-    let tools = payload.get("tools")?.as_array()?;
-    tools
-        .iter()
-        .find(|t| t.get("type").and_then(Value::as_str) == Some("image_generation"))
-        .map(|tool| {
-            tool.get("model")
-                .and_then(Value::as_str)
-                .unwrap_or("gpt-image-2")
-                .to_owned()
-        })
+    payload
+        .tools?
+        .into_iter()
+        .find(|tool| tool.kind == "image_generation")
+        .map(|tool| tool.model.unwrap_or_else(|| "gpt-image-2".to_owned()))
 }
 
 async fn group_accounts(
@@ -297,12 +290,13 @@ mod tests {
         );
         assert_eq!(image_intent("generate", br#"{"model":"gpt-6"}"#), None);
         registry.mark("request-1", "key-1", "gpt-image-2");
-        let mut large_image = Vec::with_capacity(4 * 1024 * 1024 + 64);
-        large_image.extend_from_slice(br#"{"tools":[{"type":"image_generation"}],"input":""#);
-        large_image.resize(4 * 1024 * 1024 + 5, b'a');
+        let large_image = serde_json::to_vec(&serde_json::json!({
+            "tools":[{"type":"image_generation"}],"input":"a".repeat(4 * 1024 * 1024 + 5)
+        }))
+        .unwrap();
         assert_eq!(
             image_intent("generate", &large_image),
-            Some("__unverified_image_intent__".to_owned())
+            Some("gpt-image-2".to_owned())
         );
         assert_eq!(
             registry.get("request-1").unwrap().image_model,

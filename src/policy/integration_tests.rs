@@ -167,6 +167,9 @@ impl Host {
                     params,
                 } => {
                     assert_eq!(parent_id, id);
+                    assert_eq!(params, json!({}));
+                    // 数据回调的查询与结果在二进制载荷内，控制字段必须为空。
+                    let params: Value = serde_json::from_slice(&frame.payload).unwrap();
                     let result = match method.as_str() {
                         QUOTA_DETAILS => {
                             let account = params["account_id"].as_str().unwrap();
@@ -185,16 +188,19 @@ impl Host {
                         ),
                         other => panic!("unexpected callback: {other}"),
                     };
-                    self.send(Frame::control(match result {
-                        Ok(result) => Message::Result {
-                            id: callback,
-                            result,
+                    self.send(match result {
+                        Ok(result) => Frame {
+                            message: Message::Result {
+                                id: callback,
+                                result: json!({}),
+                            },
+                            payload: serde_json::to_vec(&result).unwrap(),
                         },
-                        Err(error) => Message::Error {
+                        Err(error) => Frame::control(Message::Error {
                             id: callback,
                             error,
-                        },
-                    }))
+                        }),
+                    })
                     .await;
                 }
                 Message::Result {
@@ -256,6 +262,15 @@ async fn one_accounts_limit_never_denies_other_accounts_or_persists_a_model_ban(
         host.registry.denials.remove("r1").unwrap().code(),
         "cpr_quota_guard_filtered_policy_denied"
     );
+    assert_eq!(
+        host.schedule("only-exhausted", "gpt-6.1-sol", &["a"]).await,
+        json!({"decision":"reject"})
+    );
+    assert_eq!(
+        host.schedule("after-rejection", "gpt-6.1-sol", &["b", "c"])
+            .await,
+        json!({"decision":"delegate"})
+    );
     host.quota("a", 10.0);
     assert_eq!(
         host.schedule("r4", "gpt-6.1-sol", &["a", "b", "c"]).await,
@@ -315,4 +330,25 @@ fn declaring_an_explicitly_disabled_image_tool_does_not_require_image_accounts()
         ),
         Some("gpt-image-2".into())
     );
+}
+
+#[test]
+fn large_text_and_disabled_tools_are_not_misclassified_by_literal_tool_names() {
+    let input = format!(
+        "{} example: \"image_generation\"",
+        "a".repeat(4 * 1024 * 1024)
+    );
+    for extra in [
+        json!({}),
+        json!({"tools":[{"type":"image_generation"}],"tool_choice":"none"}),
+    ] {
+        let mut body = json!({"model":"gpt-6.1-sol","input":input});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            image_intent("generate", &serde_json::to_vec(&body).unwrap()),
+            None
+        );
+    }
 }

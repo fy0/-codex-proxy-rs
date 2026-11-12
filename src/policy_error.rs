@@ -1,4 +1,4 @@
-//! 只为本实例实际拒绝的请求补充原因，不把宿主其他策略错误归因于额度保护。
+//! 以本实例的拒绝或过滤事实补充诊断，区分额度耗尽与宿主后续策略拒绝。
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -118,6 +118,12 @@ pub struct SseFilter {
     passthrough: bool,
 }
 
+impl Drop for SseFilter {
+    fn drop(&mut self) {
+        self.registry.remove(&self.request_id);
+    }
+}
+
 impl SseFilter {
     pub fn new(registry: DenialRegistry, request_id: String) -> Self {
         Self {
@@ -133,12 +139,14 @@ impl SseFilter {
             return Some(bytes);
         }
         let Some(denial) = self.registry.get(&self.request_id) else {
-            return Some(bytes);
+            self.pending.extend(bytes);
+            return Some(std::mem::take(&mut self.pending));
         };
         self.pending.extend(bytes);
         // 调度错误事件很小；异常大事件不继续缓存或改写。
         if self.pending.len() > 64 * 1024 {
             self.passthrough = true;
+            self.registry.remove(&self.request_id);
             return Some(std::mem::take(&mut self.pending));
         }
         let mut output = Vec::new();
@@ -160,16 +168,15 @@ impl SseFilter {
 }
 
 fn event_end(bytes: &[u8]) -> Option<usize> {
-    bytes
+    let lf = bytes
         .windows(2)
         .position(|part| part == b"\n\n")
-        .map(|i| i + 2)
-        .or_else(|| {
-            bytes
-                .windows(4)
-                .position(|part| part == b"\r\n\r\n")
-                .map(|i| i + 4)
-        })
+        .map(|i| i + 2);
+    let crlf = bytes
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .map(|i| i + 4);
+    lf.into_iter().chain(crlf).min()
 }
 
 fn rewrite_event(event: &[u8], denial: &Denial) -> Option<Vec<u8>> {
